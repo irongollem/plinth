@@ -22,6 +22,21 @@ pub fn get_compression_type() -> Result<CompressionType, AppError> {
     }
 }
 
+pub fn get_extension_for_compression_type() -> String {
+    let compression_type_result = get_compression_type();
+
+    match compression_type_result {
+        Ok(compression_type) => match compression_type {
+            CompressionType::SevenZip => "7z",
+            CompressionType::Zip => "zip",
+            CompressionType::TarGz => "tar.gz",
+            CompressionType::TarXz => "tar.xz",
+        }
+        .to_string(),
+        Err(_) => "zip".to_string(), // Default to zip if settings access fails
+    }
+}
+
 pub fn get_chunk_size() -> Result<Option<u32>, AppError> {
     let chunk_size = {
         SETTINGS_CACHE
@@ -62,7 +77,7 @@ pub fn compress_dir(
     source_dir: &Path,
     target_path: &Path,
     app_handle: &AppHandle,
-) -> Result<(), AppError> {
+) -> Result<Vec<PathBuf>, AppError> {
     let binary_path = get_7zip_path(app_handle)?;
 
     if !binary_path.exists() {
@@ -195,10 +210,29 @@ pub fn compress_dir(
         }),
     )?;
 
-    // Clean up source directory
-    fs::remove_dir_all(source_dir)?;
+    // Check if all files are created before deleting
+    let mut created_files = Vec::new();
 
-    Ok(())
+    if target_path.exists() {
+        created_files.push(target_path.to_path_buf());
+    }
+
+    let parent_dir = target_path.parent().unwrap_or_else(|| Path::new(""));
+    let base_name = target_path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("");
+
+    for i in 1..1000 {
+        let chunk_path = parent_dir.join(format!("{}.{:03}", base_name, i));
+        if chunk_path.exists() {
+            created_files.push(chunk_path);
+        } else {
+            break;
+        }
+    }
+
+    Ok(created_files)
 }
 
 fn parse_percentage(line: &str) -> Option<u8> {

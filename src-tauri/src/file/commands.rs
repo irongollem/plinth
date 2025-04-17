@@ -109,31 +109,37 @@ pub async fn create_release(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn finalize_release(app_handle: AppHandle, release_name: String) -> Result<(), AppError> {
-    let scratch_dir = storage::get_scratch_path(&app_handle)?;
+pub async fn finalize_release(
+    app_handle: AppHandle,
+    release_dir: String,
+) -> Result<Vec<String>, AppError> {
+    let release_dir_path = PathBuf::from(release_dir);
 
-    let entries = fs::read_dir(&scratch_dir)?;
-    let release_dir = entries
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
-        .find(|e| e.file_name().to_string_lossy().contains(&release_name))
-        .ok_or_else(|| AppError::NotFoundError(format!("Release '{}' not found", release_name)))?
-        .path();
+    if !release_dir_path.exists() {
+        return Err(AppError::NotFoundError(format!(
+            "Release directory '{}' not found",
+            release_dir_path.display()
+        )));
+    }
 
-    let target_dir = storage::get_target_path(&app_handle)?;
-
-    let release_dir_name = release_dir
+    let release_dir_name = release_dir_path
         .file_name()
         .ok_or_else(|| AppError::ConfigError("Invalid release directory name".to_string()))?
         .to_string_lossy()
         .to_owned();
 
-    let archive_path = target_dir.join(format!("{}.zip", release_dir_name));
+    let target_dir_path = storage::get_target_path(&app_handle)?;
+    let extension = compressors::get_extension_for_compression_type();
+    let archive_path = target_dir_path.join(format!("{}.{}", release_dir_name, extension));
 
-    compressors::compress_dir(&release_dir, &archive_path, &app_handle)?;
+    let created_files = compressors::compress_dir(&release_dir_path, &archive_path, &app_handle)?;
 
-    fs::remove_dir_all(&release_dir)
+    fs::remove_dir_all(&release_dir_path)
         .map_err(|e| AppError::IoError(format!("Failed to clean up release directory: {}", e)))?;
 
-    Ok(())
+    let file_paths = created_files
+        .iter()
+        .map(|file| file.to_string_lossy().into_owned())
+        .collect();
+    Ok(file_paths)
 }
