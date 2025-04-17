@@ -17,9 +17,6 @@ const emit = defineEmits<{
 }>();
 
 const { selectFiles, selectDirectory, formatFileSize } = useFileSelect();
-// const selectedFiles = ref<SelectedFile[]>([]);
-
-
 
 const fileCountText = computed(() => {
   if (props.dirMode || !props.modelValue?.length) return "";
