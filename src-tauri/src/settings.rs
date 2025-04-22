@@ -44,8 +44,6 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         .and_then(|s| match s.as_str() {
             "Zip" => Some(CompressionType::Zip),
             "7zip" => Some(CompressionType::SevenZip),
-            "TarGz" => Some(CompressionType::TarGz),
-            "TarXz" => Some(CompressionType::TarXz),
             _ => None,
         });
 
@@ -97,8 +95,6 @@ pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(
         let compression_str = match compression {
             CompressionType::Zip => "Zip",
             CompressionType::SevenZip => "7zip",
-            CompressionType::TarGz => "TarGz",
-            CompressionType::TarXz => "TarXz",
         };
         store.set("compression_type", compression_str);
     }

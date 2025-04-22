@@ -29,8 +29,6 @@ pub fn get_extension_for_compression_type() -> String {
         Ok(compression_type) => match compression_type {
             CompressionType::SevenZip => "7z",
             CompressionType::Zip => "zip",
-            CompressionType::TarGz => "tar.gz",
-            CompressionType::TarXz => "tar.xz",
         }
         .to_string(),
         Err(_) => "zip".to_string(), // Default to zip if settings access fails
@@ -113,12 +111,6 @@ pub fn compress_dir(
         }
         CompressionType::SevenZip => {
             command.arg("-t7z");
-        }
-        CompressionType::TarGz => {
-            command.arg("-tgzip");
-        }
-        CompressionType::TarXz => {
-            command.arg("-txz");
         }
     }
 

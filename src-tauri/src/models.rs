@@ -14,8 +14,6 @@ pub struct Settings {
 pub enum CompressionType {
     SevenZip,
     Zip,
-    TarGz,
-    TarXz,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

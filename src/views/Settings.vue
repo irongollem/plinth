@@ -49,7 +49,10 @@ import View from "../components/View.vue";
 import FileSelect from "../components/FileSelect.vue";
 import { ref, onMounted, watch } from "vue";
 import { commands, type Settings, type CompressionType } from "../bindings.ts";
-// Settings state
+import { useToastStore } from "../stores/toastStore";
+
+const toastStore = useToastStore();
+
 const settings = ref<Settings>({
   scratch_dir: null,
   target_dir: null,
@@ -69,37 +72,45 @@ watch(
 // Load settings on component mount
 onMounted(async () => {
   try {
-    console.log("before: ", settings.value);
     const savedSettings = await commands.getSettings();
     if (savedSettings.status === "ok") {
       savedSettings.data.compression_type =
         savedSettings.data.compression_type || "Zip";
       settings.value = savedSettings.data;
-      console.log("saved value", settings.value);
+      toastStore.addToast("Settings loaded successfully", "success", 3000);
+    } else {
+      toastStore.addToast(
+        `Failed to load settings: ${savedSettings.error}`,
+        "error",
+        0,
+      );
     }
   } catch (error) {
     console.error("Failed to load settings:", error);
+    toastStore.addToast(`Failed to load settings: ${error}`, "error", 0);
   }
 });
 
 // Save settings to backend
 const saveSettings = async () => {
   try {
-    console.log("saving settings: ", settings.value);
     const result = await commands.setSettings(settings.value);
+    if (result.status === "ok") {
+      toastStore.addToast("Settings saved successfully", "success", 3000);
+    }
     if (result.status === "error") {
       console.error("Failed to save settings:", result.error);
+      toastStore.addToast(
+        `Failed to save settings: ${result.error}`,
+        "error",
+        0,
+      );
     }
   } catch (error) {
     console.error("Error saving settings:", error);
+    toastStore.addToast(`Error saving settings: ${error}`, "error", 0);
   }
 };
 
-// Available compression types
-const compressionTypes: CompressionType[] = [
-  "Zip",
-  "SevenZip",
-  "TarGz",
-  "TarXz",
-];
+const compressionTypes: CompressionType[] = ["Zip", "SevenZip"];
 </script>
