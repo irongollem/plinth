@@ -2,29 +2,33 @@
 
 ## Doing
 
+- [ ] Remove 7z binaries as these trigger another flow through mac Gatekeeper
+- [ ] use zip crate for distribution (MVP)
+
 ## To Do
 
 - [ ] ARCHITECTURE: Currently we are only storing the paths in the json, but in doing so also reduce the info available in the UI. The data in the UI should be complete. From creation dont throw away the data too soon and when revisiting compose the UI info from the json PLUS the underlying jsons.
 - [ ] Add checkboxes to release fields to store the field data permanently like settings (so creators dont have to type in their own name every time for example)
-- [ ] tags should be lowercase always and using \_ for spaces
+- [ ] use TAR+Zstd for local compression and cataloging
 
 ### Modular Package Strategy Implementation
 
 - [ ] Design `.3dpak` file format specification (JSON structure with version, checksums, components)
 - [ ] Create a modular compression system that packages each group separately
-- [ ] Implement file registry to associate `.3dpak` files with the application
-- [ ] Add "Export as .stlmeta" option in the release finalization
+- [x] Implement file registry to associate `.3dpak` files with the application
+- [ ] Add "Export as .3dpak" option in the release finalization
 - [ ] Create update detection system that compares local files with metadata checksums
 - [ ] Add selective download functionality to only retrieve changed/new components
 - [ ] Design reconstruction tool UI for end users to assemble downloaded components
-- [ ] Implement preview generation for .stlmeta files (thumbnail/icon)
+- [ ] Implement preview generation for .3dpak files (thumbnail/icon)
 - [ ] Create documentation for creators explaining the modular release strategy
 - [ ] Add bandwidth estimation and progress indicators for partial downloads
 - [ ] Implement integrity verification for downloaded components
-- [ ] Create a manifest generator that builds the .stlmeta file from component ZIPs
+- [ ] Create a manifest generator that builds the .3dpak file from component ZIPs
 
 ## Done
 
+- [x] tags should be lowercase always and using \_ for spaces
 - [x] Replace finalize call release dir. Now uses the one written in the JSON which isnt correct (check that too)
 - [x] add model list to release for fixing data or just overviewing
 - [x] remove tar options and only allow chunking and local total release compression for 7z
