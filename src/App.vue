@@ -3,11 +3,12 @@ import AddSTL from "./views/AddSTL.vue";
 import CreateRelease from "./views/CreateRelease.vue";
 import Settings from "./views/Settings.vue";
 import ToastContainer from "./components/ToastContainer.vue";
+import { use3DPackageHandler } from "./composables/use3DPackageHandler";
 import { useReleasesStore } from "./stores/releasesStore";
-
 import Finalize from "./views/Finalize.vue";
-
 import { computed } from "vue";
+
+use3DPackageHandler();
 const releasesStore = useReleasesStore();
 
 const currentTabComponent = computed(() => {
