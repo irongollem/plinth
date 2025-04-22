@@ -3,13 +3,15 @@
   <View>
     <template #left>
       <h1 class="text-xl font-bold">Settings</h1>
-      <form class="mt-4 space-y-6">
+      <form class="mt-4 space-y-6" @change="debouncedSave">
         <FileSelect
           id="scratch_dir"
           label="Temporary Files Directory"
           dir-mode
           v-model="settings.scratch_dir"
           tooltip="Your files will be temporarily stored here before being compressed."
+          @blur="debouncedSave"
+          @keydown.enter="debouncedSave"
         />
 
         <FileSelect
@@ -18,26 +20,40 @@
           dir-mode
           v-model="settings.target_dir"
           tooltip="Your compressed files will be saved here."
+          @blur="debouncedSave"
+          @keydown.enter="debouncedSave"
         />
 
-        <!-- Compression Type -->
         <div class="form-control">
           <label class="floating-label">
             <span class="label">Compression Type</span>
           </label>
-          <div class="join">
+          <div class="join mb-2">
             <input
                 type="radio"
-                v-for="type in compressionTypes"
-                :key="type"
+                v-for="option in compressionOptions"
+                :key="option.value"
                 class="btn join-item"
-                :class="{'btn-active btn-primary': settings.compression_type === type }"
-                :aria-label="type === 'Zip' ? 'ZIP' : type === 'SevenZip' ? '7-Zip' : type === 'TarGz' ? 'TAR.GZ' : 'TAR.XZ'"
+                :class="{'btn-active btn-primary': settings.compression_type === option.value }"
+                :aria-label="option.label"
                 name="compression_type"
-                :value="type"
+                :value="option.value"
                 v-model="settings.compression_type"
+                @click="debouncedSave"
             />
           </div>
+
+          <NumberInput
+            v-if="settings.compression_type === 'SevenZip'"
+            id="chunk-size"
+            label="Chunk Size (MB) (0 will create a single file)"
+            :min="0"
+            :step="10"
+            v-model="settings.chunk_size"
+            @blur="debouncedSave"
+            @keydown.enter="debouncedSave"
+          />
+
         </div>
       </form>
     </template>
@@ -45,10 +61,11 @@
 </template>
 
 <script setup lang="ts">
+import { ref, onMounted } from "vue";
+import { commands, type Settings } from "../bindings.ts";
 import View from "../components/View.vue";
 import FileSelect from "../components/FileSelect.vue";
-import { ref, onMounted, watch } from "vue";
-import { commands, type Settings, type CompressionType } from "../bindings.ts";
+import NumberInput from "../components/NumberInput.vue";
 import { useToastStore } from "../stores/toastStore";
 
 const toastStore = useToastStore();
@@ -60,16 +77,14 @@ const settings = ref<Settings>({
   chunk_size: null,
 });
 
-watch(
-  settings,
-  async () => {
-    console.log("triggered once again!");
-    await saveSettings();
-  },
-  { deep: true },
-);
+let saveTimeout: number | null = null;
+const debouncedSave = () => {
+  if (saveTimeout) clearTimeout(saveTimeout);
+  saveTimeout = setTimeout(() => {
+    saveSettings();
+  }, 500) as unknown as number;
+};
 
-// Load settings on component mount
 onMounted(async () => {
   try {
     const savedSettings = await commands.getSettings();
@@ -91,7 +106,6 @@ onMounted(async () => {
   }
 });
 
-// Save settings to backend
 const saveSettings = async () => {
   try {
     const result = await commands.setSettings(settings.value);
@@ -112,5 +126,18 @@ const saveSettings = async () => {
   }
 };
 
-const compressionTypes: CompressionType[] = ["Zip", "SevenZip"];
+const compressionOptions = [
+  {
+    value: "Zip",
+    label: "ZIP",
+    description:
+      "Standard compression, best compatibility, models compressed per group",
+  },
+  {
+    value: "SevenZip",
+    label: "7-Zip",
+    description:
+      "Better compression ratio, requires 7-Zip supported tools to open, compresses to a single (chuncked) archive",
+  },
+] as const;
 </script>
