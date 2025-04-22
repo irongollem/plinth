@@ -9,7 +9,11 @@
         @input="$emit('update:modelValue', ($event.target as HTMLInputElement).value)"
         :placeholder="placeholder"
         :required="required"
+        :list="options && options.length > 0 ? `${id}-datalist` : undefined"
      />
+     <datalist v-if="options && options.length > 0" :id="`${id}-datalist`">
+       <option v-for="option in options" :key="option" :value="option" />
+     </datalist>
   </label>
 </template>
 
@@ -20,6 +24,7 @@ defineProps<{
   placeholder?: string;
   modelValue?: string | null;
   required?: boolean;
+  options?: string[];
 }>();
 
 defineEmits<{

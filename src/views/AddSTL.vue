@@ -12,7 +12,13 @@
 
         <TextArea id="description" placeholder="Enter the description (Optional)..." label="Description" v-model="model.description" />
 
-      <TextInput id="group" label="Group" placeholder="Enter group name (Optional)..." v-model="model.group" />
+      <TextInput
+        id="group"
+        label="Group"
+        placeholder="Enter group name (Optional)..."
+        v-model="model.group"
+        :options="groups"
+      />
 
         <TagInput id="tags" v-model="model.tags" label="Tags" placeholder="Write tags here..." />
 
@@ -74,7 +80,7 @@ import type { SelectedFile } from "../composables/useFileSelect";
 import FileSelect from "../components/FileSelect.vue";
 
 const toastStore = useToastStore();
-const releasesStore = useReleasesStore();
+const { groups, releaseDir, addModel } = useReleasesStore();
 const model: Ref<StlModel> = ref({
   id: null,
   name: "",
@@ -101,19 +107,19 @@ const saveModelData = async () => {
   }
 
   try {
-    if (!releasesStore.releaseDir) {
+    if (!releaseDir) {
       throw new Error("Release directory name is missing");
     }
 
     const savedModelTupleResult = await commands.addModel(
       model.value,
-      releasesStore.releaseDir,
+      releaseDir,
       modelFiles.value.map((f) => f.path),
       images.value.map((f) => f.path),
     );
     if (savedModelTupleResult.status === "ok") {
       toastStore.addToast("Model saved successfully", "success");
-      releasesStore.addModel(...savedModelTupleResult.data);
+      addModel(...savedModelTupleResult.data);
       clearModel();
     } else {
       toastStore.addToast(

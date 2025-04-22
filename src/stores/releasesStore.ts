@@ -15,7 +15,6 @@ export const useReleasesStore = defineStore("releases", () => {
   const models = ref<StlModel[]>([]);
   const releaseDir = ref<string | undefined>();
   const activeTab = ref<Tab>("release");
-  const groups = ref<Set<string>>(new Set());
 
   const setActiveTab = (tab: Tab) => {
     activeTab.value = tab;
@@ -39,9 +38,6 @@ export const useReleasesStore = defineStore("releases", () => {
     }
 
     models.value.push(model);
-    if (model.group) {
-      groups.value.add(model.group);
-    }
     release.value.model_references.push(<ModelReference>{
       id: model.id,
       location: <ModelLocation>{ Local: path },
@@ -76,9 +72,16 @@ export const useReleasesStore = defineStore("releases", () => {
   const clearRelease = () => {
     if (!release.value) return;
     release.value = undefined;
-    groups.value.clear();
     clearModels();
   };
+
+  const groups = computed(() =>
+    Array.from(
+      new Set<string>(
+        models.value.map((model) => model.group).filter(Boolean) as string[],
+      ),
+    ),
+  );
 
   return {
     activeTab,
