@@ -2,7 +2,7 @@
 <button
     class="btn btn-success"
     @click="finalizeRelease"
-    :disabled="!releasesStore.modelCount"
+    :disabled="!modelCount"
 >
     Finalize & Export Release
 </button>
@@ -14,15 +14,14 @@ import { commands } from "../bindings.ts";
 import { useReleasesStore } from "../stores/releasesStore";
 
 const toastStore = useToastStore();
-const releasesStore = useReleasesStore();
+const { release, clearRelease, modelCount } = useReleasesStore();
 
 const finalizeRelease = async () => {
-  if (releasesStore.release) {
+  if (release) {
     try {
-      const result = await commands.finalizeRelease(
-        releasesStore.release.release_dir,
-      );
+      const result = await commands.finalizeRelease(release.release_dir);
       if (result.status === "ok") {
+        clearRelease();
         toastStore.addToast(
           "Release finalized and exported successfully",
           "success",
