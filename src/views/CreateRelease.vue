@@ -32,7 +32,6 @@
           placeholder="Enter the description (Optional)..."
           v-model="release.description"
         />
-        <ModelOverview v-if="release.model_references.length > 0" />
         <FileSelect
           id="extraFiles"
           label="Additional content (licence, pdf's etc.)"
@@ -78,7 +77,6 @@ import MonthYearInput from "../components/MonthYearInput.vue";
 import TextArea from "../components/TextArea.vue";
 import View from "../components/View.vue";
 import ImageSelect from "../components/ImageSelect.vue";
-import ModelOverview from "../components/ModelOverview.vue";
 import FileSelect from "../components/FileSelect.vue";
 import { useToastStore } from "../stores/toastStore.ts";
 import { useReleasesStore } from "../stores/releasesStore.ts";

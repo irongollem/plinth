@@ -1,25 +1,31 @@
 <template>
-<button
-    class="btn btn-success"
-    @click="finalizeRelease"
-    :disabled="!modelCount"
->
-    Finalize & Export Release
-</button>
+<View>
+  <template #left>
+  <form @submit.prevent="finalizeRelease">
+    <ModelOverview v-if="release && release.model_references.length > 0" />
+    <button class="btn btn-success" :disabled="!modelCount">
+        Finalize & Export Release
+    </button>
+    {{ releaseDir }}
+  </form>
+  </template>
+</View>
 </template>
 
 <script setup lang="ts">
 import { useToastStore } from "../stores/toastStore.ts";
 import { commands } from "../bindings.ts";
 import { useReleasesStore } from "../stores/releasesStore";
+import View from "../components/View.vue";
+import ModelOverview from "../components/ModelOverview.vue";
 
 const toastStore = useToastStore();
-const { release, clearRelease, modelCount } = useReleasesStore();
+const { release, clearRelease, modelCount, releaseDir } = useReleasesStore();
 
 const finalizeRelease = async () => {
-  if (release) {
+  if (releaseDir) {
     try {
-      const result = await commands.finalizeRelease(release.release_dir);
+      const result = await commands.finalizeRelease(releaseDir);
       if (result.status === "ok") {
         clearRelease();
         toastStore.addToast(

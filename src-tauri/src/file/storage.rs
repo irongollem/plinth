@@ -79,6 +79,28 @@ pub fn get_destination_folder(model_folder: &Path, file_path: &Path) -> PathBuf 
             fs::create_dir_all(&subfolder).unwrap_or_default();
             subfolder
         }
+        "stl" => {
+            let filename = file_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+
+            // Use a regex or precise matching for supported files
+            let is_presupported = filename
+                .split(|c: char| c == '-' || c == '_' || c == '.')
+                .any(|part| {
+                    part == "sup" || part == "supported" || part == "presupported" || part == "ps"
+                });
+
+            if is_presupported {
+                let subfolder = model_folder.join("supported");
+                fs::create_dir_all(&subfolder).unwrap_or_default();
+                subfolder
+            } else {
+                model_folder.to_path_buf()
+            }
+        }
         _ => model_folder.to_path_buf(),
     }
 }

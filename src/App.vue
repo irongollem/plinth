@@ -28,77 +28,82 @@ const currentTabComponent = computed(() => {
 </script>
 
 <template>
-    <div class="h-screen flex flex-col">
-        <!-- Tab headers -->
-        <div class="tabs tabs-lift">
-            <input
-                type="radio"
-                name="release"
-                class="tab"
-                :class="{
-                    'tab-active': releasesStore.activeTab === 'settings',
-                }"
-                :checked="releasesStore.activeTab === 'settings'"
-                @change="releasesStore.setActiveTab('settings')"
-                aria-label="⚙️"
-            />
+  <div class="h-screen flex flex-col">
+    <!-- Tab headers -->
+    <div class="tabs tabs-lift">
+      <input
+        type="radio"
+        name="release"
+        class="tab"
+        :class="{
+          'tab-active': releasesStore.activeTab === 'settings',
+        }"
+        :checked="releasesStore.activeTab === 'settings'"
+        @change="releasesStore.setActiveTab('settings')"
+        aria-label="⚙️"
+      />
 
-            <label
-                class="tab"
-                :class="{ 'tab-active': releasesStore.activeTab === 'release' }"
-            >
-                <span class="tab-text mr-2">Release</span>
-                <span
-                    class="indicator-item indicator-middle badge badge-primary"
-                    >{{ releasesStore.modelCount }}</span
-                >
-                <input
-                    type="radio"
-                    name="release"
-                    :checked="releasesStore.activeTab === 'release'"
-                    @change="releasesStore.setActiveTab('release')"
-                    aria-label="Release"
-                />
-            </label>
+      <input
+        type="radio"
+        name="release"
+        class="tab"
+        :class="{ 'tab-active': releasesStore.activeTab === 'release' }"
+        :checked="releasesStore.activeTab === 'release'"
+        @change="releasesStore.setActiveTab('release')"
+        aria-label="Release"
+      />
 
-            <input
-                type="radio"
-                name="release"
-                class="tab"
-                :class="{ 'tab-active': releasesStore.activeTab === 'addStl' }"
-                :checked="releasesStore.activeTab === 'addStl'"
-                @change="releasesStore.setActiveTab('addStl')"
-                aria-label="Add STL"
-                :disabled="!releasesStore.releaseExists"
-            />
+      <input
+        type="radio"
+        name="release"
+        class="tab"
+        :class="{ 'tab-active': releasesStore.activeTab === 'addStl' }"
+        :checked="releasesStore.activeTab === 'addStl'"
+        @change="releasesStore.setActiveTab('addStl')"
+        aria-label="Add STL"
+        :disabled="!releasesStore.releaseExists"
+      />
 
-            <input
-                type="radio"
-                name="finalize"
-                class="tab"
-                :class="{
-                    'tab-active': releasesStore.activeTab === 'finalize',
-                }"
-                :checked="releasesStore.activeTab === 'finalize'"
-                @change="releasesStore.setActiveTab('finalize')"
-                aria-label="Finalize"
-                :disabled="!releasesStore.releaseExists || !releasesStore.models.length"
-            />
-        </div>
-
-        <div class="h-[calc(100vh-2rem)] overflow-hidden pb-4">
-          <div class="h-[calc(100%-1rem)] bg-gray-800 rounded-b-2xl overflow-hidden">
-                          <KeepAlive>
-                              <component
-                                  :is="currentTabComponent"
-                                  class="h-full"
-                              />
-                          </KeepAlive>
-                      </div>
-        </div>
+      <label
+        class="tab"
+        :class="{
+          'tab-active': releasesStore.activeTab === 'finalize',
+          'tab-disabled':
+            !releasesStore.releaseExists || !releasesStore.models.length,
+        }"
+      >
+        <span class="tab-text mr-2">Finalize</span>
+        <span
+          class="indicator-item indicator-middle badge badge-primary"
+          v-if="releasesStore.modelCount >= 0"
+        >
+          {{ releasesStore.modelCount }}
+        </span>
+        <input
+          type="radio"
+          name="release"
+          :checked="releasesStore.activeTab === 'finalize'"
+          @change="releasesStore.setActiveTab('finalize')"
+          aria-label="Finalize"
+          :disabled="
+            !releasesStore.releaseExists || !releasesStore.models.length
+          "
+        />
+      </label>
     </div>
 
-    <ToastContainer />
+    <div class="h-[calc(100vh-2rem)] overflow-hidden pb-4">
+      <div
+        class="h-[calc(100%-1rem)] bg-gray-800 rounded-b-2xl overflow-hidden"
+      >
+        <KeepAlive>
+          <component :is="currentTabComponent" class="h-full" />
+        </KeepAlive>
+      </div>
+    </div>
+  </div>
+
+  <ToastContainer />
 </template>
 
 <style scoped>

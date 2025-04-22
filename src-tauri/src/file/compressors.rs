@@ -47,8 +47,13 @@ pub fn get_chunk_size() -> Result<Option<u32>, AppError> {
 }
 
 fn get_7zip_path<R: tauri::Runtime>(app_handle: &AppHandle<R>) -> Result<PathBuf, AppError> {
-    let resource_path = app_handle.path().resource_dir()?;
-
+    let resource_path = if cfg!(debug_assertions) {
+        // Development mode: Use the `src-tauri/resources` directory
+        std::env::current_dir()?.join("resources")
+    } else {
+        // Production mode: Use the bundled `resources` directory
+        app_handle.path().resource_dir()?
+    };
     #[cfg(target_os = "windows")]
     let binary_path = resource_path.join("win").join("7za.exe");
 
@@ -66,6 +71,13 @@ fn get_7zip_path<R: tauri::Runtime>(app_handle: &AppHandle<R>) -> Result<PathBuf
         let mut perms = metadata.permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&binary_path, perms)?;
+    }
+
+    if (!binary_path.exists()) {
+        return Err(AppError::FileProcessingError(format!(
+            "7-Zip binary not found at {:?}. Please ensure the application is properly installed.",
+            binary_path
+        )));
     }
 
     Ok(binary_path)
