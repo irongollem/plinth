@@ -3,29 +3,43 @@
     <label v-if="label" :for="id" class="floating-label">
       <span class="label-text">{{ label }}</span>
 
-    <div class="textarea w-full flex flex-wrap gap-2">
-      <div v-for="(tag, index) in modelValue" :key="index"
-           class="badge badge-primary">
-        {{ tag }}
-        <button type="button" @click="() => removeTag(index)"
-                class="btn btn-ghost btn-xs btn-circle">
-          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
-               class="w-3 h-3 stroke-current">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3"
-                  d="M6 18L18 6M6 6l12 12"></path>
-          </svg>
-        </button>
-      </div>
+      <div class="textarea w-full flex flex-wrap gap-2">
+        <div
+          v-for="(tag, index) in modelValue"
+          :key="index"
+          class="badge badge-primary"
+        >
+          {{ tag }}
+          <button
+            type="button"
+            @click="() => removeTag(index)"
+            class="btn btn-ghost btn-xs btn-circle"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              class="w-3 h-3 stroke-current"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="3"
+                d="M6 18L18 6M6 6l12 12"
+              ></path>
+            </svg>
+          </button>
+        </div>
 
-      <input
+        <input
           :id="id"
           v-model="inputValue"
           @keydown="handleKeydown"
           class="border-none outline-none focus:outline-none"
           type="text"
           :placeholder="modelValue.length ? '' : placeholder"
-      />
-    </div>
+        />
+      </div>
     </label>
   </div>
 </template>
@@ -47,7 +61,7 @@ const emit = defineEmits<{
 const inputValue = ref("");
 
 const addTag = () => {
-  const tag = inputValue.value.trim();
+  const tag = inputValue.value.trim().toLowerCase().replace(/\s+/g, "_");
   if (tag && !props.modelValue.includes(tag)) {
     emit("update:modelValue", [...props.modelValue, tag]);
   }
