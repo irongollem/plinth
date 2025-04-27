@@ -23,38 +23,6 @@
           @blur="debouncedSave"
           @keydown.enter="debouncedSave"
         />
-
-        <div class="form-control">
-          <label class="floating-label">
-            <span class="label">Compression Type</span>
-          </label>
-          <div class="join mb-2">
-            <input
-                type="radio"
-                v-for="option in compressionOptions"
-                :key="option.value"
-                class="btn join-item"
-                :class="{'btn-active btn-primary': settings.compression_type === option.value }"
-                :aria-label="option.label"
-                name="compression_type"
-                :value="option.value"
-                v-model="settings.compression_type"
-                @click="debouncedSave"
-            />
-          </div>
-
-          <NumberInput
-            v-if="settings.compression_type === 'SevenZip'"
-            id="chunk-size"
-            label="Chunk Size (MB) (0 will create a single file)"
-            :min="0"
-            :step="10"
-            v-model="settings.chunk_size"
-            @blur="debouncedSave"
-            @keydown.enter="debouncedSave"
-          />
-
-        </div>
       </form>
     </template>
   </View>
@@ -65,7 +33,6 @@ import { ref, onMounted } from "vue";
 import { commands, type Settings } from "../bindings.ts";
 import View from "../components/View.vue";
 import FileSelect from "../components/FileSelect.vue";
-import NumberInput from "../components/NumberInput.vue";
 import { useToastStore } from "../stores/toastStore";
 
 const toastStore = useToastStore();
@@ -125,19 +92,4 @@ const saveSettings = async () => {
     toastStore.addToast(`Error saving settings: ${error}`, "error", 0);
   }
 };
-
-const compressionOptions = [
-  {
-    value: "Zip",
-    label: "ZIP",
-    description:
-      "Standard compression, best compatibility, models compressed per group",
-  },
-  {
-    value: "SevenZip",
-    label: "7-Zip",
-    description:
-      "Better compression ratio, requires 7-Zip supported tools to open, compresses to a single (chuncked) archive",
-  },
-] as const;
 </script>
