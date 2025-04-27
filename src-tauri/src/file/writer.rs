@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf};
 
 use crate::{
     error::AppError,
-    models::{ModelLocation, ModelReference, Release, StlModel},
+    models::models::{ModelLocation, ModelReference, Release, StlModel},
 };
 
 pub fn write_json(json_string: String, path: PathBuf) -> Result<(), AppError> {

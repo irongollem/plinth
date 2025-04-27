@@ -1,10 +1,15 @@
 use crate::error::AppError;
-use crate::models::CompressionType;
+use crate::models::events::CompressionProgessEvent;
+use crate::models::models::CompressionType;
 use crate::settings::SETTINGS_CACHE;
-use std::fs;
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Emitter, Manager};
+use std::fs::{self, File};
+use std::io::{Read, Seek, Write};
+use std::path::Path;
+use tauri::AppHandle;
+use tauri_specta::Event;
+use walkdir::{DirEntry, WalkDir};
+use zip;
+use zip::write::SimpleFileOptions;
 
 pub fn get_compression_type() -> Result<CompressionType, AppError> {
     let compression_type = {
@@ -35,228 +40,116 @@ pub fn get_extension_for_compression_type() -> String {
     }
 }
 
-pub fn get_chunk_size() -> Result<Option<u32>, AppError> {
-    let chunk_size = {
-        SETTINGS_CACHE
-            .lock()
-            .map_err(|e| AppError::ConfigError(format!("{}", e)))?
-            .chunk_size
-            .clone()
-    };
-    Ok(chunk_size)
-}
-
-fn get_7zip_path<R: tauri::Runtime>(app_handle: &AppHandle<R>) -> Result<PathBuf, AppError> {
-    let resource_path = if cfg!(debug_assertions) {
-        // Development mode: Use the `src-tauri/resources` directory
-        std::env::current_dir()?.join("resources")
-    } else {
-        // Production mode: Use the bundled `resources` directory
-        app_handle.path().resource_dir()?
-    };
-    #[cfg(target_os = "windows")]
-    let binary_path = resource_path.join("win").join("7za.exe");
-
-    #[cfg(target_os = "macos")]
-    let binary_path = resource_path.join("macos").join("7zz");
-
-    #[cfg(target_os = "linux")]
-    let binary_path = resource_path.join("linux").join("7zz");
-
-    // Set executable permissions on Unix systems
-    #[cfg(not(target_os = "windows"))]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let metadata = fs::metadata(&binary_path)?;
-        let mut perms = metadata.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&binary_path, perms)?;
-    }
-
-    if (!binary_path.exists()) {
-        return Err(AppError::FileProcessingError(format!(
-            "7-Zip binary not found at {:?}. Please ensure the application is properly installed.",
-            binary_path
-        )));
-    }
-
-    Ok(binary_path)
-}
-
-pub fn compress_dir(
+pub fn compress_dir_with_progress(
     source_dir: &Path,
     target_path: &Path,
     app_handle: &AppHandle,
-) -> Result<Vec<PathBuf>, AppError> {
-    let binary_path = get_7zip_path(app_handle)?;
+) -> Result<(), AppError> {
+    let mut total_size: u32 = 0;
+    let mut total_files: u32 = 0;
 
-    if !binary_path.exists() {
-        return Err(AppError::FileProcessingError(format!(
-            "7-Zip binary not found at {:?}. Please ensure the application is properly installed.",
-            binary_path
-        )));
-    }
+    for entry in WalkDir::new(source_dir).into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_file() {
+            let file_size_bytes = entry
+                .metadata()
+                .map_err(|e| AppError::IoError(format!("File Metadata Error: {}", e)))?
+                .len();
 
-    // Count total files for progress reporting
-    let mut total_files = 0;
-    count_files_in_dir(source_dir, &mut total_files)?;
+            let file_size_mb = ((file_size_bytes / (1024 * 1024)) as u32).max(1);
 
-    // Build the command
-    let mut command = std::process::Command::new(&binary_path);
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
-
-    command
-        .arg("a") // Add files to archive
-        .arg("-mx=9") // Set compression level to maximum
-        .arg("-bs=o"); // Set output stream to stdout
-
-    let compression_type = get_compression_type()?;
-    // Set format based on compression type
-    match compression_type {
-        CompressionType::Zip => {
-            command.arg("-tzip");
-        }
-        CompressionType::SevenZip => {
-            command.arg("-t7z");
+            total_size += file_size_mb;
+            total_files += 1;
         }
     }
 
-    let chunk_size = get_chunk_size()?;
-    // Add split size parameter if needed
-    if let Some(size) = chunk_size {
-        if size > 0 {
-            command.arg(format!("-v{}m", size));
-        }
-    }
+    let file = fs::File::create(target_path)?;
+    let method = zip::CompressionMethod::Deflated;
 
-    command
-        .arg(target_path)
-        .arg(format!("{}/*", source_dir.to_string_lossy()));
+    let mut processed_size = 0;
+    let mut processed_files = 0;
+    let progress_cb = |file_size_mb: u32| {
+        processed_size += file_size_mb;
+        processed_files += 1;
+        let percent_size = (processed_size * 100) / total_size;
+        let percent_files = (processed_files * 100) / total_files;
 
-    let command_str = format!("{:?}", command);
-    let mut child = match command
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(e) => {
-            return Err(AppError::FileProcessingError(format!(
-                "Failed to start 7z process: {}. Command: {}",
-                e, command_str
-            )))
-        }
-    };
-
-    let mut percent = 0;
-    let stdout = if let Some(stdout) = child.stdout.take() {
-        stdout
-    } else {
-        return Err(AppError::FileProcessingError(
-            "Failed to get stdout".to_string(),
-        ));
-    };
-
-    let reader = BufReader::new(stdout);
-    let app = app_handle.clone();
-
-    for line_result in reader.lines() {
-        let line = match line_result {
-            Ok(line) => line,
-            Err(_) => continue,
+        let progress = CompressionProgessEvent {
+            processed_files,
+            total_files,
+            processed_size,
+            total_size,
+            percent_size,
+            percent_files,
         };
 
-        if let Some(new_percent) = parse_percentage(&line) {
-            if new_percent != percent {
-                percent = new_percent;
-                let processed = (total_files * percent as u32) / 100;
-                app.emit(
-                    "compression_progress",
-                    serde_json::json!({
-                        "processed": processed,
-                        "total": total_files,
-                        "percent": percent,
-                    }),
-                )?;
-            }
-        }
-    }
+        progress.emit(app_handle).ok(); // TODO: check if ok is enough here
+    };
 
-    let status = child.wait()?;
-
-    if !status.success() {
-        if let Some(mut stderr) = child.stderr.take() {
-            use std::io::Read;
-            let mut error = String::new();
-            let _ = Read::read_to_string(&mut stderr, &mut error);
-            return Err(AppError::FileProcessingError(format!(
-                "7z failed: {}",
-                error
-            )));
-        }
-        return Err(AppError::FileProcessingError(
-            "7z failed with unknown error".to_string(),
-        ));
-    }
-
-    // Send completion notification
-    app_handle.emit(
-        "compression_progress",
-        serde_json::json!({
-            "processed": total_files,
-            "total": total_files,
-            "percent": 100,
-        }),
+    zip_dir(
+        &mut WalkDir::new(source_dir).into_iter().filter_map(|e| e.ok()),
+        source_dir,
+        file,
+        method,
+        progress_cb,
     )?;
 
-    // Check if all files are created before deleting
-    let mut created_files = Vec::new();
-
-    if target_path.exists() {
-        created_files.push(target_path.to_path_buf());
-    }
-
-    let parent_dir = target_path.parent().unwrap_or_else(|| Path::new(""));
-    let base_name = target_path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or("");
-
-    for i in 1..1000 {
-        let chunk_path = parent_dir.join(format!("{}.{:03}", base_name, i));
-        if chunk_path.exists() {
-            created_files.push(chunk_path);
-        } else {
-            break;
-        }
-    }
-
-    Ok(created_files)
+    Ok(())
 }
 
-fn parse_percentage(line: &str) -> Option<u8> {
-    let pos = line.find('%')?;
-    if pos == 0 {
-        return None;
-    }
-    line[0..pos].trim().parse::<u8>().ok()
-}
+fn zip_dir<T, F>(
+    it: &mut dyn Iterator<Item = DirEntry>,
+    prefix: &Path,
+    writer: T,
+    method: zip::CompressionMethod,
+    mut progress_callback: F,
+) -> Result<(), AppError>
+where
+    T: Write + Seek,
+    F: FnMut(u32),
+{
+    let mut zip = zip::ZipWriter::new(writer);
+    let options = SimpleFileOptions::default()
+        .compression_method(method)
+        .unix_permissions(0o755);
 
-fn count_files_in_dir(dir: &Path, count: &mut u32) -> Result<(), AppError> {
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+    let prefix = Path::new(prefix);
+    let mut buffer = Vec::new();
+
+    for entry in it {
         let path = entry.path();
+        let name = path.strip_prefix(prefix).unwrap();
+        let path_as_string = name.to_str().map(str::to_owned).ok_or_else(|| {
+            AppError::FileProcessingError(format!("Invalid UTF-8 sequence in path: {:?}", path))
+        })?;
+        // Write file or directory explicitly
+        // Some unzip tools unzip files with directory paths correctly, some do not!
+        if path.is_file() {
+            println!("adding file {path:?} as {name:?} ...");
+            zip.start_file(path_as_string, options).map_err(|e| {
+                AppError::FileProcessingError(format!("Error starting file: {}", e))
+            })?;
+            let mut f = File::open(path)?;
 
-        if path.is_dir() {
-            count_files_in_dir(&path, count)?;
-        } else {
-            *count += 1;
+            let file_size_bytes = entry
+                .metadata()
+                .map_err(|e| {
+                    AppError::FileProcessingError(format!("Error getting metadata: {}", e))
+                })?
+                .len();
+            let file_size_mb = ((file_size_bytes / (1024 * 1024)) as u32).max(1);
+
+            f.read_to_end(&mut buffer)?;
+            zip.write_all(&buffer)?;
+            buffer.clear();
+            progress_callback(file_size_mb);
+        } else if !name.as_os_str().is_empty() {
+            println!("adding dir {path_as_string:?} as {name:?} ...");
+            zip.add_directory(path_as_string, options).map_err(|e| {
+                AppError::FileProcessingError(format!("Error adding directory: {}", e))
+            })?;
         }
     }
+    zip.finish()
+        .map_err(|e| AppError::FileProcessingError(format!("Error finishing zip: {}", e)))?;
     Ok(())
 }

@@ -12,16 +12,33 @@ use tauri::{Emitter, Listener};
 use tauri_plugin_fs::FsExt;
 use tauri_specta::{collect_commands, Builder};
 
+#[cfg(debug_assertions)]
+fn export_typescript_bindings() {
+    use models::events::CompressionProgessEvent;
+    use tauri_specta::collect_events;
+
+    let builder = Builder::<tauri::Wry>::new();
+    // let types = models::register_specta_models();
+    builder
+        .commands(collect_commands![
+            add_model,
+            create_release,
+            finalize_release,
+            settings::get_settings,
+            settings::set_settings,
+        ])
+        .events(collect_events![CompressionProgessEvent,])
+        .export(
+            Typescript::default()
+                .formatter(specta_typescript::formatter::biome)
+                .header(""),
+            "../src/bindings.ts",
+        )
+        .expect("Failed to export typescript bindings");
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
-        add_model,
-        create_release,
-        finalize_release,
-        settings::get_settings,
-        settings::set_settings,
-    ]);
-
     let args: Vec<String> = env::args().collect();
     let maybe_3dpak_path = if args.len() > 1 {
         let file_path = &args[1];
@@ -35,9 +52,7 @@ pub fn run() {
     };
 
     #[cfg(debug_assertions)]
-    builder
-        .export(Typescript::default(), "../src/bindings.ts")
-        .expect("failed to write typescript bindings");
+    export_typescript_bindings();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_os::init())

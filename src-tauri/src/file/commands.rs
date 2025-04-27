@@ -2,7 +2,7 @@ use super::writer;
 use super::{compressors, storage};
 use crate::error::AppError;
 use crate::file::utils::clean_name;
-use crate::models::{Release, StlModel};
+use crate::models::models::{Release, StlModel};
 use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -109,10 +109,7 @@ pub async fn create_release(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn finalize_release(
-    app_handle: AppHandle,
-    release_dir: String,
-) -> Result<Vec<String>, AppError> {
+pub async fn finalize_release(app_handle: AppHandle, release_dir: String) -> Result<(), AppError> {
     let release_dir_path = PathBuf::from(release_dir);
 
     if !release_dir_path.exists() {
@@ -132,14 +129,10 @@ pub async fn finalize_release(
     let extension = compressors::get_extension_for_compression_type();
     let archive_path = target_dir_path.join(format!("{}.{}", release_dir_name, extension));
 
-    let created_files = compressors::compress_dir(&release_dir_path, &archive_path, &app_handle)?;
+    compressors::compress_dir_with_progress(&release_dir_path, &archive_path, &app_handle)?;
 
     fs::remove_dir_all(&release_dir_path)
         .map_err(|e| AppError::IoError(format!("Failed to clean up release directory: {}", e)))?;
 
-    let file_paths = created_files
-        .iter()
-        .map(|file| file.to_string_lossy().into_owned())
-        .collect();
-    Ok(file_paths)
+    Ok(())
 }

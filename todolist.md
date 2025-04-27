@@ -2,8 +2,6 @@
 
 ## Doing
 
-- [ ] Remove 7z binaries as these trigger another flow through mac Gatekeeper
-- [ ] use zip crate for distribution (MVP)
 
 ## To Do
 
@@ -15,7 +13,6 @@
 
 - [ ] Design `.3dpak` file format specification (JSON structure with version, checksums, components)
 - [ ] Create a modular compression system that packages each group separately
-- [x] Implement file registry to associate `.3dpak` files with the application
 - [ ] Add "Export as .3dpak" option in the release finalization
 - [ ] Create update detection system that compares local files with metadata checksums
 - [ ] Add selective download functionality to only retrieve changed/new components
@@ -28,6 +25,11 @@
 
 ## Done
 
+- [x] Implement file registry to associate `.3dpak` files with the application
+- [x] Add events to specta setup for typesafety on the frontend
+- [x] Remove 7z binaries as these trigger another flow through mac Gatekeeper
+- [x] use zip crate for distribution (MVP)
+- [x] process the new progress emits
 - [x] tags should be lowercase always and using \_ for spaces
 - [x] Replace finalize call release dir. Now uses the one written in the JSON which isnt correct (check that too)
 - [x] add model list to release for fixing data or just overviewing
