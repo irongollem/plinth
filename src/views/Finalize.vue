@@ -43,7 +43,7 @@
 
               <div class="flex justify-between">
                 <span>Size:</span>
-                <span>{{ formatBytes(compressionStatus.Progress.processed_size) }}/{{ formatBytes(compressionStatus.Progress.total_size) }}</span>
+                <span>{{ formatBytes(compressionStatus.Progress.processed_size_kb) }}/{{ formatBytes(compressionStatus.Progress.total_size_kb) }}</span>
               </div>
 
               <div v-if="compressionStatus.Progress.current_file" class="mt-1">
@@ -60,7 +60,7 @@
         <template v-else-if="compressionStatus && isCompletedStatus(compressionStatus)">
           <div class="mt-2 p-3 bg-green-100 text-green-800 rounded">
             <div>Successfully compressed {{ compressionStatus.Completed.total_files }} files</div>
-            <div>Total size: {{ formatBytes(compressionStatus.Completed.total_size) }}</div>
+            <div>Total size: {{ formatBytes(compressionStatus.Completed.total_size_kb) }}</div>
             <div>Time elapsed: {{ formatTime(compressionStatus.Completed.elapsed_seconds) }}</div>
           </div>
         </template>
@@ -97,7 +97,7 @@
           <div class="mt-2 p-3 bg-blue-100 text-blue-800 rounded">
             <div>Starting compression...</div>
             <div>Files to process: {{ compressionStatus.Started.total_files }}</div>
-            <div>Total size: {{ formatBytes(compressionStatus.Started.total_size) }}</div>
+            <div>Total size: {{ formatBytes(compressionStatus.Started.total_size_kb) }}</div>
           </div>
         </template>
       </div>

@@ -37,28 +37,29 @@ pub fn get_extension_for_compression_type() -> String {
     }
 }
 
-pub fn determine_dir_size(paths: &[PathBuf]) -> Result<(u32, u32), AppError> {
-    let mut total_size = 0;
+pub fn determine_dir_size_kb(paths: &[PathBuf]) -> Result<(u32, u32), AppError> {
+    let mut total_size_kb = 0;
     let mut total_files = 0;
 
     for path in paths {
         if path.is_dir() {
             for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
                 if entry.file_type().is_file() {
-                    total_size += entry
+                    total_size_kb += (entry
                         .metadata()
                         .map_err(|e| AppError::IoError(format!("Failed to read metadata: {}", e)))?
-                        .len() as u32;
+                        .len()
+                        / 1024) as u32;
                     total_files += 1;
                 }
             }
         } else if path.is_file() {
-            total_size += path.metadata()?.len() as u32;
+            total_size_kb += (path.metadata()?.len() / 1024) as u32;
             total_files += 1;
         }
     }
 
-    Ok((total_size, total_files))
+    Ok((total_size_kb, total_files))
 }
 
 pub fn compress_files<T, F>(
@@ -102,7 +103,7 @@ where
 
                     if let Some(ref mut callback) = progress_callback {
                         callback(
-                            entry
+                            (entry
                                 .metadata()
                                 .map_err(|e| {
                                     AppError::FileProcessingError(format!(
@@ -110,7 +111,8 @@ where
                                         e
                                     ))
                                 })?
-                                .len() as u32,
+                                .len()
+                                / 1024) as u32,
                         );
                     }
                 } else if !name.as_os_str().is_empty() {
@@ -138,7 +140,7 @@ where
             buffer.clear();
 
             if let Some(ref mut callback) = progress_callback {
-                callback(path.metadata()?.len() as u32);
+                callback((path.metadata()?.len() / 1024) as u32);
             }
         }
     }

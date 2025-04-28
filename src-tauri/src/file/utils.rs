@@ -14,9 +14,11 @@ pub fn calculate_total_size(
     files_for_zip: &[PathBuf],
 ) -> Result<(u32, u32), AppError> {
     let (group_and_model_size, group_and_model_files) =
-        compressors::determine_dir_size(group_and_model_dirs)?;
-    let (files_for_3pk_size, files_for_3pk_count) = compressors::determine_dir_size(files_for_3pk)?;
-    let (files_for_zip_size, files_for_zip_count) = compressors::determine_dir_size(files_for_zip)?;
+        compressors::determine_dir_size_kb(group_and_model_dirs)?;
+    let (files_for_3pk_size, files_for_3pk_count) =
+        compressors::determine_dir_size_kb(files_for_3pk)?;
+    let (files_for_zip_size, files_for_zip_count) =
+        compressors::determine_dir_size_kb(files_for_zip)?;
 
     let total_size = group_and_model_size + files_for_3pk_size + files_for_zip_size;
     let total_files = group_and_model_files + files_for_3pk_count + files_for_zip_count;

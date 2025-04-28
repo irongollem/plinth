@@ -23,9 +23,9 @@ use super::{
 struct ProgressTracker {
     app_handle: AppHandle,
     total_files: u32,
-    total_size: u32,
+    total_size_kb: u32,
     processed_files: u32,
-    processed_size: u32,
+    processed_size_kb: u32,
     cancel_token: Arc<AtomicBool>,
     current_file: String,
 }
@@ -34,15 +34,15 @@ impl ProgressTracker {
     fn new(
         app_handle: AppHandle,
         total_files: u32,
-        total_size: u32,
+        total_size_kb: u32,
         cancel_token: Arc<AtomicBool>,
     ) -> Self {
         Self {
             app_handle,
             total_files,
-            total_size,
+            total_size_kb,
             processed_files: 0,
-            processed_size: 0,
+            processed_size_kb: 0,
             cancel_token,
             current_file: String::new(),
         }
@@ -55,23 +55,23 @@ impl ProgressTracker {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        move |file_size: u32| {
+        move |file_size_kb: u32| {
             // Check for cancellation
             if self.cancel_token.load(std::sync::atomic::Ordering::SeqCst) {
                 // Return early without updating progress
                 return;
             }
 
-            self.processed_size += file_size;
+            self.processed_size_kb += file_size_kb;
             self.processed_files += 1;
-            let percent_size = (self.processed_size * 100) / self.total_size;
+            let percent_size = (self.processed_size_kb * 100) / self.total_size_kb;
             let percent_files = (self.processed_files * 100) / self.total_files;
 
             CompressionStatus::Progress(ProgressStatus {
                 processed_files: self.processed_files,
                 total_files: self.total_files,
-                processed_size: self.processed_size,
-                total_size: self.total_size,
+                processed_size_kb: self.processed_size_kb,
+                total_size_kb: self.total_size_kb,
                 percent_size,
                 percent_files,
                 current_file: self.current_file.clone(),
@@ -95,13 +95,13 @@ pub async fn perform_compression(
         collect_files_for_compression(&release_dir_path)?;
 
     // Calculate sizes
-    let (total_size, total_files) =
+    let (total_size_kb, total_files) =
         calculate_total_size(&group_and_model_dirs, &files_for_3pk, &files_for_zip)?;
 
     // Emit started event
     CompressionStatus::Started(StartedStatus {
         total_files,
-        total_size,
+        total_size_kb,
     })
     .emit(&app_handle)
     .ok();
@@ -110,7 +110,7 @@ pub async fn perform_compression(
     let progress_tracker = Arc::new(Mutex::new(ProgressTracker::new(
         app_handle.clone(),
         total_files,
-        total_size,
+        total_size_kb,
         cancel_token.clone(),
     )));
 
@@ -137,7 +137,7 @@ pub async fn perform_compression(
     fs::remove_dir_all(&release_dir_path)
         .map_err(|e| AppError::IoError(format!("Failed to clean up release directory: {}", e)))?;
 
-    Ok((total_files, total_size))
+    Ok((total_files, total_size_kb))
 }
 
 async fn run_compression_tasks(

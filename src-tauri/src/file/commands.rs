@@ -174,7 +174,7 @@ pub async fn finalize_release(
                 let elapsed = start_time.elapsed().as_secs_f64();
                 CompressionStatus::Completed(CompletedStatus {
                     total_files: files,
-                    total_size: size,
+                    total_size_kb: size,
                     elapsed_seconds: elapsed,
                 })
                 .emit(&app_handle_clone)

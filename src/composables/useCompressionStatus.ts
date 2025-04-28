@@ -86,12 +86,12 @@ export function useCompressionStatus() {
   };
 
   // Format bytes to human-readable string
-  const formatBytes = (bytes: number) => {
-    if (bytes === 0) return "0 Bytes";
+  const formatBytes = (kb: number) => {
+    if (kb === 0) return "0 KB";
 
-    const sizes = ["Bytes", "KB", "MB", "GB"];
-    const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    return `${(bytes / 1024 ** i).toFixed(2)} ${sizes[i]}`;
+    const sizes = ["KB", "MB", "GB"];
+    const i = Math.floor(Math.log(kb) / Math.log(1024));
+    return `${(kb / 1024 ** i).toFixed(2)} ${sizes[i]}`;
   };
 
   // Format seconds to minutes and seconds string
