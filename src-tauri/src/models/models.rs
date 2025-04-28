@@ -8,6 +8,7 @@ pub struct Settings {
     pub target_dir: Option<String>,
     pub compression_type: Option<CompressionType>,
     pub chunk_size: Option<u32>,
+    pub max_compression_threads: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

@@ -176,3 +176,36 @@ pub fn convert_to_relative_paths(
         })
         .collect()
 }
+
+pub fn collect_files_for_compression(
+    release_dir_path: &PathBuf,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>), AppError> {
+    let mut group_and_model_dirs = Vec::new();
+    let mut files_for_3pk = Vec::new();
+    let mut files_for_zip = Vec::new();
+
+    for entry in fs::read_dir(release_dir_path)
+        .map_err(|e| AppError::IoError(format!("Failed to read release directory: {}", e)))?
+    {
+        let entry = entry.map_err(|e| AppError::IoError(format!("Failed to read entry: {}", e)))?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            group_and_model_dirs.push(path.clone());
+        } else if path.is_file() {
+            let file_name = path
+                .file_name()
+                .ok_or_else(|| AppError::ConfigError("Invalid file name".to_string()))?
+                .to_string_lossy()
+                .to_owned();
+
+            if file_name.ends_with(".json") || file_name.ends_with(".png") {
+                files_for_3pk.push(path.clone());
+            }
+
+            files_for_zip.push(path.clone());
+        }
+    }
+
+    Ok((group_and_model_dirs, files_for_3pk, files_for_zip))
+}

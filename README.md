@@ -57,3 +57,7 @@ But prohibits:
 - Creating derivative works based on the software
 
 See [`LICENCE.md`](LICENCE.md) for the complete license terms and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for information about included components.
+
+## 3pk
+
+STL-Pack generates and in the future consumes an original 3pk file which is a compressed archive containing metadata, licence data and images representing a full release or bundle in a structured format.

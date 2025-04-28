@@ -18,20 +18,22 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+image = "0.25.6"
+once_cell = "1.21.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smartcrop2 = "0.4.0"
+specta = "2.0.0-rc.22"
+specta-typescript = "0.0.9"
+sysinfo = "0.34.2"
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
 tauri-plugin-store = "2.2.0"
 tauri-plugin-fs = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-zip = "2.6.1"
-smartcrop2 = "0.4.0"
-image = "0.25.6"
-once_cell = "1.21.1"
-specta = "2.0.0-rc.22"
-tauri-specta = { version = "2.0.0-rc.21", features = ["typescript", "derive"] }
-specta-typescript = "0.0.9"
 tauri-plugin-dialog = "2"
 tauri-plugin-os = "2"
+tauri-specta = { version = "2.0.0-rc.21", features = ["typescript", "derive"] }
+tokio = "1.44.2"
 uuid = { version = "1.4", features = ["v4", "serde"] }
 walkdir = "2.5.0"
+zip = "2.6.1"

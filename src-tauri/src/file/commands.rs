@@ -1,12 +1,25 @@
+use super::storage;
 use super::writer;
-use super::{compressors, storage};
 use crate::error::AppError;
+use crate::file::compression_jobs;
 use crate::file::utils::clean_name;
+use crate::models::events::CancelledStatus;
+use crate::models::events::CompletedStatus;
+use crate::models::events::CompressionStatus;
+use crate::models::events::FailedStatus;
 use crate::models::models::{Release, StlModel};
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
+use tauri_specta::Event;
 use uuid::Uuid;
+
+static ACTIVE_COMPRESSIONS: Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[tauri::command]
 #[specta::specta]
@@ -109,8 +122,11 @@ pub async fn create_release(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn finalize_release(app_handle: AppHandle, release_dir: String) -> Result<(), AppError> {
-    let release_dir_path = PathBuf::from(release_dir);
+pub async fn finalize_release(
+    app_handle: AppHandle,
+    release_dir: String,
+) -> Result<String, AppError> {
+    let release_dir_path = PathBuf::from(&release_dir);
 
     if !release_dir_path.exists() {
         return Err(AppError::NotFoundError(format!(
@@ -119,20 +135,86 @@ pub async fn finalize_release(app_handle: AppHandle, release_dir: String) -> Res
         )));
     }
 
-    let release_dir_name = release_dir_path
-        .file_name()
-        .ok_or_else(|| AppError::ConfigError("Invalid release directory name".to_string()))?
-        .to_string_lossy()
-        .to_owned();
+    // Generate a unique ID for this compression job
+    let job_id = Uuid::new_v4().to_string();
 
-    let target_dir_path = storage::get_target_path(&app_handle)?;
-    let extension = compressors::get_extension_for_compression_type();
-    let archive_path = target_dir_path.join(format!("{}.{}", release_dir_name, extension));
+    // Create cancellation token
+    let cancel_token = Arc::new(AtomicBool::new(false));
 
-    compressors::compress_dir_with_progress(&release_dir_path, &archive_path, &app_handle)?;
+    // Register the token in our global state
+    {
+        let mut compressions = ACTIVE_COMPRESSIONS.lock().map_err(|e| {
+            AppError::ConfigError(format!("Failed to access compressions registry: {}", e))
+        })?;
+        compressions.insert(job_id.clone(), Arc::clone(&cancel_token));
+    }
 
-    fs::remove_dir_all(&release_dir_path)
-        .map_err(|e| AppError::IoError(format!("Failed to clean up release directory: {}", e)))?;
+    // Start the compression process in the background
+    let app_handle_clone = app_handle.clone();
+    let job_id_clone = job_id.clone();
+    tokio::spawn(async move {
+        let start_time = std::time::Instant::now();
 
-    Ok(())
+        // Run the actual compression
+        let result = compression_jobs::perform_compression(
+            app_handle_clone.clone(),
+            release_dir_path.clone(),
+            cancel_token,
+        )
+        .await;
+
+        // Clean up the cancellation token
+        if let Ok(mut compressions) = ACTIVE_COMPRESSIONS.lock() {
+            compressions.remove(&job_id_clone);
+        }
+
+        // Send appropriate completion event
+        match result {
+            Ok((files, size)) => {
+                let elapsed = start_time.elapsed().as_secs_f64();
+                CompressionStatus::Completed(CompletedStatus {
+                    total_files: files,
+                    total_size: size,
+                    elapsed_seconds: elapsed,
+                })
+                .emit(&app_handle_clone)
+                .ok();
+            }
+            Err(e) => {
+                if e.to_string().contains("cancelled") {
+                    CompressionStatus::Cancelled(CancelledStatus {})
+                        .emit(&app_handle_clone)
+                        .ok();
+                } else {
+                    CompressionStatus::Failed(FailedStatus {
+                        error: e.to_string(),
+                    })
+                    .emit(&app_handle_clone)
+                    .ok();
+                }
+            }
+        }
+    });
+
+    // Return the job ID immediately so the client can use it to cancel if needed
+    Ok(job_id)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn cancel_compression(job_id: String) -> Result<(), AppError> {
+    let compressions = ACTIVE_COMPRESSIONS.lock().map_err(|e| {
+        AppError::ConfigError(format!("Failed to access compressions registry: {}", e))
+    })?;
+
+    if let Some(token) = compressions.get(&job_id) {
+        // Signal cancellation
+        token.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    } else {
+        Err(AppError::NotFoundError(format!(
+            "No active compression job with ID: {}",
+            job_id
+        )))
+    }
 }

@@ -23,13 +23,36 @@
           @blur="debouncedSave"
           @keydown.enter="debouncedSave"
         />
+
+        <div class="mb-4">
+          <label for="max_compression_threads" class="block text-sm font-medium text-gray-700">
+            Max Compression Threads
+            <span class="text-xs text-gray-500">(Detected {{ availableCores }} cores)</span>
+          </label>
+          <div class="mt-1 flex items-center">
+            <input
+              id="max_compression_threads"
+              type="range"
+              min="1"
+              :max="availableCores"
+              v-model.number="settings.max_compression_threads"
+              class="mr-2 w-full h-2 rounded-lg appearance-none cursor-pointer bg-gray-200"
+              @change="debouncedSave"
+            />
+            <span class="text-sm text-gray-600">{{ settings.max_compression_threads || 'Auto' }}</span>
+          </div>
+          <p class="mt-1 text-xs text-gray-500">
+            Maximum CPU cores to use for compression. Lower for better system responsiveness, higher for faster compression.
+            Default is automatically calculated ({{ defaultThreadCount }}).
+          </p>
+        </div>
       </form>
     </template>
   </View>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, computed } from "vue";
 import { commands, type Settings } from "../bindings.ts";
 import View from "../components/View.vue";
 import FileSelect from "../components/FileSelect.vue";
@@ -42,7 +65,13 @@ const settings = ref<Settings>({
   target_dir: null,
   compression_type: "Zip",
   chunk_size: null,
+  max_compression_threads: null,
 });
+
+const availableCores = ref(navigator.hardwareConcurrency || 4);
+const defaultThreadCount = computed(() =>
+  Math.max(1, availableCores.value - 1),
+);
 
 let saveTimeout: number | null = null;
 const debouncedSave = () => {

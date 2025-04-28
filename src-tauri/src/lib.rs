@@ -4,38 +4,14 @@ mod image;
 mod models;
 mod settings;
 
-use crate::file::commands::{add_model, create_release, finalize_release};
+use file::commands::{add_model, cancel_compression, create_release, finalize_release};
+use models::events::CompressionStatus;
 use specta_typescript::Typescript;
 use std::env;
 use tauri::{Emitter, Listener};
 #[allow(unused_imports)]
 use tauri_plugin_fs::FsExt;
-use tauri_specta::{collect_commands, Builder};
-
-#[cfg(debug_assertions)]
-fn export_typescript_bindings() {
-    use models::events::CompressionProgessEvent;
-    use tauri_specta::collect_events;
-
-    let builder = Builder::<tauri::Wry>::new();
-    // let types = models::register_specta_models();
-    builder
-        .commands(collect_commands![
-            add_model,
-            create_release,
-            finalize_release,
-            settings::get_settings,
-            settings::set_settings,
-        ])
-        .events(collect_events![CompressionProgessEvent,])
-        .export(
-            Typescript::default()
-                .formatter(specta_typescript::formatter::biome)
-                .header(""),
-            "../src/bindings.ts",
-        )
-        .expect("Failed to export typescript bindings");
-}
+use tauri_specta::{collect_commands, collect_events, Builder};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -105,4 +81,26 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(debug_assertions)]
+fn export_typescript_bindings() {
+    let builder = Builder::<tauri::Wry>::new();
+    builder
+        .commands(collect_commands![
+            add_model,
+            create_release,
+            finalize_release,
+            cancel_compression,
+            settings::get_settings,
+            settings::set_settings,
+        ])
+        .events(collect_events![CompressionStatus,])
+        .export(
+            Typescript::default()
+                .formatter(specta_typescript::formatter::biome)
+                .header(""),
+            "../src/bindings.ts",
+        )
+        .expect("Failed to export typescript bindings");
 }

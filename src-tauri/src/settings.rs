@@ -1,6 +1,7 @@
 use crate::models::models::{CompressionType, Settings};
 use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
+use sysinfo::System;
 use tauri::{AppHandle, Wry};
 use tauri_plugin_store::{Store, StoreExt as _};
 
@@ -10,6 +11,7 @@ pub(crate) static SETTINGS_CACHE: Lazy<Mutex<Settings>> = Lazy::new(|| {
         target_dir: None,
         compression_type: None,
         chunk_size: None,
+        max_compression_threads: None,
     })
 });
 
@@ -38,24 +40,31 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         .get("target_dir")
         .and_then(|v| v.as_str().map(String::from));
 
-    let compression_type = store
-        .get("compression_type")
-        .and_then(|v| v.as_str().map(String::from))
-        .and_then(|s| match s.as_str() {
-            "Zip" => Some(CompressionType::Zip),
-            "7zip" => Some(CompressionType::SevenZip),
-            _ => None,
-        });
+    // let compression_type = store
+    //     .get("compression_type")
+    //     .and_then(|v| v.as_str().map(String::from))
+    //     .and_then(|s| match s.as_str() {
+    //         "Zip" => Some(CompressionType::Zip),
+    //         "7zip" => Some(CompressionType::SevenZip),
+    //         _ => None,
+    //     });
 
     let chunk_size = store
         .get("chunk_size")
         .and_then(|v| v.as_u64())
         .map(|v| v as u32);
+
+    let max_compression_threads = store
+        .get("max_compression_threads")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+
     let settings = Settings {
         scratch_dir,
         target_dir,
-        compression_type,
+        compression_type: Some(CompressionType::Zip),
         chunk_size,
+        max_compression_threads,
     };
 
     {
@@ -98,6 +107,21 @@ pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(
         };
         store.set("compression_type", compression_str);
     }
+    if let Some(max_threads) = settings.max_compression_threads {
+        store.set("max_compression_threads", max_threads);
+    }
 
     store.save().map_err(|e| e.to_string())
+}
+
+pub fn get_optimal_thread_count() -> u32 {
+    let settings_result = SETTINGS_CACHE.lock();
+    if let Ok(settings) = settings_result {
+        if let Some(thread_count) = settings.max_compression_threads {
+            return std::cmp::max(1, thread_count);
+        }
+    }
+    let sys = System::new_all();
+    let cpu_count = sys.cpus().len() as u32;
+    std::cmp::max(1, cpu_count.saturating_sub(1))
 }

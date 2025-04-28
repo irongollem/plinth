@@ -13,6 +13,7 @@ pub enum AppError {
     ConfigError(String),
     NotFoundError(String),
     ImageProcessingError(String),
+    UserCancelled(String),
 }
 
 impl fmt::Display for AppError {
@@ -25,6 +26,7 @@ impl fmt::Display for AppError {
             Self::ConfigError(msg) => write!(f, "Configuration error: {}", msg),
             Self::NotFoundError(msg) => write!(f, "Not found: {}", msg),
             Self::ImageProcessingError(msg) => write!(f, "Failed to process image: {}", msg),
+            Self::UserCancelled(msg) => write!(f, "User cancelled: {}", msg),
         }
     }
 }
