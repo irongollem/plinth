@@ -28,7 +28,7 @@ pub fn run() {
     };
 
     #[cfg(debug_assertions)]
-    export_typescript_bindings();
+    let builder = export_typescript_bindings();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_os::init())
@@ -36,7 +36,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_fs::init())
-        .setup(|app| {
+        .setup(move |app| {
+            builder.mount_events(app);
             let app_handle = app.handle().clone();
 
             if let Some(file_path) = maybe_3dpak_path {
@@ -76,6 +77,7 @@ pub fn run() {
             add_model,
             create_release,
             finalize_release,
+            cancel_compression,
             settings::get_settings,
             settings::set_settings,
         ])
@@ -84,9 +86,9 @@ pub fn run() {
 }
 
 #[cfg(debug_assertions)]
-fn export_typescript_bindings() {
+fn export_typescript_bindings() -> Builder {
     let builder = Builder::<tauri::Wry>::new();
-    builder
+    let builder = builder
         .commands(collect_commands![
             add_model,
             create_release,
@@ -95,12 +97,14 @@ fn export_typescript_bindings() {
             settings::get_settings,
             settings::set_settings,
         ])
-        .events(collect_events![CompressionStatus,])
-        .export(
+        .events(collect_events![CompressionStatus,]);
+    builder.export(
             Typescript::default()
                 .formatter(specta_typescript::formatter::biome)
                 .header(""),
             "../src/bindings.ts",
         )
         .expect("Failed to export typescript bindings");
+
+    builder
 }

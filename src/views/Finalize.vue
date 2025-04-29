@@ -19,7 +19,6 @@
           Cancel Compression
         </button>
         <div class="text-sm text-gray-600 mt-2" v-if="!isCompressing">
-          {{ releaseDir }}
         </div>
       </form>
     </template>
