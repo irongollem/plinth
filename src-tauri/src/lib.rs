@@ -30,6 +30,9 @@ pub fn run() {
     #[cfg(debug_assertions)]
     let builder = export_typescript_bindings();
 
+    #[cfg(not(debug_assertions))]
+        let builder = create_builder_for_production();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_dialog::init())
@@ -85,6 +88,12 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
+#[cfg(not(debug_assertions))]
+fn create_builder_for_production() -> Builder<tauri::Wry> {
+    Builder::<tauri::Wry>::new()
+        .events(collect_events![CompressionStatus,])
+}
+
 #[cfg(debug_assertions)]
 fn export_typescript_bindings() -> Builder {
     let builder = Builder::<tauri::Wry>::new();
@@ -101,7 +110,7 @@ fn export_typescript_bindings() -> Builder {
     builder.export(
             Typescript::default()
                 .formatter(specta_typescript::formatter::biome)
-                .header(""),
+                .header("// @ts-nocheck\n// eslint-disable\n// biome-ignore lint/*: auto-generated file\n"),
             "../src/bindings.ts",
         )
         .expect("Failed to export typescript bindings");

@@ -1,11 +1,11 @@
 import { onMounted, onUnmounted } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { useToastStore } from "../stores/toastStore";
-import { useReleasesStore } from "../stores/releasesStore";
+// import { useReleasesStore } from "../stores/releasesStore";
 
 export function use3DPackageHandler() {
   const toastStore = useToastStore();
-  const releasesStore = useReleasesStore();
+  // const releasesStore = useReleasesStore();
   let unlistenFn: (() => void) | null = null;
 
   const handle3DPackage = (filePath: string) => {
