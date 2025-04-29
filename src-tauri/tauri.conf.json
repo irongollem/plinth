@@ -37,6 +37,23 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "macOS": {
+      "dmg": {
+        "background": "build-assets/dmg-img.png",
+        "windowSize": {
+          "width": 660,
+          "height": 440
+        },
+        "appPosition": {
+          "x": 170,
+          "y": 230
+        },
+        "applicationFolderPosition": {
+          "x": 430,
+          "y": 210
+        }
+      }
+    },
     "fileAssociations": [
       {
         "ext": ["3dpak", "3pk"],

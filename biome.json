@@ -13,7 +13,7 @@
     "enabled": true,
     "indentStyle": "space",
     "indentWidth": 2,
-    "ignore": ["node_modules", "**/target/**", "src/bindings.ts"]
+    "ignore": ["node_modules", "**/target/**", "src/bindings.ts", "dist"]
   },
   "organizeImports": {
     "enabled": true
@@ -23,7 +23,7 @@
     "rules": {
       "recommended": true
     },
-    "ignore": ["node_modules", "**/target/**", "src/bindings.ts"]
+    "ignore": ["node_modules", "**/target/**", "src/bindings.ts", "dist"]
   },
   "javascript": {
     "formatter": {

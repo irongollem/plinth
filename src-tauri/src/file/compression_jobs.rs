@@ -87,18 +87,23 @@ pub async fn perform_compression(
     release_dir_path: PathBuf,
     cancel_token: Arc<AtomicBool>,
 ) -> Result<(u32, u32), AppError> {
-    let target_dir_path = storage::get_target_path(&app_handle)?;
+    let target_base_path = storage::get_target_path(&app_handle)?;
+
+    let release_name = release_dir_path
+        .file_name()
+        .ok_or_else(|| AppError::ConfigError("Invalid release directory name".to_string()))?
+        .to_string_lossy()
+        .to_string();
+
+    let target_dir_path = target_base_path.join(&release_name);
     let extension = compressors::get_extension_for_compression_type();
 
-    // Collect files for compression
     let (group_and_model_dirs, files_for_3pk, files_for_zip) =
         collect_files_for_compression(&release_dir_path)?;
 
-    // Calculate sizes
     let (total_size_kb, total_files) =
         calculate_total_size(&group_and_model_dirs, &files_for_3pk, &files_for_zip)?;
 
-    // Emit started event
     CompressionStatus::Started(StartedStatus {
         total_files,
         total_size_kb,
@@ -106,7 +111,6 @@ pub async fn perform_compression(
     .emit(&app_handle)
     .ok();
 
-    // Create progress tracking
     let progress_tracker = Arc::new(Mutex::new(ProgressTracker::new(
         app_handle.clone(),
         total_files,
@@ -114,7 +118,6 @@ pub async fn perform_compression(
         cancel_token.clone(),
     )));
 
-    // Run the compression tasks with semaphore-controlled concurrency
     run_compression_tasks(
         progress_tracker,
         &target_dir_path,
