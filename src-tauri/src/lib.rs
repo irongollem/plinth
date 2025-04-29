@@ -6,12 +6,16 @@ mod settings;
 
 use file::commands::{add_model, cancel_compression, create_release, finalize_release};
 use models::events::CompressionStatus;
-use specta_typescript::Typescript;
 use std::env;
 use tauri::{Emitter, Listener};
 #[allow(unused_imports)]
 use tauri_plugin_fs::FsExt;
-use tauri_specta::{collect_commands, collect_events, Builder};
+use tauri_specta::{collect_events, Builder};
+
+#[cfg(debug_assertions)]
+use specta_typescript::Typescript;
+#[cfg(debug_assertions)]
+use tauri_specta::collect_commands;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
