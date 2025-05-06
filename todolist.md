@@ -2,18 +2,19 @@
 
 ## Doing
 
+- [ ] Design `.3pk` file format specification (JSON structure with version, checksums, components)
 
 ## To Do
 
 - [ ] ARCHITECTURE: Currently we are only storing the paths in the json, but in doing so also reduce the info available in the UI. The data in the UI should be complete. From creation dont throw away the data too soon and when revisiting compose the UI info from the json PLUS the underlying jsons.
 - [ ] Add checkboxes to release fields to store the field data permanently like settings (so creators dont have to type in their own name every time for example)
 - [ ] use TAR+Zstd for local compression and cataloging
+- [ ] default releasedate current?
+- [ ] recover/continue mode (quick so testing becomes less tedious!)
 
 ### Modular Package Strategy Implementation
 
-- [ ] Design `.3dpak` file format specification (JSON structure with version, checksums, components)
 - [ ] Create a modular compression system that packages each group separately
-- [ ] Add "Export as .3dpak" option in the release finalization
 - [ ] Create update detection system that compares local files with metadata checksums
 - [ ] Add selective download functionality to only retrieve changed/new components
 - [ ] Design reconstruction tool UI for end users to assemble downloaded components
