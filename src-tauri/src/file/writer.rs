@@ -1,4 +1,7 @@
-use std::{fs, path::PathBuf};
+use std::{
+  fs,
+  path::PathBuf,
+};
 
 use crate::{
     error::AppError,

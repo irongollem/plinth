@@ -31,7 +31,6 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         .await
         .map_err(|_| "Failed to get store".to_string())?;
 
-    // Access each setting directly using store.get()
     let scratch_dir = store
         .get("scratch_dir")
         .and_then(|v| v.as_str().map(String::from));
@@ -39,15 +38,6 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
     let target_dir = store
         .get("target_dir")
         .and_then(|v| v.as_str().map(String::from));
-
-    // let compression_type = store
-    //     .get("compression_type")
-    //     .and_then(|v| v.as_str().map(String::from))
-    //     .and_then(|s| match s.as_str() {
-    //         "Zip" => Some(CompressionType::Zip),
-    //         "7zip" => Some(CompressionType::SevenZip),
-    //         _ => None,
-    //     });
 
     let chunk_size = store
         .get("chunk_size")
@@ -80,7 +70,6 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
 #[tauri::command]
 #[specta::specta]
 pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(), String> {
-    // Update cache
     {
         let mut cache = SETTINGS_CACHE
             .lock()
@@ -88,7 +77,6 @@ pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(
         *cache = settings.clone();
     }
 
-    // Get store
     let store = get_store_arc(&app_handle)
         .await
         .map_err(|e| e.to_string())?;

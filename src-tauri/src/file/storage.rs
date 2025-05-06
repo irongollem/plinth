@@ -16,6 +16,7 @@ pub fn get_scratch_path(app_handle: &AppHandle) -> Result<PathBuf, AppError> {
     if let Some(dir) = scratch_dir {
         Ok(PathBuf::from(dir))
     } else {
+        // The scratchdir is temporary in nature so the default is the app_data dir
         Ok(app_handle.path().app_data_dir()?)
     }
 }
@@ -44,7 +45,7 @@ pub fn get_target_path(app_handle: &AppHandle) -> Result<PathBuf, AppError> {
     if let Some(dir) = target_dir {
         Ok(PathBuf::from(dir))
     } else {
-        Ok(app_handle.path().app_data_dir()?.join("exports"))
+        Ok(app_handle.path().document_dir()?.join("STL-Pack").join("exports"))
     }
 }
 
