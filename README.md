@@ -29,6 +29,16 @@ To install stl-pack, download the latest release from the [releases page](https:
 4. Click the "Compress" or "Bundle" button.
 5. Save the optimized files to your desired location.
 
+## Our Philosophy
+
+stl-pack is an opinionated tool, and we believe in "the right way" to manage and distribute 3D printable files. This means:
+
+*   **Efficiency:** Optimizing file sizes without compromising detail, making sharing and storage easier.
+*   **Organization:** Bundling models, metadata, and previews into a clear, structured format (`.3pk`).
+*   **Reproducibility:** Ensuring that users have all the information needed to understand and use the models.
+
+(Project maintainers: Please expand this section with more specific details about the design choices and goals of stl-pack!)
+
 ## Recommended IDE Setup for Development
 
 - [VS Code](https://code.visualstudio.com/) + [Volar](https://marketplace.visualstudio.com/items?itemName=Vue.volar) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
@@ -46,6 +56,11 @@ You can learn more about Take Over mode [here](https://github.com/johnsoncodehk/
 
 Contributions are welcome! Please read the [contributing guidelines](CONTRIBUTING.md) first.
 
+## Development Status & Roadmap
+
+stl-pack is under active development! We are constantly working on new features and improvements.
+You can follow our progress and see planned features in our [To-Do List](todolist.md).
+
 ## License
 
 This project is available under a custom source-available license that allows:
@@ -56,7 +71,7 @@ But prohibits:
 - Selling or redistributing the software itself
 - Creating derivative works based on the software
 
-See [`LICENCE.md`](LICENCE.md) for the complete license terms and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for information about included components.
+See [`LICENSE.md`](LICENSE.md) for the complete license terms and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for information about included components.
 
 ## 3pk
 

@@ -47,6 +47,15 @@ jobs:
       - name: Install frontend dependencies
         run: bun install
 
+      - name: Check formatting
+        run: bun run format:check
+
+      - name: Lint code
+        run: bun run lint
+
+      - name: Run frontend tests
+        run: bun run test:frontend
+
       - name: Run Rust tests
         run: cargo test --verbose
         working-directory: src-tauri
