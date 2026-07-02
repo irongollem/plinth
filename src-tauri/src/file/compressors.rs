@@ -1,11 +1,10 @@
 use crate::error::AppError;
-use crate::models::models::CompressionType;
+use crate::models::CompressionType;
 use crate::settings::SETTINGS_CACHE;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::path::PathBuf;
 use walkdir::WalkDir;
-use zip;
 use zip::write::SimpleFileOptions;
 
 pub fn get_compression_type() -> Result<CompressionType, AppError> {
@@ -129,7 +128,7 @@ where
                     AppError::FileProcessingError(format!("Invalid file name for path: {:?}", path))
                 })?
                 .to_string_lossy()
-                .to_owned();
+                .into_owned();
 
             zip.start_file(file_name, options).map_err(|e| {
                 AppError::FileProcessingError(format!("Error starting file: {}", e))

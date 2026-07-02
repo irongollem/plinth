@@ -1,4 +1,4 @@
-use crate::models::models::{CompressionType, Settings};
+use crate::models::{CompressionType, Settings};
 use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
 use sysinfo::System;

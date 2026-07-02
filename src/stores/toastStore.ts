@@ -16,7 +16,7 @@ export const useToastStore = defineStore("toast", () => {
   const addToast = (
     message: string,
     type: ToastType = "info",
-    duration: number = 5000,
+    duration = 5000,
   ) => {
     const id = `toast-${nextId++}`;
     const toast = { id, message, type, duration };

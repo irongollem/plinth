@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { useFileSelect, type SelectedFile } from "../composables/useFileSelect";
+import { type SelectedFile, useFileSelect } from "../composables/useFileSelect";
 
 const props = defineProps<{
   id: string;

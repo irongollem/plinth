@@ -23,7 +23,13 @@
     "rules": {
       "recommended": true
     },
-    "ignore": ["node_modules", "**/target/**", "src/bindings.ts", "dist"]
+    "ignore": [
+      "node_modules",
+      "**/target/**",
+      "src/bindings.ts",
+      "src/vite-env.d.ts",
+      "dist"
+    ]
   },
   "javascript": {
     "formatter": {

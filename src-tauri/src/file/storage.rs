@@ -45,7 +45,11 @@ pub fn get_target_path(app_handle: &AppHandle) -> Result<PathBuf, AppError> {
     if let Some(dir) = target_dir {
         Ok(PathBuf::from(dir))
     } else {
-        Ok(app_handle.path().document_dir()?.join("STL-Pack").join("exports"))
+        Ok(app_handle
+            .path()
+            .document_dir()?
+            .join("STL-Pack")
+            .join("exports"))
     }
 }
 
@@ -88,11 +92,9 @@ pub fn get_destination_folder(model_folder: &Path, file_path: &Path) -> PathBuf 
                 .to_lowercase();
 
             // Use a regex or precise matching for supported files
-            let is_presupported = filename
-                .split(|c: char| c == '-' || c == '_' || c == '.')
-                .any(|part| {
-                    part == "sup" || part == "supported" || part == "presupported" || part == "ps"
-                });
+            let is_presupported = filename.split(['-', '_', '.']).any(|part| {
+                part == "sup" || part == "supported" || part == "presupported" || part == "ps"
+            });
 
             if is_presupported {
                 let subfolder = model_folder.join("supported");
@@ -178,9 +180,12 @@ pub fn convert_to_relative_paths(
         .collect()
 }
 
+/// (group/model directories, files destined for release.3pk, files destined for release.zip)
+pub type CompressionFileSets = (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>);
+
 pub fn collect_files_for_compression(
     release_dir_path: &PathBuf,
-) -> Result<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>), AppError> {
+) -> Result<CompressionFileSets, AppError> {
     let mut group_and_model_dirs = Vec::new();
     let mut files_for_3pk = Vec::new();
     let mut files_for_zip = Vec::new();
@@ -198,7 +203,7 @@ pub fn collect_files_for_compression(
                 .file_name()
                 .ok_or_else(|| AppError::ConfigError("Invalid file name".to_string()))?
                 .to_string_lossy()
-                .to_owned();
+                .into_owned();
 
             if file_name.ends_with(".json") || file_name.ends_with(".png") {
                 files_for_3pk.push(path.clone());

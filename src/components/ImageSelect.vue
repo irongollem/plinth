@@ -73,9 +73,9 @@
 </template>
 
 <script setup lang="ts">
-import ModalView from "./ModalView.vue";
 import { ref, watch } from "vue";
-import { useFileSelect, type SelectedFile } from "../composables/useFileSelect";
+import { type SelectedFile, useFileSelect } from "../composables/useFileSelect";
+import ModalView from "./ModalView.vue";
 
 const imageDetailViewOpen = ref(false);
 

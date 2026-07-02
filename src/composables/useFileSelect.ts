@@ -1,8 +1,8 @@
-import { ref } from "vue";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { stat } from "@tauri-apps/plugin-fs";
 import type { FileInfo } from "@tauri-apps/plugin-fs";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { ref } from "vue";
 
 export interface SelectedFile {
   path: string; // The full file path

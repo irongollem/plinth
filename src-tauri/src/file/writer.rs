@@ -1,11 +1,8 @@
-use std::{
-  fs,
-  path::PathBuf,
-};
+use std::{fs, path::PathBuf};
 
 use crate::{
     error::AppError,
-    models::models::{ModelLocation, ModelReference, Release, StlModel},
+    models::{ModelLocation, ModelReference, Release, StlModel},
 };
 
 pub fn write_json(json_string: String, path: PathBuf) -> Result<(), AppError> {

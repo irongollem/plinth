@@ -7,7 +7,7 @@ use crate::models::events::CancelledStatus;
 use crate::models::events::CompletedStatus;
 use crate::models::events::CompressionStatus;
 use crate::models::events::FailedStatus;
-use crate::models::models::{Release, StlModel};
+use crate::models::{Release, StlModel};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::fs;
@@ -108,7 +108,7 @@ pub async fn create_release(
 
     let release_json = serde_json::to_string_pretty(&release_with_paths)?;
 
-    fs::write(&release_path.join("release.json"), release_json)?;
+    fs::write(release_path.join("release.json"), release_json)?;
 
     if let Some(window) = app_handle.get_webview_window("main") {
         window.set_title(&format!(

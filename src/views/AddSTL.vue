@@ -1,5 +1,5 @@
 <template>
-  <form @submit.prevent="saveModelData" @keydown.enter.prevent">
+  <form @submit.prevent="saveModelData" @keydown.enter.prevent>
   <View>
     <template #left>
       <h1 class="text-xl font-bold">Model info</h1>
@@ -65,19 +65,19 @@
 </template>
 
 <script setup lang="ts">
-import TextArea from "../components/TextArea.vue";
-import TextInput from "../components/TextInput.vue";
-import TagInput from "../components/TagInput.vue";
 import { computed, ref } from "vue";
 import type { Ref } from "vue";
-import { fileLogos } from "../types.ts";
-import View from "../components/View.vue";
-import { commands, type StlModel } from "../bindings.ts";
-import ImageSelect from "../components/ImageSelect.vue";
-import { useToastStore } from "../stores/toastStore.ts";
-import { useReleasesStore } from "../stores/releasesStore.ts";
-import type { SelectedFile } from "../composables/useFileSelect";
+import { type StlModel, commands } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
+import ImageSelect from "../components/ImageSelect.vue";
+import TagInput from "../components/TagInput.vue";
+import TextArea from "../components/TextArea.vue";
+import TextInput from "../components/TextInput.vue";
+import View from "../components/View.vue";
+import type { SelectedFile } from "../composables/useFileSelect";
+import { useReleasesStore } from "../stores/releasesStore.ts";
+import { useToastStore } from "../stores/toastStore.ts";
+import { fileLogos } from "../types.ts";
 
 const toastStore = useToastStore();
 const { groups, releaseDir, addModel } = useReleasesStore();
@@ -106,6 +106,7 @@ const saveModelData = async () => {
     return;
   }
 
+  isStoring.value = true;
   try {
     if (!releaseDir) {
       throw new Error("Release directory name is missing");

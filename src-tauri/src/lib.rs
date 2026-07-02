@@ -58,7 +58,7 @@ pub fn run() {
             let drag_drop_handle = app_handle.clone();
             app_handle.listen("tauri://drag-drop", move |event| {
                 if let Ok(payload_json) =
-                    serde_json::from_str::<serde_json::Value>(&event.payload())
+                    serde_json::from_str::<serde_json::Value>(event.payload())
                 {
                     if let Some(paths) = payload_json.get("paths").and_then(|p| p.as_array()) {
                         for path_value in paths {

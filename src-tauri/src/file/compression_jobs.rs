@@ -96,7 +96,8 @@ pub async fn perform_compression(
         .to_string();
 
     let target_dir_path = target_base_path.join(&release_name);
-    fs::create_dir_all(&target_dir_path).map_err(|e| AppError::IoError(format!("Failed to create target directory: {}", e)))?;
+    fs::create_dir_all(&target_dir_path)
+        .map_err(|e| AppError::IoError(format!("Failed to create target directory: {}", e)))?;
     let extension = compressors::get_extension_for_compression_type();
 
     let (group_and_model_dirs, files_for_3pk, files_for_zip) =
@@ -193,7 +194,7 @@ async fn run_compression_tasks(
                 .file_name()
                 .ok_or_else(|| AppError::ConfigError("Invalid directory name".to_string()))?
                 .to_string_lossy()
-                .to_owned();
+                .into_owned();
 
             let archive_path = target_dir_clone.join(format!("{}.{}", dir_name, extension_clone));
 
@@ -219,7 +220,7 @@ async fn run_compression_tasks(
                 })?;
 
                 compressors::compress_files(
-                    &[path_clone.clone()],
+                    std::slice::from_ref(&path_clone),
                     archive_file,
                     Some(progress_guard.create_callback(&path_clone)),
                 )

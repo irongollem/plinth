@@ -1,5 +1,5 @@
-import { ref } from "vue";
 import { type } from "@tauri-apps/plugin-os";
+import { ref } from "vue";
 
 export function useOS() {
   const osType = ref(type());

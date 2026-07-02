@@ -68,21 +68,21 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { computed, ref } from "vue";
 
-import { commands, type Release } from "../bindings";
-import TextInput from "../components/TextInput.vue";
-import MonthYearInput from "../components/MonthYearInput.vue";
-import TextArea from "../components/TextArea.vue";
-import View from "../components/View.vue";
-import ImageSelect from "../components/ImageSelect.vue";
+import { type Release, commands } from "../bindings";
 import FileSelect from "../components/FileSelect.vue";
-import { useToastStore } from "../stores/toastStore.ts";
-import { useReleasesStore } from "../stores/releasesStore.ts";
+import ImageSelect from "../components/ImageSelect.vue";
+import MonthYearInput from "../components/MonthYearInput.vue";
+import Switch from "../components/Switch.vue";
+import TextArea from "../components/TextArea.vue";
+import TextInput from "../components/TextInput.vue";
+import View from "../components/View.vue";
 import type { SelectedFile } from "../composables/useFileSelect";
 import { useOS } from "../composables/useOS";
-import Switch from "../components/Switch.vue";
+import { useReleasesStore } from "../stores/releasesStore.ts";
+import { useToastStore } from "../stores/toastStore.ts";
 
 const toastStore = useToastStore();
 const releasesStore = useReleasesStore();

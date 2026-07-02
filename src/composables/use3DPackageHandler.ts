@@ -1,5 +1,5 @@
-import { onMounted, onUnmounted } from "vue";
 import { listen } from "@tauri-apps/api/event";
+import { onMounted, onUnmounted } from "vue";
 import { useToastStore } from "../stores/toastStore";
 // import { useReleasesStore } from "../stores/releasesStore";
 
