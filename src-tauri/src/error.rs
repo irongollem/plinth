@@ -54,7 +54,3 @@ impl From<AppError> for String {
         err.to_string()
     }
 }
-
-impl Drop for AppError {
-    fn drop(&mut self) {}
-}
