@@ -6,6 +6,15 @@
 
 ## To Do
 
+### Render engine (Blender promo renders)
+
+- [ ] Bundle or download-on-first-run a portable Blender (GPL allows shipping it as a separate CLI process; include license + source link). Detector already checks exe-relative `Resources/blender/`.
+- [ ] Batch render mode: manifest of many minis in ONE Blender launch (see raw/HANDOVER.md, biggest speed win for terabyte-scale cataloging)
+- [ ] Store chosen rotation in model metadata (`model.json`) so catalog re-renders don't need repositioning
+- [ ] Scale reference figure / true-scale rendering (handover roadmap; current look normalizes size)
+- [ ] Sidecar JSON per render (dimensions mm, parts, rotation) for future catalog search
+- [ ] render_mini.py uses `use_nodes` (deprecated, removal in Blender 6.0) — needs a tweak when 6.x lands
+
 - [ ] ARCHITECTURE: Currently we are only storing the paths in the json, but in doing so also reduce the info available in the UI. The data in the UI should be complete. From creation dont throw away the data too soon and when revisiting compose the UI info from the json PLUS the underlying jsons.
 - [ ] Add checkboxes to release fields to store the field data permanently like settings (so creators dont have to type in their own name every time for example)
 - [ ] use TAR+Zstd for local compression and cataloging
