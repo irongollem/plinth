@@ -21,27 +21,49 @@ export interface FileFilter {
 
 /** Build SelectedFile entries from known paths (dialog-free). */
 export async function filesFromPaths(paths: string[]): Promise<SelectedFile[]> {
-  const files: SelectedFile[] = [];
-  for (const path of paths) {
-    try {
-      const fileInfo = await stat(path);
-      const fileName = path.split(/[/\\]/).pop() || "";
-      const extension = fileName.split(".").pop()?.toLowerCase() || "";
+  // Stat all paths concurrently; unreadable files drop out with a log
+  const files = await Promise.all(
+    paths.map(async (path) => {
+      try {
+        const fileInfo = await stat(path);
+        const fileName = path.split(/[/\\]/).pop() || "";
+        const extension = fileName.split(".").pop()?.toLowerCase() || "";
 
-      files.push({
-        path,
-        name: fileName,
-        info: fileInfo,
-        fileType: extension ? `.${extension}` : "Unknown",
-        getPreviewUrl() {
-          return convertFileSrc(this.path);
-        },
-      });
-    } catch (error) {
-      console.error(`Failed to read file metadata for ${path}:`, error);
-    }
+        const file: SelectedFile = {
+          path,
+          name: fileName,
+          info: fileInfo,
+          fileType: extension ? `.${extension}` : "Unknown",
+          getPreviewUrl() {
+            return convertFileSrc(this.path);
+          },
+        };
+        return file;
+      } catch (error) {
+        console.error(`Failed to read file metadata for ${path}:`, error);
+        return null;
+      }
+    }),
+  );
+  return files.filter((file): file is SelectedFile => file !== null);
+}
+
+/** Open a native directory picker; resolves to the chosen path or null. */
+export async function selectDirectory(options: {
+  title?: string;
+}): Promise<string | null> {
+  try {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: options.title || "Select Directory",
+    });
+
+    return selected ? (selected as string) : null;
+  } catch (error) {
+    console.error("Directory selection failed:", error);
+    return null;
   }
-  return files;
 }
 
 export function useFileSelect() {
@@ -101,23 +123,6 @@ export function useFileSelect() {
     }
 
     return filters.length ? filters : undefined;
-  };
-
-  const selectDirectory = async (options: {
-    title?: string;
-  }): Promise<string | null> => {
-    try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: options.title || "Select Directory",
-      });
-
-      return selected ? (selected as string) : null;
-    } catch (error) {
-      console.error("Directory selection failed:", error);
-      return null;
-    }
   };
 
   const selectFiles = async (options: {

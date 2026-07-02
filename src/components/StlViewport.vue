@@ -278,10 +278,14 @@ const loadParts = async () => {
   isLoading.value = true;
   try {
     const loader = new STLLoader();
+    // Read all parts concurrently; Promise.all preserves part order
+    const byteArrays = await Promise.all(
+      props.parts.map((path) => readFile(path)),
+    );
+    if (token !== loadToken) return; // superseded by a newer selection
+
     const geometries: THREE.BufferGeometry[] = [];
-    for (const path of props.parts) {
-      const bytes = await readFile(path);
-      if (token !== loadToken) return; // superseded by a newer selection
+    for (const bytes of byteArrays) {
       const buffer = bytes.buffer.slice(
         bytes.byteOffset,
         bytes.byteOffset + bytes.byteLength,

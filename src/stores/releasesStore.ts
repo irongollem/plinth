@@ -42,7 +42,9 @@ export const useReleasesStore = defineStore("releases", () => {
     // Keep the local model list consistent with the new reference list —
     // e.g. creating a fresh release must not keep the previous one's models
     models.value = models.value.filter((model) =>
-      release.value?.model_references.some((ref) => ref.id === model.id),
+      release.value?.model_references.some(
+        (reference) => reference.id === model.id,
+      ),
     );
   };
 
@@ -74,7 +76,7 @@ export const useReleasesStore = defineStore("releases", () => {
       models.value.splice(index, 1);
     }
     const refIndex = release.value.model_references.findIndex(
-      (ref) => ref.id === model.id,
+      (reference) => reference.id === model.id,
     );
     if (refIndex !== -1) {
       release.value.model_references.splice(refIndex, 1);

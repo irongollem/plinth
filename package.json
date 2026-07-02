@@ -8,10 +8,11 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "lint": "biome lint .",
-    "format": "biome format --write .",
-    "format:check": "biome format --write=false .",
-    "check": "biome check .",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "check": "oxlint && oxfmt --check",
     "test:frontend": "vitest run"
   },
   "dependencies": {
@@ -26,13 +27,14 @@
     "vue": "^3.5.39"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.2",
     "@tailwindcss/vite": "^4.3.2",
     "@tauri-apps/cli": "^2.11.4",
     "@types/three": "^0.185.0",
     "@vitejs/plugin-vue": "^6.0.7",
     "autoprefixer": "^10.5.2",
     "daisyui": "^5.6.7",
+    "oxfmt": "0.57.0",
+    "oxlint": "1.72.0",
     "postcss": "^8.5.16",
     "tailwindcss": "^4.3.2",
     "typescript": "~6.0.3",
@@ -40,5 +42,5 @@
     "vitest": "^4.1.9",
     "vue-tsc": "^3.3.6"
   },
-  "trustedDependencies": ["@biomejs/biome"]
+  "trustedDependencies": []
 }

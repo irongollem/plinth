@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["oxc", "typescript", "unicorn", "import", "vue"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "rules": {
+    "import/no-unassigned-import": [
+      "warn",
+      { "allow": ["**/*.css", "cally"] }
+    ]
+  },
+  "ignorePatterns": ["src/bindings.ts", "src/vite-env.d.ts", "dist", "src-tauri", "raw", "docs"]
+}
