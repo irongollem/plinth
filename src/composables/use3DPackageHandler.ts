@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { onMounted, onUnmounted } from "vue";
+import { commands } from "../bindings";
 import { useToastStore } from "../stores/toastStore";
 // import { useReleasesStore } from "../stores/releasesStore";
 
@@ -28,11 +29,22 @@ export function use3DPackageHandler() {
   };
 
   onMounted(async () => {
-    // Set up listener for 3D package open events
+    // Set up listener for 3D package open events (drag-drop on a running app)
     unlistenFn = await listen("3dpak-open", (event) => {
       const filePath = event.payload as string;
       handle3DPackage(filePath);
     });
+
+    // A file opened via OS file association arrives before this listener
+    // exists (Tauri events don't queue), so the backend parks it for us
+    try {
+      const pending = await commands.getPending3dpak();
+      if (pending) {
+        handle3DPackage(pending);
+      }
+    } catch (error) {
+      console.error("Failed to check for a pending 3D package:", error);
+    }
   });
 
   onUnmounted(() => {

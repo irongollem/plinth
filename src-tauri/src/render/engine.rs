@@ -1,24 +1,64 @@
 use crate::error::AppError;
 use crate::models::{BlenderInfo, RenderOptions};
 use crate::settings::SETTINGS_CACHE;
+use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tokio::process::Command;
+
+/// (blender_path setting at detection time, detected install)
+type CachedDetection = (Option<String>, BlenderInfo);
+
+/// Last successful detection, keyed by the blender_path setting it was made
+/// under. Detection spawns `blender --version` (a full Blender cold start),
+/// far too expensive to repeat on every render.
+static DETECTION_CACHE: Lazy<Mutex<Option<CachedDetection>>> = Lazy::new(|| Mutex::new(None));
 
 /// Resolve the Blender binary: explicit setting -> BLENDER_BIN env -> PATH -> platform defaults.
 /// Returns the first candidate that actually runs and reports a version.
+/// Always probes fresh (and refreshes the cache) — use detect_blender_cached
+/// on hot paths.
 pub async fn detect_blender() -> Result<BlenderInfo, AppError> {
+    let configured = configured_blender_path();
     for candidate in candidate_paths() {
         let candidate = normalize_binary(candidate);
         if let Some(version) = blender_version(&candidate).await {
-            return Ok(BlenderInfo {
+            let info = BlenderInfo {
                 path: candidate.to_string_lossy().into_owned(),
                 version,
-            });
+            };
+            if let Ok(mut cache) = DETECTION_CACHE.lock() {
+                *cache = Some((configured, info.clone()));
+            }
+            return Ok(info);
         }
     }
     Err(AppError::NotFoundError(
         "Blender not found. Install Blender 4.x+ or set its location in Settings.".to_string(),
     ))
+}
+
+/// Cached detection for per-render use. Re-detects when the configured
+/// blender_path setting changed or the cached binary vanished.
+pub async fn detect_blender_cached() -> Result<BlenderInfo, AppError> {
+    let configured = configured_blender_path();
+    if let Ok(cache) = DETECTION_CACHE.lock() {
+        if let Some((setting, info)) = cache.as_ref() {
+            let binary_still_there =
+                !info.path.contains(std::path::MAIN_SEPARATOR) || Path::new(&info.path).is_file();
+            if *setting == configured && binary_still_there {
+                return Ok(info.clone());
+            }
+        }
+    }
+    detect_blender().await
+}
+
+fn configured_blender_path() -> Option<String> {
+    SETTINGS_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.blender_path.clone())
 }
 
 fn candidate_paths() -> Vec<PathBuf> {

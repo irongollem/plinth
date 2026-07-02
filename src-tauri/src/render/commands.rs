@@ -44,7 +44,7 @@ pub async fn start_render(
         }
     }
 
-    let blender = engine::detect_blender().await?;
+    let blender = engine::detect_blender_cached().await?;
     let script = app_handle
         .path()
         .resolve("resources/render_mini.py", BaseDirectory::Resource)
@@ -211,9 +211,16 @@ async fn run_blender(
     let mut stdout_tail: VecDeque<String> = VecDeque::new();
     let mut last_percent: u32 = 0;
 
+    // Register cancellation interest ONCE and keep the future alive across
+    // loop iterations: notify_waiters() stores no permit, so a fresh
+    // notified() per iteration would drop a cancel that lands while the
+    // loop body is processing a line.
+    let cancelled = cancel_token.notified();
+    tokio::pin!(cancelled);
+
     loop {
         tokio::select! {
-            _ = cancel_token.notified() => {
+            _ = &mut cancelled => {
                 child.kill().await.ok();
                 return Err(AppError::UserCancelled("Render cancelled".to_string()));
             }

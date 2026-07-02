@@ -9,15 +9,45 @@ use file::commands::{add_model, cancel_compression, create_release, finalize_rel
 use models::events::{CompressionStatus, RenderStatus};
 use render::commands::{cancel_render, detect_blender, start_render};
 use std::env;
-use tauri::{Emitter, Listener};
+use std::sync::Mutex;
+use tauri::{Emitter, Listener, Manager};
 #[allow(unused_imports)]
 use tauri_plugin_fs::FsExt;
-use tauri_specta::{collect_events, Builder};
+use tauri_specta::{collect_commands, collect_events, Builder};
 
 #[cfg(debug_assertions)]
 use specta_typescript::Typescript;
-#[cfg(debug_assertions)]
-use tauri_specta::collect_commands;
+
+/// A .3dpak path passed on the command line (file association / double-click).
+/// The startup emit fires before the webview has registered any listener and
+/// Tauri events are not queued, so the path is parked here for the frontend
+/// to fetch once it has mounted.
+pub struct PendingPackageOpen(Mutex<Option<String>>);
+
+#[tauri::command]
+#[specta::specta]
+fn get_pending_3dpak(state: tauri::State<'_, PendingPackageOpen>) -> Option<String> {
+    state.0.lock().ok().and_then(|mut pending| pending.take())
+}
+
+/// One builder feeds both the invoke handler and (in debug) the TypeScript
+/// bindings export, so the command/event lists can't drift apart.
+fn create_specta_builder() -> Builder {
+    Builder::<tauri::Wry>::new()
+        .commands(collect_commands![
+            add_model,
+            create_release,
+            finalize_release,
+            cancel_compression,
+            settings::get_settings,
+            settings::set_settings,
+            detect_blender,
+            start_render,
+            cancel_render,
+            get_pending_3dpak,
+        ])
+        .events(collect_events![CompressionStatus, RenderStatus,])
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -33,11 +63,17 @@ pub fn run() {
         None
     };
 
-    #[cfg(debug_assertions)]
-    let builder = export_typescript_bindings();
+    let builder = create_specta_builder();
 
-    #[cfg(not(debug_assertions))]
-    let builder = create_builder_for_production();
+    #[cfg(debug_assertions)]
+    builder
+        .export(
+            Typescript::default()
+                .formatter(specta_typescript::formatter::biome)
+                .header("// @ts-nocheck\n// eslint-disable\n// biome-ignore lint/*: auto-generated file\n"),
+            "../src/bindings.ts",
+        )
+        .expect("Failed to export typescript bindings");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_os::init())
@@ -45,17 +81,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_fs::init())
+        .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
             let app_handle = app.handle().clone();
 
-            if let Some(file_path) = maybe_3dpak_path {
-                app_handle
-                    .emit("3dpak-open", file_path)
-                    .unwrap_or_else(|e| {
-                        eprintln!("Failed to emit 3dpak-open event: {}", e);
-                    });
-            }
+            app.manage(PendingPackageOpen(Mutex::new(maybe_3dpak_path)));
 
             let drag_drop_handle = app_handle.clone();
             app_handle.listen("tauri://drag-drop", move |event| {
@@ -81,49 +112,6 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            add_model,
-            create_release,
-            finalize_release,
-            cancel_compression,
-            settings::get_settings,
-            settings::set_settings,
-            detect_blender,
-            start_render,
-            cancel_render,
-        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-#[cfg(not(debug_assertions))]
-fn create_builder_for_production() -> Builder<tauri::Wry> {
-    Builder::<tauri::Wry>::new().events(collect_events![CompressionStatus, RenderStatus,])
-}
-
-#[cfg(debug_assertions)]
-fn export_typescript_bindings() -> Builder {
-    let builder = Builder::<tauri::Wry>::new();
-    let builder = builder
-        .commands(collect_commands![
-            add_model,
-            create_release,
-            finalize_release,
-            cancel_compression,
-            settings::get_settings,
-            settings::set_settings,
-            detect_blender,
-            start_render,
-            cancel_render,
-        ])
-        .events(collect_events![CompressionStatus, RenderStatus,]);
-    builder.export(
-            Typescript::default()
-                .formatter(specta_typescript::formatter::biome)
-                .header("// @ts-nocheck\n// eslint-disable\n// biome-ignore lint/*: auto-generated file\n"),
-            "../src/bindings.ts",
-        )
-        .expect("Failed to export typescript bindings");
-
-    builder
 }
