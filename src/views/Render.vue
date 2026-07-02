@@ -267,11 +267,7 @@ const render = async () => {
   });
 
   if (result.status === "error") {
-    toastStore.addToast(
-      `Failed to start render: ${JSON.stringify(result.error)}`,
-      "error",
-      0,
-    );
+    toastStore.reportError("Failed to start render", result.error);
   }
 };
 </script>

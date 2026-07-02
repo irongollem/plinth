@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import { describeError } from "../utils/format";
 
 export type ToastType = "success" | "error" | "warning" | "info";
 export interface Toast {
@@ -33,5 +34,14 @@ export const useToastStore = defineStore("toast", () => {
     toasts.value = toasts.value.filter((toast) => toast.id !== id);
   };
 
-  return { toasts, addToast, removeToast };
+  /**
+   * One place for the "console.error + sticky error toast" pattern, with
+   * AppError objects rendered readably instead of [object Object].
+   */
+  const reportError = (message: string, error: unknown) => {
+    console.error(message, error);
+    return addToast(`${message}: ${describeError(error)}`, "error", 0);
+  };
+
+  return { toasts, addToast, removeToast, reportError };
 });

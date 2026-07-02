@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { stat } from "@tauri-apps/plugin-fs";
 import type { FileInfo } from "@tauri-apps/plugin-fs";
 import { ref } from "vue";
+import { formatFileSize } from "../utils/format";
 
 export interface SelectedFile {
   path: string; // The full file path
@@ -42,7 +43,7 @@ export function useFileSelect() {
       ["jpg", "jpeg", "png", "gif", "svg", "webp", "avif", "bmp"].includes(ext),
     );
     const models = extensions.filter((ext) =>
-      ["stl", "obj", "3mf", "lys", "chitubox"].includes(ext),
+      ["stl", "obj", "3mf", "lys", "chitubox", "blend", "gcode"].includes(ext),
     );
     const documents = extensions.filter((ext) =>
       ["txt", "md", "json", "csv", "xml", "pdf"].includes(ext),
@@ -140,19 +141,6 @@ export function useFileSelect() {
       console.error("Selection failed:", error);
       return null;
     }
-  };
-
-  // Format file size for display
-  const formatFileSize = (size?: number) => {
-    if (!size) return "Unknown";
-    let fileSize = size;
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    let i = 0;
-    while (fileSize >= 1024 && i < units.length - 1) {
-      fileSize /= 1024;
-      i++;
-    }
-    return `${fileSize.toFixed(1)} ${units[i]}`;
   };
 
   return {
