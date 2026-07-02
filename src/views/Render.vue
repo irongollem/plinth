@@ -149,7 +149,9 @@ import { computed, onMounted, ref } from "vue";
 import { type BlenderInfo, commands } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
 import ProgressBar from "../components/ProgressBar.vue";
-import type StlViewport from "../components/StlViewport.vue";
+// NOT `import type`: the component is used in the template, which
+// biome's useImportType can't see (rule disabled for .vue in biome.json)
+import StlViewport from "../components/StlViewport.vue";
 import type { SelectedFile } from "../composables/useFileSelect";
 import { useRenderStatus } from "../composables/useRenderStatus";
 import { useReleasesStore } from "../stores/releasesStore.ts";
