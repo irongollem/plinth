@@ -11,6 +11,28 @@ pub struct Settings {
     pub compression_type: Option<CompressionType>,
     pub chunk_size: Option<u32>,
     pub max_compression_threads: Option<u32>,
+    pub blender_path: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct BlenderInfo {
+    pub path: String,
+    pub version: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct RenderOptions {
+    /// Euler XYZ rotation in degrees, matching render_mini.py --rotate
+    pub rotate: (f64, f64, f64),
+    /// Linear RGB resin base color, matching --color (None = locked look default)
+    pub color: Option<(f64, f64, f64)>,
+    pub azimuth: Option<f64>,
+    pub elevation: Option<f64>,
+    pub zoom: Option<f64>,
+    pub resolution: Option<u32>,
+    pub samples: Option<u32>,
+    /// Output PNG path (None = next to the first STL part)
+    pub output_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

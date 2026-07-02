@@ -43,3 +43,44 @@ pub struct FailedStatus {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
 pub struct CancelledStatus {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
+pub enum RenderStatus {
+    Started(RenderStartedStatus),
+    Progress(RenderProgressStatus),
+    Completed(RenderCompletedStatus),
+    Failed(RenderFailedStatus),
+    Cancelled(RenderCancelledStatus),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct RenderStartedStatus {
+    pub job_id: String,
+    pub output_path: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct RenderProgressStatus {
+    pub job_id: String,
+    pub current_sample: u32,
+    pub total_samples: u32,
+    pub percent: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct RenderCompletedStatus {
+    pub job_id: String,
+    pub output_path: String,
+    pub elapsed_seconds: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct RenderFailedStatus {
+    pub job_id: String,
+    pub error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct RenderCancelledStatus {
+    pub job_id: String,
+}

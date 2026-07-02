@@ -33,7 +33,7 @@ tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-os = "2"
 tauri-specta = { version = "2.0.0-rc.21", features = ["typescript", "derive"] }
-tokio = "1.44.2"
+tokio = { version = "1.44.2", features = ["process", "io-util", "macros", "sync"] }
 uuid = { version = "1.4", features = ["v4", "serde"] }
 walkdir = "2.5.0"
 zip = "2.6.1"

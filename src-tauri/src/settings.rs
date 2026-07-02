@@ -12,6 +12,7 @@ pub(crate) static SETTINGS_CACHE: Lazy<Mutex<Settings>> = Lazy::new(|| {
         compression_type: None,
         chunk_size: None,
         max_compression_threads: None,
+        blender_path: None,
     })
 });
 
@@ -49,12 +50,17 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         .and_then(|v| v.as_u64())
         .map(|v| v as u32);
 
+    let blender_path = store
+        .get("blender_path")
+        .and_then(|v| v.as_str().map(String::from));
+
     let settings = Settings {
         scratch_dir,
         target_dir,
         compression_type: Some(CompressionType::Zip),
         chunk_size,
         max_compression_threads,
+        blender_path,
     };
 
     {
@@ -97,6 +103,9 @@ pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(
     }
     if let Some(max_threads) = settings.max_compression_threads {
         store.set("max_compression_threads", max_threads);
+    }
+    if let Some(blender) = &settings.blender_path {
+        store.set("blender_path", blender.to_string());
     }
 
     store.save().map_err(|e| e.to_string())

@@ -2,10 +2,12 @@ mod error;
 mod file;
 mod image;
 mod models;
+mod render;
 mod settings;
 
 use file::commands::{add_model, cancel_compression, create_release, finalize_release};
-use models::events::CompressionStatus;
+use models::events::{CompressionStatus, RenderStatus};
+use render::commands::{cancel_render, detect_blender, start_render};
 use std::env;
 use tauri::{Emitter, Listener};
 #[allow(unused_imports)]
@@ -35,7 +37,7 @@ pub fn run() {
     let builder = export_typescript_bindings();
 
     #[cfg(not(debug_assertions))]
-        let builder = create_builder_for_production();
+    let builder = create_builder_for_production();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_os::init())
@@ -57,8 +59,7 @@ pub fn run() {
 
             let drag_drop_handle = app_handle.clone();
             app_handle.listen("tauri://drag-drop", move |event| {
-                if let Ok(payload_json) =
-                    serde_json::from_str::<serde_json::Value>(event.payload())
+                if let Ok(payload_json) = serde_json::from_str::<serde_json::Value>(event.payload())
                 {
                     if let Some(paths) = payload_json.get("paths").and_then(|p| p.as_array()) {
                         for path_value in paths {
@@ -87,6 +88,9 @@ pub fn run() {
             cancel_compression,
             settings::get_settings,
             settings::set_settings,
+            detect_blender,
+            start_render,
+            cancel_render,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -94,8 +98,7 @@ pub fn run() {
 
 #[cfg(not(debug_assertions))]
 fn create_builder_for_production() -> Builder<tauri::Wry> {
-    Builder::<tauri::Wry>::new()
-        .events(collect_events![CompressionStatus,])
+    Builder::<tauri::Wry>::new().events(collect_events![CompressionStatus, RenderStatus,])
 }
 
 #[cfg(debug_assertions)]
@@ -109,8 +112,11 @@ fn export_typescript_bindings() -> Builder {
             cancel_compression,
             settings::get_settings,
             settings::set_settings,
+            detect_blender,
+            start_render,
+            cancel_render,
         ])
-        .events(collect_events![CompressionStatus,]);
+        .events(collect_events![CompressionStatus, RenderStatus,]);
     builder.export(
             Typescript::default()
                 .formatter(specta_typescript::formatter::biome)
