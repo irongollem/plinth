@@ -99,7 +99,132 @@ const setupScene = (el: HTMLDivElement) => {
     metalness: 0,
   });
 
+  buildGizmo();
   updateCamera();
+};
+
+// ---- rotation gizmo: draggable rings for constrained axis rotation ----
+const GIZMO_RADIUS = 1.45;
+const RING_OPACITY = 0.35;
+const RING_OPACITY_HOVER = 0.9;
+const AXIS_VECTORS: Record<"x" | "y" | "z", THREE.Vector3> = {
+  x: new THREE.Vector3(1, 0, 0),
+  y: new THREE.Vector3(0, 1, 0),
+  z: new THREE.Vector3(0, 0, 1),
+};
+
+let gizmo: THREE.Group | null = null;
+let gizmoRings: THREE.Mesh[] = [];
+let hoveredRing: THREE.Mesh | null = null;
+let ringDrag: {
+  axis: THREE.Vector3;
+  u: THREE.Vector3;
+  w: THREE.Vector3;
+  center: THREE.Vector3;
+  startAngle: number;
+  startQuat: THREE.Quaternion;
+} | null = null;
+const raycaster = new THREE.Raycaster();
+
+const buildGizmo = () => {
+  if (!scene) return;
+  gizmo = new THREE.Group();
+  const ring = (
+    axis: "x" | "y" | "z",
+    color: number,
+    orient: (m: THREE.Mesh) => void,
+  ) => {
+    const mesh = new THREE.Mesh(
+      new THREE.TorusGeometry(GIZMO_RADIUS, 0.025, 10, 128),
+      new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: RING_OPACITY,
+      }),
+    );
+    orient(mesh);
+    mesh.userData.axis = axis;
+    gizmo?.add(mesh);
+    gizmoRings.push(mesh);
+  };
+  // A torus lies in the XY plane (normal +Z); orient the others to match
+  ring("z", 0x5588f0, () => {});
+  ring("x", 0xf06060, (m) => {
+    m.rotation.y = Math.PI / 2;
+  });
+  ring("y", 0x58c060, (m) => {
+    m.rotation.x = Math.PI / 2;
+  });
+  gizmo.visible = false;
+  scene.add(gizmo);
+};
+
+const updateGizmo = () => {
+  if (!gizmo || !pivot) return;
+  gizmo.visible = !!meshGroup;
+  if (meshGroup) {
+    const box = new THREE.Box3().setFromObject(pivot);
+    if (!box.isEmpty()) box.getCenter(gizmo.position);
+  }
+};
+
+const pointerNdc = (e: PointerEvent) => {
+  const el = container.value;
+  if (!el) return new THREE.Vector2();
+  const rect = el.getBoundingClientRect();
+  return new THREE.Vector2(
+    ((e.clientX - rect.left) / rect.width) * 2 - 1,
+    -((e.clientY - rect.top) / rect.height) * 2 + 1,
+  );
+};
+
+/** Angle of the pointer around `axis` in the ring's plane, or null when the
+ *  view ray runs (near-)parallel to that plane. */
+const ringAngleAt = (
+  e: PointerEvent,
+  axis: THREE.Vector3,
+  center: THREE.Vector3,
+  u: THREE.Vector3,
+  w: THREE.Vector3,
+): number | null => {
+  if (!camera) return null;
+  raycaster.setFromCamera(pointerNdc(e), camera);
+  const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(axis, center);
+  const hit = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(plane, hit)) return null;
+  const v = hit.sub(center);
+  return Math.atan2(w.dot(v), u.dot(v));
+};
+
+const pickRing = (e: PointerEvent): THREE.Mesh | null => {
+  if (!camera || !gizmo?.visible) return null;
+  raycaster.setFromCamera(pointerNdc(e), camera);
+  const hits = raycaster.intersectObjects(gizmoRings, false);
+  return (hits[0]?.object as THREE.Mesh) ?? null;
+};
+
+const beginRingDrag = (e: PointerEvent, mesh: THREE.Mesh): boolean => {
+  if (!pivot || !gizmo) return false;
+  const axis = AXIS_VECTORS[mesh.userData.axis as "x" | "y" | "z"].clone();
+  // In-plane basis: u ⟂ axis, w = axis × u closes the right-handed frame
+  const helper =
+    Math.abs(axis.z) < 0.9
+      ? new THREE.Vector3(0, 0, 1)
+      : new THREE.Vector3(1, 0, 0);
+  const u = new THREE.Vector3().crossVectors(helper, axis).normalize();
+  const w = new THREE.Vector3().crossVectors(axis, u).normalize();
+  const center = gizmo.position.clone();
+  const startAngle = ringAngleAt(e, axis, center, u, w);
+  if (startAngle === null) return false;
+  ringDrag = {
+    axis,
+    u,
+    w,
+    center,
+    startAngle,
+    startQuat: pivot.quaternion.clone(),
+  };
+  return true;
 };
 
 // Render on demand instead of a 60fps loop: the scene is static between
@@ -167,6 +292,7 @@ const emitView = () => {
 
 const afterRotationChange = () => {
   floorModel();
+  updateGizmo();
   updateCamera();
   emitRotation();
 };
@@ -214,16 +340,58 @@ const onPointerDown = (e: PointerEvent) => {
   lastX = e.clientX;
   lastY = e.clientY;
   (e.target as HTMLElement).setPointerCapture(e.pointerId);
+
+  // Grabbing a gizmo ring wins over free tumble
+  if (e.button === 0) {
+    const ring = pickRing(e);
+    if (ring && beginRingDrag(e, ring)) return;
+  }
+  ringDrag = null;
 };
 
 const onPointerMove = (e: PointerEvent) => {
-  if (dragButton === null || !pivot || !camera) return;
+  if (!pivot || !camera) return;
+
+  // Hover feedback when not dragging
+  if (dragButton === null) {
+    const ring = pickRing(e);
+    if (ring !== hoveredRing) {
+      for (const mesh of gizmoRings) {
+        (mesh.material as THREE.MeshBasicMaterial).opacity =
+          mesh === ring ? RING_OPACITY_HOVER : RING_OPACITY;
+      }
+      hoveredRing = ring;
+      if (container.value) {
+        container.value.style.cursor = ring ? "pointer" : "";
+      }
+      requestRender();
+    }
+    return;
+  }
+
   const dx = e.clientX - lastX;
   const dy = e.clientY - lastY;
   lastX = e.clientX;
   lastY = e.clientY;
 
-  if (dragButton === 0) {
+  if (dragButton === 0 && ringDrag) {
+    // Constrained rotation: angle around the grabbed ring's axis, applied
+    // to the quaternion captured at drag start (no incremental drift)
+    const angle = ringAngleAt(
+      e,
+      ringDrag.axis,
+      ringDrag.center,
+      ringDrag.u,
+      ringDrag.w,
+    );
+    if (angle === null) return;
+    const q = new THREE.Quaternion().setFromAxisAngle(
+      ringDrag.axis,
+      angle - ringDrag.startAngle,
+    );
+    pivot.quaternion.copy(ringDrag.startQuat).premultiply(q);
+    afterRotationChange();
+  } else if (dragButton === 0) {
     // Tumble the model in world space: horizontal = spin around Z (up),
     // vertical = tilt around the camera's right axis.
     const speed = 0.008;
@@ -246,6 +414,7 @@ const onPointerMove = (e: PointerEvent) => {
 
 const onPointerUp = (e: PointerEvent) => {
   dragButton = null;
+  ringDrag = null;
   (e.target as HTMLElement).releasePointerCapture(e.pointerId);
 };
 
@@ -271,6 +440,7 @@ const loadParts = async () => {
   const token = ++loadToken;
   disposeModel();
   if (!props.parts.length) {
+    updateGizmo();
     requestRender();
     return;
   }
@@ -355,6 +525,12 @@ onBeforeUnmount(() => {
   loadToken++;
   resizeObserver?.disconnect();
   disposeModel();
+  for (const mesh of gizmoRings) {
+    mesh.geometry.dispose();
+    (mesh.material as THREE.MeshBasicMaterial).dispose();
+  }
+  gizmoRings = [];
+  gizmo = null;
   material?.dispose();
   renderer?.dispose();
   renderer?.domElement.remove();
@@ -393,7 +569,8 @@ onBeforeUnmount(() => {
       v-else
       class="absolute bottom-2 left-2 text-xs text-base-content/40 pointer-events-none"
     >
-      drag: rotate model · right-drag: orbit view · wheel: zoom
+      drag ring: rotate on axis · drag: free rotate · right-drag: orbit · wheel:
+      zoom
     </div>
   </div>
 </template>
