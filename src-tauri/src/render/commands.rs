@@ -54,6 +54,14 @@ pub async fn start_render(
         Some(out) => PathBuf::from(out),
         None => PathBuf::from(&parts[0]).with_extension("png"),
     };
+    // Never clobber silently: without explicit overwrite consent an
+    // existing file gets a -1/-2/... suffix (the Started/Completed events
+    // carry the real path, so the UI always shows where it went)
+    let output_path = if options.overwrite {
+        output_path
+    } else {
+        unique_path(output_path)
+    };
 
     let job_id = Uuid::new_v4().to_string();
     let cancel_token = Arc::new(Notify::new());
@@ -80,6 +88,29 @@ pub async fn start_render(
     });
 
     Ok(job_id)
+}
+
+/// First non-existing variant of `path`: name.png, name-1.png, name-2.png...
+fn unique_path(path: PathBuf) -> PathBuf {
+    if !path.exists() {
+        return path;
+    }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "render".to_string());
+    let extension = path
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "png".to_string());
+    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    for n in 1.. {
+        let candidate = parent.join(format!("{}-{}.{}", stem, n, extension));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("ran out of integers before file names")
 }
 
 #[tauri::command]

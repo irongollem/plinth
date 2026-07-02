@@ -36,6 +36,10 @@ pub struct RenderOptions {
     pub look: Option<String>,
     /// Output PNG path (None = next to the first STL part)
     pub output_path: Option<String>,
+    /// Allow replacing an existing file; when false an existing output gets
+    /// a unique -N suffix instead of being clobbered
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

@@ -404,6 +404,9 @@ const render = async () => {
     samples: samples.value,
     look: look.value,
     output_path: outputPath.value || null,
+    // The OS save dialog already asked about replacing an explicit choice;
+    // default outputs never overwrite — the backend uniquifies with -N
+    overwrite: !!outputPath.value,
   });
 
   if (result.status === "error") {

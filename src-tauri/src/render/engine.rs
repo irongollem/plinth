@@ -291,6 +291,7 @@ mod tests {
             samples: Some(8),
             look: Some("rich".to_string()),
             output_path: None,
+            overwrite: true,
         };
         let mut cmd = build_render_command(
             &blender,
