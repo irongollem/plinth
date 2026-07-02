@@ -69,10 +69,10 @@ const clearFiles = () => {
 </script>
 
 <template>
-<div class="form-control mb-2">
-  <label class="floating-label" :for="id">
-    <span class="label">{{  label  }}</span>
-  </label>
+  <div class="form-control mb-2">
+    <label class="floating-label" :for="id">
+      <span class="label">{{ label }}</span>
+    </label>
 
     <div v-if="dirMode" class="flex">
       <input
@@ -83,23 +83,31 @@ const clearFiles = () => {
         placeholder="Select target directory..."
       />
       <div class="tooltip" :data-tip="tooltip">
-        <button
-          type="button"
-          @click="selectPath()"
-          class="btn"
-        > Browse </button>
+        <button type="button" @click="selectPath()" class="btn">Browse</button>
       </div>
     </div>
 
-    <div v-else class="border border-gray-500 rounded-box bg-base-100 p-2 w-full">
+    <div
+      v-else
+      class="border border-gray-500 rounded-box bg-base-100 p-2 w-full"
+    >
       <div class="flex items-center gap-2 mb-3">
         <button
           type="button"
           class="btn btn-primary flex-grow"
           @click="selectPath"
         >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
-            <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clip-rule="evenodd" />
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            class="h-5 w-5 mr-2"
+            viewBox="0 0 20 20"
+            fill="currentColor"
+          >
+            <path
+              fill-rule="evenodd"
+              d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z"
+              clip-rule="evenodd"
+            />
           </svg>
           Select Files
         </button>
@@ -120,11 +128,17 @@ const clearFiles = () => {
           </thead>
           <tbody>
             <tr v-for="file in modelValue as SelectedFile[]" :key="file.path">
-              <td class="max-w-[200px] truncate" :title="file.name">{{ file.name }}</td>
+              <td class="max-w-[200px] truncate" :title="file.name">
+                {{ file.name }}
+              </td>
               <td>{{ formatFileSize(file.info.size) }}</td>
               <td>{{ file.fileType }}</td>
               <td>
-                <button type="button" class="btn btn-error btn-xs" @click="removeFile(file)">
+                <button
+                  type="button"
+                  class="btn btn-error btn-xs"
+                  @click="removeFile(file)"
+                >
                   Remove
                 </button>
               </td>
@@ -133,7 +147,11 @@ const clearFiles = () => {
         </table>
 
         <div class="mt-2 flex justify-end">
-          <button type="button" class="btn btn-sm btn-outline" @click="clearFiles">
+          <button
+            type="button"
+            class="btn btn-sm btn-outline"
+            @click="clearFiles"
+          >
             Clear All
           </button>
         </div>
@@ -142,6 +160,6 @@ const clearFiles = () => {
       <div v-else class="text-center p-4 text-base-content/50">
         No files selected
       </div>
+    </div>
   </div>
-</div>
 </template>

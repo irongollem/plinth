@@ -1,15 +1,25 @@
 <template>
-  <main class="bg-gray-800 text-gray-100 flex flex-col md:flex-row gap-6 p-6 pb-2 h-full rounded-b-lg">
+  <main
+    class="bg-gray-800 text-gray-100 flex flex-col md:flex-row gap-6 p-6 pb-2 h-full rounded-b-lg"
+  >
     <!-- Controls -->
-    <section class="md:w-96 shrink-0 overflow-y-auto pr-2 max-h-full mb-6 space-y-4">
+    <section
+      class="md:w-96 shrink-0 overflow-y-auto pr-2 max-h-full mb-6 space-y-4"
+    >
       <h1 class="text-xl font-bold">Render</h1>
 
-      <div v-if="blenderStatus === 'missing'" class="alert alert-warning text-sm">
+      <div
+        v-if="blenderStatus === 'missing'"
+        class="alert alert-warning text-sm"
+      >
         <span>
           Blender was not found. Install Blender 4.x+ or set its location in
           settings.
         </span>
-        <button class="btn btn-xs" @click="releasesStore.setActiveTab('settings')">
+        <button
+          class="btn btn-xs"
+          @click="releasesStore.setActiveTab('settings')"
+        >
           Open Settings
         </button>
       </div>
@@ -35,17 +45,31 @@
           <button class="btn btn-xs" @click="viewport?.setRotation([90, 0, 0])">
             Stand up
           </button>
-          <button class="btn btn-xs" @click="viewport?.rotateWorld('x', 90)">X +90°</button>
-          <button class="btn btn-xs" @click="viewport?.rotateWorld('y', 90)">Y +90°</button>
-          <button class="btn btn-xs" @click="viewport?.rotateWorld('z', 90)">Z +90°</button>
-          <button class="btn btn-xs" @click="viewport?.resetRotation()">Reset</button>
+          <button class="btn btn-xs" @click="viewport?.rotateWorld('x', 90)">
+            X +90°
+          </button>
+          <button class="btn btn-xs" @click="viewport?.rotateWorld('y', 90)">
+            Y +90°
+          </button>
+          <button class="btn btn-xs" @click="viewport?.rotateWorld('z', 90)">
+            Z +90°
+          </button>
+          <button class="btn btn-xs" @click="viewport?.resetRotation()">
+            Reset
+          </button>
         </div>
       </div>
 
       <div class="grid grid-cols-2 gap-3">
         <div>
-          <label class="label text-sm" for="render-resolution">Resolution</label>
-          <select id="render-resolution" class="select select-sm w-full" v-model.number="resolution">
+          <label class="label text-sm" for="render-resolution"
+            >Resolution</label
+          >
+          <select
+            id="render-resolution"
+            class="select select-sm w-full"
+            v-model.number="resolution"
+          >
             <option :value="512">512 px</option>
             <option :value="1024">1024 px</option>
             <option :value="1600">1600 px</option>
@@ -54,7 +78,11 @@
         </div>
         <div>
           <label class="label text-sm" for="render-samples">Quality</label>
-          <select id="render-samples" class="select select-sm w-full" v-model.number="samples">
+          <select
+            id="render-samples"
+            class="select select-sm w-full"
+            v-model.number="samples"
+          >
             <option :value="32">Draft (32)</option>
             <option :value="96">Standard (96)</option>
             <option :value="256">High (256)</option>
@@ -65,10 +93,19 @@
       <div class="flex items-center gap-3">
         <div>
           <label class="label text-sm" for="render-color">Resin color</label>
-          <input id="render-color" type="color" class="block h-8 w-16 cursor-pointer" v-model="colorHex" />
+          <input
+            id="render-color"
+            type="color"
+            class="block h-8 w-16 cursor-pointer"
+            v-model="colorHex"
+          />
         </div>
         <label class="label cursor-pointer gap-2 text-sm mt-4">
-          <input type="checkbox" class="checkbox checkbox-sm" v-model="matchCamera" />
+          <input
+            type="checkbox"
+            class="checkbox checkbox-sm"
+            v-model="matchCamera"
+          />
           Match preview camera
         </label>
       </div>
@@ -84,7 +121,11 @@
             :value="outputPath || defaultOutputPath"
             placeholder="Select model parts first..."
           />
-          <button class="btn btn-sm" :disabled="!parts.length" @click="chooseOutput">
+          <button
+            class="btn btn-sm"
+            :disabled="!parts.length"
+            @click="chooseOutput"
+          >
             Save as...
           </button>
         </div>
@@ -93,7 +134,9 @@
       <div class="flex items-center gap-3">
         <button
           class="btn btn-primary flex-grow"
-          :disabled="!parts.length || isRendering || blenderStatus === 'missing'"
+          :disabled="
+            !parts.length || isRendering || blenderStatus === 'missing'
+          "
           @click="render"
         >
           <template v-if="isRendering">
@@ -102,7 +145,9 @@
           </template>
           <span v-else>Render promo image</span>
         </button>
-        <button v-if="isRendering" class="btn btn-error" @click="cancel">Cancel</button>
+        <button v-if="isRendering" class="btn btn-error" @click="cancel">
+          Cancel
+        </button>
       </div>
 
       <div v-if="isRendering" class="flex items-center gap-3">
@@ -110,7 +155,10 @@
         <span class="text-sm opacity-70">Cycles render in progress</span>
       </div>
 
-      <div v-if="errorMessage" class="alert alert-error text-xs whitespace-pre-wrap">
+      <div
+        v-if="errorMessage"
+        class="alert alert-error text-xs whitespace-pre-wrap"
+      >
         {{ errorMessage }}
       </div>
 
@@ -121,8 +169,14 @@
             ({{ elapsedSeconds.toFixed(1) }}s)
           </span>
         </h2>
-        <img :src="resultUrl ?? undefined" alt="Rendered promo image" class="rounded-box w-full" />
-        <button class="btn btn-sm w-full" @click="openPath(resultPath)">Open image</button>
+        <img
+          :src="resultUrl ?? undefined"
+          alt="Rendered promo image"
+          class="rounded-box w-full"
+        />
+        <button class="btn btn-sm w-full" @click="openPath(resultPath)">
+          Open image
+        </button>
       </div>
     </section>
 

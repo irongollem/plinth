@@ -4,22 +4,26 @@
 
     <div class="input flex space-between p-0 w-full">
       <select
-          v-model="selectedMonth"
-          class="select focus:outline-none focus:border-none border-none bg-transparent"
-          @change="updateValue"
-          :required="required"
+        v-model="selectedMonth"
+        class="select focus:outline-none focus:border-none border-none bg-transparent"
+        @change="updateValue"
+        :required="required"
       >
         <option value="" disabled>Month</option>
-        <option v-for="(month, index) in months" :key="index+1" :value="index+1">
+        <option
+          v-for="(month, index) in months"
+          :key="index + 1"
+          :value="index + 1"
+        >
           {{ month }}
         </option>
       </select>
 
       <select
-          v-model="selectedYear"
-          class="select focus:outline-none focus:border-none border-none bg-transparent"
-          @change="updateValue"
-          :required="required"
+        v-model="selectedYear"
+        class="select focus:outline-none focus:border-none border-none bg-transparent"
+        @change="updateValue"
+        :required="required"
       >
         <option value="" disabled>Year</option>
         <option v-for="year in years" :key="year" :value="year">

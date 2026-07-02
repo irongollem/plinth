@@ -33,9 +33,9 @@ To install stl-pack, download the latest release from the [releases page](https:
 
 stl-pack is an opinionated tool, and we believe in "the right way" to manage and distribute 3D printable files. This means:
 
-*   **Efficiency:** Optimizing file sizes without compromising detail, making sharing and storage easier.
-*   **Organization:** Bundling models, metadata, and previews into a clear, structured format (`.3pk`).
-*   **Reproducibility:** Ensuring that users have all the information needed to understand and use the models.
+- **Efficiency:** Optimizing file sizes without compromising detail, making sharing and storage easier.
+- **Organization:** Bundling models, metadata, and previews into a clear, structured format (`.3pk`).
+- **Reproducibility:** Ensuring that users have all the information needed to understand and use the models.
 
 (Project maintainers: Please expand this section with more specific details about the design choices and goals of stl-pack!)
 
@@ -64,10 +64,12 @@ You can follow our progress and see planned features in our [To-Do List](todolis
 ## License
 
 This project is available under a custom source-available license that allows:
+
 - Free usage for personal, educational, and commercial purposes
 - Creating and selling content/bundles made with the software
 
 But prohibits:
+
 - Selling or redistributing the software itself
 - Creating derivative works based on the software
 

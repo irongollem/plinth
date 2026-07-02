@@ -8,15 +8,15 @@ const toastStore = useToastStore();
   <div class="fixed bottom-0 right-0 p-4 z-50">
     <transition-group name="toast">
       <div
-          v-for="toast in toastStore.toasts"
-          :key="toast.id"
-          class="alert mb-2 flex justify-between shadow-lg"
-          :class="`alert-${toast.type}`"
+        v-for="toast in toastStore.toasts"
+        :key="toast.id"
+        class="alert mb-2 flex justify-between shadow-lg"
+        :class="`alert-${toast.type}`"
       >
         <span>{{ toast.message }}</span>
         <button
-            @click="toastStore.removeToast(toast.id)"
-            class="btn btn-circle btn-sm"
+          @click="toastStore.removeToast(toast.id)"
+          class="btn btn-circle btn-sm"
         >
           ×
         </button>

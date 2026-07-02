@@ -1,5 +1,7 @@
 <template>
-  <main class="bg-gray-800 text-gray-100 flex flex-col h-full rounded-b-lg p-4 gap-3">
+  <main
+    class="bg-gray-800 text-gray-100 flex flex-col h-full rounded-b-lg p-4 gap-3"
+  >
     <!-- Toolbar -->
     <div class="flex flex-wrap items-center gap-2">
       <input
@@ -46,7 +48,9 @@
         <span class="opacity-50">{{ scanProgress?.current_dir }}</span>
       </span>
     </div>
-    <div v-if="scanError" class="alert alert-error text-xs py-2">{{ scanError }}</div>
+    <div v-if="scanError" class="alert alert-error text-xs py-2">
+      {{ scanError }}
+    </div>
 
     <!-- Tag filter chips -->
     <div v-if="visibleTags.length" class="flex flex-wrap gap-1 items-center">
@@ -55,7 +59,9 @@
         :key="tag.tag"
         type="button"
         class="badge cursor-pointer"
-        :class="selectedTags.includes(tag.tag) ? 'badge-primary' : 'badge-outline'"
+        :class="
+          selectedTags.includes(tag.tag) ? 'badge-primary' : 'badge-outline'
+        "
         @click="toggleTag(tag.tag)"
       >
         {{ tag.tag }} <span class="opacity-50 ml-1">{{ tag.count }}</span>
@@ -65,10 +71,20 @@
     <!-- Content -->
     <div class="flex flex-1 gap-3 min-h-0">
       <section class="flex-1 overflow-y-auto min-h-0">
-        <div v-if="!entries.length && !isScanning" class="h-full flex items-center justify-center opacity-40 text-sm">
-          {{ stats?.total_models ? "No models match your search" : "No catalog yet — choose a folder and hit Scan" }}
+        <div
+          v-if="!entries.length && !isScanning"
+          class="h-full flex items-center justify-center opacity-40 text-sm"
+        >
+          {{
+            stats?.total_models
+              ? "No models match your search"
+              : "No catalog yet — choose a folder and hit Scan"
+          }}
         </div>
-        <div class="grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr))">
+        <div
+          class="grid gap-3"
+          style="grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr))"
+        >
           <CatalogCard
             v-for="entry in entries"
             :key="entry.dir_path"
@@ -92,11 +108,24 @@
         <div class="flex items-start justify-between gap-2">
           <div>
             <h2 class="font-bold text-lg leading-tight">{{ selected.name }}</h2>
-            <p v-if="selected.designer || selected.release_name" class="text-xs opacity-60">
-              {{ [selected.designer, selected.release_name].filter(Boolean).join(" · ") }}
+            <p
+              v-if="selected.designer || selected.release_name"
+              class="text-xs opacity-60"
+            >
+              {{
+                [selected.designer, selected.release_name]
+                  .filter(Boolean)
+                  .join(" · ")
+              }}
             </p>
           </div>
-          <button type="button" class="btn btn-ghost btn-xs" @click="selected = null">✕</button>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs"
+            @click="selected = null"
+          >
+            ✕
+          </button>
         </div>
 
         <img
@@ -105,12 +134,24 @@
           :alt="selected.name"
           class="rounded-box w-full"
         />
-        <p v-if="selected.description" class="text-sm opacity-80">{{ selected.description }}</p>
+        <p v-if="selected.description" class="text-sm opacity-80">
+          {{ selected.description }}
+        </p>
 
         <div class="flex flex-wrap gap-1">
-          <span v-for="tag in selected.tags" :key="tag" class="badge badge-outline gap-1">
+          <span
+            v-for="tag in selected.tags"
+            :key="tag"
+            class="badge badge-outline gap-1"
+          >
             {{ tag }}
-            <button type="button" class="opacity-50 hover:opacity-100" @click="removeTag(tag)">✕</button>
+            <button
+              type="button"
+              class="opacity-50 hover:opacity-100"
+              @click="removeTag(tag)"
+            >
+              ✕
+            </button>
           </span>
           <form class="join" @submit.prevent="addTag">
             <input
@@ -124,7 +165,11 @@
         </div>
 
         <div class="flex flex-wrap gap-2">
-          <button type="button" class="btn btn-primary btn-sm" @click="printModel">
+          <button
+            type="button"
+            class="btn btn-primary btn-sm"
+            @click="printModel"
+          >
             🖨️ Print
           </button>
           <button
@@ -150,9 +195,17 @@
             Files ({{ formatFileSize(selected.total_size_bytes) }})
           </h3>
           <ul class="text-xs space-y-1">
-            <li v-for="file in files" :key="file.path" class="flex justify-between gap-2">
-              <span class="truncate" :title="file.path">{{ file.file_name }}</span>
-              <span class="opacity-50 shrink-0">{{ formatFileSize(file.size_bytes) }}</span>
+            <li
+              v-for="file in files"
+              :key="file.path"
+              class="flex justify-between gap-2"
+            >
+              <span class="truncate" :title="file.path">{{
+                file.file_name
+              }}</span>
+              <span class="opacity-50 shrink-0">{{
+                formatFileSize(file.size_bytes)
+              }}</span>
             </li>
           </ul>
         </div>
@@ -160,15 +213,29 @@
     </div>
 
     <!-- Footer: stats + duplicates -->
-    <div class="flex flex-wrap items-center gap-3 text-xs opacity-80 border-t border-gray-700 pt-2">
+    <div
+      class="flex flex-wrap items-center gap-3 text-xs opacity-80 border-t border-gray-700 pt-2"
+    >
       <template v-if="stats">
-        <span><b>{{ stats.total_models }}</b> models</span>
-        <span><b>{{ stats.total_files }}</b> files</span>
-        <span><b>{{ formatFileSize(stats.total_size_bytes) }}</b> on disk</span>
-        <span v-for="ext in stats.extensions.slice(0, 4)" :key="ext.extension" class="opacity-60">
+        <span
+          ><b>{{ stats.total_models }}</b> models</span
+        >
+        <span
+          ><b>{{ stats.total_files }}</b> files</span
+        >
+        <span
+          ><b>{{ formatFileSize(stats.total_size_bytes) }}</b> on disk</span
+        >
+        <span
+          v-for="ext in stats.extensions.slice(0, 4)"
+          :key="ext.extension"
+          class="opacity-60"
+        >
           .{{ ext.extension }} {{ formatFileSize(ext.total_size_bytes) }}
         </span>
-        <span v-if="lastScanLabel" class="opacity-50">scanned {{ lastScanLabel }}</span>
+        <span v-if="lastScanLabel" class="opacity-50"
+          >scanned {{ lastScanLabel }}</span
+        >
       </template>
       <span class="flex-1"></span>
       <button
@@ -182,8 +249,16 @@
       </button>
       <span v-else class="flex items-center gap-2">
         <span class="loading loading-spinner loading-xs"></span>
-        hashing {{ dupProgress?.processed ?? 0 }}/{{ dupProgress?.total ?? "?" }}
-        <button type="button" class="btn btn-xs btn-error" @click="cancelDuplicateScan">✕</button>
+        hashing {{ dupProgress?.processed ?? 0 }}/{{
+          dupProgress?.total ?? "?"
+        }}
+        <button
+          type="button"
+          class="btn btn-xs btn-error"
+          @click="cancelDuplicateScan"
+        >
+          ✕
+        </button>
       </span>
       <button
         v-if="dupGroups.length"
@@ -191,20 +266,32 @@
         class="btn btn-xs btn-warning"
         @click="showDups = !showDups"
       >
-        {{ dupGroups.length }} duplicate groups ({{ formatFileSize(wastedBytes) }} wasted)
+        {{ dupGroups.length }} duplicate groups ({{
+          formatFileSize(wastedBytes)
+        }}
+        wasted)
       </button>
     </div>
 
     <!-- Duplicates panel -->
-    <div v-if="showDups && dupGroups.length" class="max-h-48 overflow-y-auto bg-base-100 border border-gray-600 rounded-box p-3 text-xs space-y-2">
+    <div
+      v-if="showDups && dupGroups.length"
+      class="max-h-48 overflow-y-auto bg-base-100 border border-gray-600 rounded-box p-3 text-xs space-y-2"
+    >
       <div v-for="group in dupGroups" :key="group.hash">
         <div class="font-semibold">
           {{ group.paths.length }}× {{ formatFileSize(group.size_bytes) }}
         </div>
         <ul class="opacity-70">
-          <li v-for="path in group.paths" :key="path" class="flex justify-between gap-2">
+          <li
+            v-for="path in group.paths"
+            :key="path"
+            class="flex justify-between gap-2"
+          >
             <span class="truncate" :title="path">{{ path }}</span>
-            <button type="button" class="link shrink-0" @click="reveal(path)">reveal</button>
+            <button type="button" class="link shrink-0" @click="reveal(path)">
+              reveal
+            </button>
           </li>
         </ul>
       </div>

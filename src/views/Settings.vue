@@ -1,4 +1,3 @@
-
 <template>
   <View>
     <template #left>
@@ -37,19 +36,32 @@
               class="tooltip"
               data-tip="Blender is used to render promo images of your models. Leave empty to auto-detect."
             >
-              <button type="button" class="btn" @click="browseBlender">Browse</button>
+              <button type="button" class="btn" @click="browseBlender">
+                Browse
+              </button>
             </div>
-            <button type="button" class="btn" @click="checkBlender">Detect</button>
+            <button type="button" class="btn" @click="checkBlender">
+              Detect
+            </button>
           </div>
-          <p v-if="blenderStatus" class="mt-1 text-xs" :class="blenderFound ? 'text-success' : 'text-error'">
+          <p
+            v-if="blenderStatus"
+            class="mt-1 text-xs"
+            :class="blenderFound ? 'text-success' : 'text-error'"
+          >
             {{ blenderStatus }}
           </p>
         </div>
 
         <div class="mb-4">
-          <label for="max_compression_threads" class="block text-sm font-medium text-gray-700">
+          <label
+            for="max_compression_threads"
+            class="block text-sm font-medium text-gray-700"
+          >
             Max Compression Threads
-            <span class="text-xs text-gray-500">(Detected {{ availableCores }} cores)</span>
+            <span class="text-xs text-gray-500"
+              >(Detected {{ availableCores }} cores)</span
+            >
           </label>
           <div class="mt-1 flex items-center">
             <input
@@ -60,11 +72,14 @@
               v-model.number="settings.max_compression_threads"
               class="mr-2 w-full h-2 rounded-lg appearance-none cursor-pointer bg-gray-200"
             />
-            <span class="text-sm text-gray-600">{{ settings.max_compression_threads || 'Auto' }}</span>
+            <span class="text-sm text-gray-600">{{
+              settings.max_compression_threads || "Auto"
+            }}</span>
           </div>
           <p class="mt-1 text-xs text-gray-500">
-            Maximum CPU cores to use for compression. Lower for better system responsiveness, higher for faster compression.
-            Default is automatically calculated ({{ defaultThreadCount }}).
+            Maximum CPU cores to use for compression. Lower for better system
+            responsiveness, higher for faster compression. Default is
+            automatically calculated ({{ defaultThreadCount }}).
           </p>
         </div>
       </form>

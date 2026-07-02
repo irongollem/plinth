@@ -9,12 +9,14 @@ By participating in this project, you agree to maintain a respectful and inclusi
 ## Development Setup
 
 1. **Fork and Clone the Repository**
+
    ```bash
    git clone https://github.com/YOUR_USERNAME/stl-pack.git
    cd stl-pack
    ```
 
 2. **Install Dependencies**
+
    ```bash
    bun install
    ```
@@ -31,6 +33,7 @@ By participating in this project, you agree to maintain a respectful and inclusi
 ### Auto-generated Files
 
 The following files are auto-generated and should not be manually edited:
+
 - `src/bindings.ts`: TypeScript bindings for Rust backend functions
 
 These files are generated automatically during the build process and are excluded from version control.
@@ -44,6 +47,7 @@ These files are generated automatically during the build process and are exclude
 ## Pull Request Process
 
 1. **Create a Branch**
+
    ```bash
    git checkout -b feature/your-feature-name
    ```
@@ -54,6 +58,7 @@ These files are generated automatically during the build process and are exclude
    - Include tests for new functionality
 
 3. **Commit Your Changes**
+
    ```bash
    git commit -m "Brief description of changes"
    ```
@@ -61,6 +66,7 @@ These files are generated automatically during the build process and are exclude
    - Reference issue numbers when applicable
 
 4. **Push to Your Fork**
+
    ```bash
    git push origin feature/your-feature-name
    ```

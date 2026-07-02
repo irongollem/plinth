@@ -40,7 +40,10 @@
           v-model="extraFiles"
         />
 
-        <Switch v-model="openOnSafe" :label="`Open temporary directory in ${fileExplorerName} after creation`" />
+        <Switch
+          v-model="openOnSafe"
+          :label="`Open temporary directory in ${fileExplorerName} after creation`"
+        />
 
         <div class="flex justify-between w-full mb-4">
           <button

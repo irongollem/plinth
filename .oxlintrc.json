@@ -7,10 +7,14 @@
     "perf": "warn"
   },
   "rules": {
-    "import/no-unassigned-import": [
-      "warn",
-      { "allow": ["**/*.css", "cally"] }
-    ]
+    "import/no-unassigned-import": ["warn", { "allow": ["**/*.css", "cally"] }]
   },
-  "ignorePatterns": ["src/bindings.ts", "src/vite-env.d.ts", "dist", "src-tauri", "raw", "docs"]
+  "ignorePatterns": [
+    "src/bindings.ts",
+    "src/vite-env.d.ts",
+    "dist",
+    "src-tauri",
+    "raw",
+    "docs"
+  ]
 }
