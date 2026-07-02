@@ -92,6 +92,13 @@
 
       <div class="flex items-center gap-3">
         <div>
+          <label class="label text-sm" for="render-look">Look</label>
+          <select id="render-look" class="select select-sm" v-model="look">
+            <option value="rich">Rich (promo contrast)</option>
+            <option value="flat">Flat (even lighting)</option>
+          </select>
+        </div>
+        <div>
           <label class="label text-sm" for="render-color">Resin color</label>
           <input
             id="render-color"
@@ -169,19 +176,37 @@
             ({{ elapsedSeconds.toFixed(1) }}s)
           </span>
         </h2>
-        <img
-          :src="resultUrl ?? undefined"
-          alt="Rendered promo image"
-          class="rounded-box w-full"
-        />
-        <button class="btn btn-sm w-full" @click="openPath(resultPath)">
-          Open image
+        <button
+          type="button"
+          class="w-full cursor-zoom-in"
+          @click="showResult = true"
+        >
+          <img
+            :src="resultUrl ?? undefined"
+            alt="Rendered promo image"
+            class="rounded-box w-full"
+          />
+        </button>
+        <div class="flex gap-2">
+          <button class="btn btn-sm flex-1" @click="showResult = true">
+            View large
+          </button>
+          <button class="btn btn-sm flex-1" @click="openPath(resultPath)">
+            Open file
+          </button>
+        </div>
+        <button
+          v-if="releasesStore.releaseExists"
+          class="btn btn-sm btn-secondary w-full"
+          @click="sendToAddStl"
+        >
+          Use as model image in Add STL
         </button>
       </div>
     </section>
 
-    <!-- Viewport -->
-    <aside class="flex-1 max-h-full mb-6">
+    <!-- Viewport / result -->
+    <aside class="flex-1 max-h-full mb-6 relative">
       <StlViewport
         ref="viewport"
         :parts="partPaths"
@@ -191,6 +216,36 @@
         @loaded="onLoaded"
         @error="onViewportError"
       />
+      <!-- Finished render takes over the viewport so it can't be missed -->
+      <div
+        v-if="showResult && resultUrl"
+        class="absolute inset-0 bg-black rounded-box flex flex-col z-10"
+      >
+        <div class="flex items-center gap-2 p-2">
+          <span class="text-sm font-semibold opacity-80">
+            Render result
+            <span v-if="elapsedSeconds" class="opacity-50">
+              — {{ elapsedSeconds.toFixed(1) }}s
+            </span>
+          </span>
+          <span class="flex-1"></span>
+          <button
+            v-if="resultPath"
+            class="btn btn-xs"
+            @click="openPath(resultPath)"
+          >
+            Open file
+          </button>
+          <button class="btn btn-xs btn-primary" @click="showResult = false">
+            Back to 3D
+          </button>
+        </div>
+        <img
+          :src="resultUrl"
+          alt="Rendered promo image"
+          class="flex-1 min-h-0 object-contain"
+        />
+      </div>
     </aside>
   </main>
 </template>
@@ -242,9 +297,27 @@ const view = ref({ azimuth: -15, elevation: 0.22, zoom: 1.15 });
 const matchCamera = ref(true);
 const resolution = ref(1600);
 const samples = ref(96);
+const look = ref<"rich" | "flat">("rich");
 // sRGB of the locked linear resin color (0.80, 0.54, 0.35)
 const colorHex = ref("#e7c2a0");
 const outputPath = ref("");
+const showResult = ref(false);
+
+// A finished render takes over the viewport + toasts — previously it only
+// appeared as a small thumbnail below the fold and looked like nothing
+// happened
+watch(resultPath, (path) => {
+  if (!path) return;
+  showResult.value = true;
+  toastStore.addToast("Render complete", "success");
+});
+
+const sendToAddStl = () => {
+  if (!resultPath.value) return;
+  releasesStore.queueModelImage(resultPath.value);
+  toastStore.addToast("Render queued as model image in Add STL", "success");
+  releasesStore.setActiveTab("addStl");
+};
 
 const blenderInfo = ref<BlenderInfo | null>(null);
 const blenderStatus = ref<"unknown" | "found" | "missing">("unknown");
@@ -329,6 +402,7 @@ const render = async () => {
     zoom: matchCamera.value ? view.value.zoom : null,
     resolution: resolution.value,
     samples: samples.value,
+    look: look.value,
     output_path: outputPath.value || null,
   });
 

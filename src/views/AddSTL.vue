@@ -96,7 +96,7 @@
 
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import type { Ref } from "vue";
 import { type StlModel, commands } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
@@ -105,6 +105,7 @@ import TagInput from "../components/TagInput.vue";
 import TextArea from "../components/TextArea.vue";
 import TextInput from "../components/TextInput.vue";
 import View from "../components/View.vue";
+import { filesFromPaths } from "../composables/useFileSelect";
 import type { SelectedFile } from "../composables/useFileSelect";
 import { useReleasesStore } from "../stores/releasesStore.ts";
 import { useToastStore } from "../stores/toastStore.ts";
@@ -115,7 +116,7 @@ const releasesStore = useReleasesStore();
 // storeToRefs keeps these live: a plain destructure freezes releaseDir at
 // first mount, and this KeepAlive'd component would then save a second
 // release's models into the FIRST release's directory
-const { groups, releaseDir } = storeToRefs(releasesStore);
+const { groups, releaseDir, pendingModelImages } = storeToRefs(releasesStore);
 const { addModel } = releasesStore;
 const model: Ref<StlModel> = ref({
   id: null,
@@ -128,6 +129,18 @@ const model: Ref<StlModel> = ref({
 });
 const images = ref<SelectedFile[]>([]);
 const modelFiles = ref<SelectedFile[]>([]);
+
+// Promo renders queued from the Render tab land in the image list
+watch(pendingModelImages, async (paths) => {
+  if (!paths.length) return;
+  const rendered = await filesFromPaths(paths);
+  const known = new Set(images.value.map((image) => image.path));
+  images.value = [
+    ...images.value,
+    ...rendered.filter((image) => !known.has(image.path)),
+  ];
+  pendingModelImages.value = [];
+});
 
 const isStoring = ref(false);
 

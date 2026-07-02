@@ -23,6 +23,8 @@ export const useReleasesStore = defineStore("releases", () => {
   const activeTab = ref<Tab>("release");
   // Cross-tab handoff: the catalog can push STL parts into the Render tab
   const renderParts = ref<string[]>([]);
+  // ...and the Render tab can push finished promo images into Add STL
+  const pendingModelImages = ref<string[]>([]);
 
   const setActiveTab = (tab: Tab) => {
     activeTab.value = tab;
@@ -31,6 +33,12 @@ export const useReleasesStore = defineStore("releases", () => {
   const requestRender = (paths: string[]) => {
     renderParts.value = paths;
     activeTab.value = "render";
+  };
+
+  const queueModelImage = (path: string) => {
+    if (!pendingModelImages.value.includes(path)) {
+      pendingModelImages.value = [...pendingModelImages.value, path];
+    }
   };
 
   const releaseExists = computed(() => !!release.value);
@@ -118,6 +126,8 @@ export const useReleasesStore = defineStore("releases", () => {
     setActiveTab,
     renderParts,
     requestRender,
+    pendingModelImages,
+    queueModelImage,
     release,
     releaseDir,
     releaseExists,
