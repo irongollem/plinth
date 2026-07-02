@@ -59,7 +59,7 @@ def parse():
     argv = sys.argv[sys.argv.index("--")+1:] if "--" in sys.argv else []
     cfg = dict(paths=[], out=None, rotate=(90,0,0), color=LOOK["base_color"],
                azimuth=-15.0, elev=0.22, zoom=1.15, res=LOOK["res"], samples=LOOK["samples"],
-               contact=False, sheet_cols=3, sheet_res=420, sheet_samples=24)
+               look="flat", contact=False, sheet_cols=3, sheet_res=420, sheet_samples=24)
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -71,6 +71,7 @@ def parse():
         elif a == "--zoom":          i+=1; cfg["zoom"]=float(argv[i])
         elif a == "--res":           i+=1; cfg["res"]=int(argv[i])
         elif a == "--samples":       i+=1; cfg["samples"]=int(argv[i])
+        elif a == "--look":          i+=1; cfg["look"]=argv[i]
         elif a == "--contact-sheet": cfg["contact"]=True
         elif a == "--sheet-cols":    i+=1; cfg["sheet_cols"]=int(argv[i])
         elif a == "--sheet-res":     i+=1; cfg["sheet_res"]=int(argv[i])
@@ -116,27 +117,34 @@ def normalize(obj, rotate):
     zmin = min((obj.matrix_world @ v.co).z for v in obj.data.vertices)
     obj.location.z -= zmin; bpy.context.view_layer.update()
 
-def resin_material(obj, color):
+def resin_material(obj, color, look="flat"):
     m = bpy.data.materials.new("Resin"); m.use_nodes = True
     b = m.node_tree.nodes.get("Principled BSDF")
     b.inputs["Base Color"].default_value = tuple(color)+(1.0,)
     b.inputs["Metallic"].default_value = 0.0
     b.inputs["Roughness"].default_value = LOOK["roughness"]
-    for name, val in (("Subsurface Weight", LOOK["sss_weight"]),
+    # SSS wraps light around into the shadow side; the rich look keeps just
+    # enough for the resin read while letting shadows actually go dark
+    sss_weight = LOOK["sss_weight"] * (0.6 if look == "rich" else 1.0)
+    for name, val in (("Subsurface Weight", sss_weight),
                       ("Subsurface Radius", LOOK["sss_radius"]),
                       ("Subsurface Scale",  LOOK["sss_scale"])):
         if name in b.inputs: b.inputs[name].default_value = val
     obj.data.materials.clear(); obj.data.materials.append(m)
 
-def lights():
-    def mk(spec, name):
-        d = bpy.data.lights.new(name, "AREA"); d.energy=spec["energy"]; d.size=spec["size"]
+def lights(look="flat"):
+    # "rich" = the promo-grade tonal shift: a harder (smaller), stronger key
+    # against a near-absent fill, so the form rolls from pale cream through
+    # saturated warm midtones into deep shadow instead of flattening out.
+    key_scale, key_size, fill_scale = (1.2, 0.55, 0.2) if look == "rich" else (1.0, 1.0, 1.0)
+    def mk(spec, name, energy_scale=1.0, size_scale=1.0):
+        d = bpy.data.lights.new(name, "AREA"); d.energy=spec["energy"]*energy_scale; d.size=spec["size"]*size_scale
         d.color = spec["color"]
         o = bpy.data.objects.new(name, d); o.location = spec["loc"]
         bpy.context.collection.objects.link(o)
         v = Vector((0,0,0.6)) - Vector(spec["loc"])
         o.rotation_euler = v.to_track_quat("-Z","Y").to_euler()
-    mk(LOOK["key"],"Key"); mk(LOOK["fill"],"Fill"); mk(LOOK["rim"],"Rim")
+    mk(LOOK["key"],"Key",key_scale,key_size); mk(LOOK["fill"],"Fill",fill_scale); mk(LOOK["rim"],"Rim")
 
 def black_world():
     w = bpy.data.worlds.new("World"); bpy.context.scene.world = w; w.use_nodes = True
@@ -157,7 +165,7 @@ def camera(obj, azimuth, elev, zoom):
     cam.rotation_euler = (bbc-Vector(cam.location)).to_track_quat('-Z','Y').to_euler()
     cam.data.dof.use_dof = False
 
-def setup_render(res, samples):
+def setup_render(res, samples, look="flat"):
     sc = bpy.context.scene
     sc.render.engine = "CYCLES"; sc.cycles.samples = samples
     try: sc.cycles.use_denoising = True
@@ -172,10 +180,16 @@ def setup_render(res, samples):
                     sc.cycles.device="GPU"; break
             except Exception: continue
     except Exception: pass
+    # Standard (not AgX) on purpose: AgX desaturates the warm resin tones,
+    # which is the opposite of the formal product-render look
     sc.view_settings.view_transform = "Standard"
     try: sc.view_settings.look = "None"
     except Exception: pass
     sc.view_settings.exposure = LOOK["exposure"]
+    if look == "rich":
+        # gamma < 1 is a cheap contrast curve: deepens shadows and midtone
+        # saturation while the near-white key side barely moves
+        sc.view_settings.gamma = 0.85
     sc.render.resolution_x = res; sc.render.resolution_y = res
     sc.render.resolution_percentage = 100
     sc.render.image_settings.file_format = "PNG"
@@ -187,10 +201,10 @@ def build_and_render(cfg, rotate, out, res, samples):
     clear()
     obj = import_join(cfg["paths"])
     normalize(obj, rotate)
-    resin_material(obj, cfg["color"])
-    lights(); black_world()
+    resin_material(obj, cfg["color"], cfg["look"])
+    lights(cfg["look"]); black_world()
     camera(obj, cfg["azimuth"], cfg["elev"], cfg["zoom"])
-    setup_render(res, samples)
+    setup_render(res, samples, cfg["look"])
     bpy.context.scene.render.filepath = os.path.abspath(out).replace("\\","/")
     bpy.ops.render.render(write_still=True)
 

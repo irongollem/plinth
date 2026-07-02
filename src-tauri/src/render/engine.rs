@@ -213,6 +213,9 @@ pub fn build_render_command(
     if let Some(samples) = options.samples {
         cmd.arg("--samples").arg(samples.to_string());
     }
+    if let Some(look) = &options.look {
+        cmd.arg("--look").arg(look);
+    }
     cmd.arg("--out").arg(output_path);
     cmd
 }
@@ -286,6 +289,7 @@ mod tests {
             zoom: None,
             resolution: Some(128),
             samples: Some(8),
+            look: Some("rich".to_string()),
             output_path: None,
         };
         let mut cmd = build_render_command(
