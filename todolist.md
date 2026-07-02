@@ -16,6 +16,7 @@
 - [ ] Promo overlay: title text + designer logo + base-size badge composited on renders (save with and without), matching the formal DTL card layout
 - [ ] Full in-app bundle flow: catalog → new release → render per model (image auto-returns to Add STL — that leg ships already) → finalize
 - [ ] render_mini.py uses `use_nodes` (deprecated, removal in Blender 6.0) — needs a tweak when 6.x lands
+- [ ] Parse STLs in a Web Worker: mergeVertices on million-triangle minis still freezes the main thread during load (the overlay paints now, but a worker would keep the UI fully responsive)
 
 - [ ] ARCHITECTURE: Currently we are only storing the paths in the json, but in doing so also reduce the info available in the UI. The data in the UI should be complete. From creation dont throw away the data too soon and when revisiting compose the UI info from the json PLUS the underlying jsons.
 - [ ] Add checkboxes to release fields to store the field data permanently like settings (so creators dont have to type in their own name every time for example)

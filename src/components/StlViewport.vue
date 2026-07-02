@@ -462,6 +462,12 @@ const onWheel = (e: WheelEvent) => {
 };
 
 // ---- model loading ----
+/** Two rAFs = the browser has actually painted the current frame. */
+const nextPaint = () =>
+  new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
+
 const disposeModel = () => {
   if (!meshGroup || !pivot) return;
   pivot.remove(meshGroup);
@@ -484,6 +490,10 @@ const loadParts = async () => {
   isLoading.value = true;
   try {
     const loader = new STLLoader();
+    // Parsing and vertex-merging below run synchronously on the main
+    // thread; without an explicit yield the loading overlay never paints
+    // and the UI just freezes ("is it happening?")
+    await nextPaint();
     // Read all parts concurrently; Promise.all preserves part order
     const byteArrays = await Promise.all(
       props.parts.map((path) => readFile(path)),
@@ -505,6 +515,10 @@ const loadParts = async () => {
         // fall back to flat shading from the file's own normals
       }
       geometries.push(geometry);
+      // Sequential on purpose: the per-part yield lets the overlay animate
+      // oxlint-disable-next-line no-await-in-loop
+      await nextPaint();
+      if (token !== loadToken) return;
     }
 
     // Join parts in their native coordinates (same as the Blender join),
@@ -591,9 +605,10 @@ onBeforeUnmount(() => {
     ></div>
     <div
       v-if="isLoading"
-      class="absolute inset-0 flex items-center justify-center bg-black/50 rounded-box"
+      class="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/50 rounded-box"
     >
       <span class="loading loading-spinner loading-lg"></span>
+      <span class="text-sm opacity-70">Loading model…</span>
     </div>
     <div
       v-if="!parts.length"
