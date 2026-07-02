@@ -38,9 +38,25 @@
       <div>
         <h2 class="font-semibold mb-1">Orientation</h2>
         <p class="text-xs opacity-60 mb-2">
-          Drag the model until it stands upright. Rotation
-          <span class="font-mono">{{ rotationLabel }}</span>
+          Drag the model (or a gizmo ring), or type exact angles to reproduce a
+          pose.
         </p>
+        <div class="grid grid-cols-3 gap-2 mb-2">
+          <label
+            v-for="(axis, index) in ['X', 'Y', 'Z'] as const"
+            :key="axis"
+            class="input input-xs flex items-center gap-1"
+          >
+            <span class="opacity-50">{{ axis }}°</span>
+            <input
+              type="number"
+              step="1"
+              class="w-full"
+              :value="rotation[index]"
+              @change="setRotationAxis(index, $event)"
+            />
+          </label>
+        </div>
         <div class="flex flex-wrap gap-1">
           <button class="btn btn-xs" @click="viewport?.setRotation([90, 0, 0])">
             Stand up
@@ -57,6 +73,42 @@
           <button class="btn btn-xs" @click="viewport?.resetRotation()">
             Reset
           </button>
+        </div>
+      </div>
+
+      <div>
+        <h2 class="font-semibold mb-1">Camera</h2>
+        <div class="grid grid-cols-3 gap-2">
+          <label class="input input-xs flex items-center gap-1">
+            <span class="opacity-50">az°</span>
+            <input
+              type="number"
+              step="1"
+              class="w-full"
+              :value="view.azimuth"
+              @change="setViewField('azimuth', $event)"
+            />
+          </label>
+          <label class="input input-xs flex items-center gap-1">
+            <span class="opacity-50">elev</span>
+            <input
+              type="number"
+              step="0.05"
+              class="w-full"
+              :value="view.elevation"
+              @change="setViewField('elevation', $event)"
+            />
+          </label>
+          <label class="input input-xs flex items-center gap-1">
+            <span class="opacity-50">zoom</span>
+            <input
+              type="number"
+              step="0.05"
+              class="w-full"
+              :value="view.zoom"
+              @change="setViewField('zoom', $event)"
+            />
+          </label>
         </div>
       </div>
 
@@ -100,12 +152,23 @@
         </div>
         <div>
           <label class="label text-sm" for="render-color">Resin color</label>
-          <input
-            id="render-color"
-            type="color"
-            class="block h-8 w-16 cursor-pointer"
-            v-model="colorHex"
-          />
+          <div class="flex items-center gap-1">
+            <input
+              id="render-color"
+              type="color"
+              class="block h-8 w-16 cursor-pointer"
+              v-model="colorHex"
+            />
+            <button
+              v-if="colorHex !== DEFAULT_RESIN_HEX"
+              type="button"
+              class="btn btn-xs"
+              title="Back to the locked resin color"
+              @click="colorHex = DEFAULT_RESIN_HEX"
+            >
+              Reset
+            </button>
+          </div>
         </div>
         <label class="label cursor-pointer gap-2 text-sm mt-4">
           <input
@@ -299,8 +362,26 @@ const resolution = ref(1600);
 const samples = ref(96);
 const look = ref<"rich" | "flat">("rich");
 // sRGB of the locked linear resin color (0.80, 0.54, 0.35)
-const colorHex = ref("#e7c2a0");
+const DEFAULT_RESIN_HEX = "#e7c2a0";
+const colorHex = ref(DEFAULT_RESIN_HEX);
 const outputPath = ref("");
+
+const setRotationAxis = (index: number, event: Event) => {
+  const value = Number.parseFloat((event.target as HTMLInputElement).value);
+  if (Number.isNaN(value)) return;
+  const next = [...rotation.value] as [number, number, number];
+  next[index] = value;
+  viewport.value?.setRotation(next);
+};
+
+const setViewField = (
+  field: "azimuth" | "elevation" | "zoom",
+  event: Event,
+) => {
+  const value = Number.parseFloat((event.target as HTMLInputElement).value);
+  if (Number.isNaN(value)) return;
+  viewport.value?.setView({ [field]: value });
+};
 const showResult = ref(false);
 
 // A finished render takes over the viewport + toasts — previously it only
@@ -331,11 +412,6 @@ onMounted(async () => {
     blenderStatus.value = "missing";
   }
 });
-
-const rotationLabel = computed(
-  () =>
-    `X ${rotation.value[0]}° · Y ${rotation.value[1]}° · Z ${rotation.value[2]}°`,
-);
 
 const srgbToLinear = (c: number) =>
   c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;

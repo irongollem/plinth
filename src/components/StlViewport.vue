@@ -338,7 +338,21 @@ const rotateWorld = (axis: "x" | "y" | "z", degrees: number) => {
 
 const resetRotation = () => setRotation([0, 0, 0]);
 
-defineExpose({ setRotation, rotateWorld, resetRotation });
+/** Set the camera parameters (azimuth°, elevation factor, zoom) directly. */
+const setView = (next: {
+  azimuth?: number;
+  elevation?: number;
+  zoom?: number;
+}) => {
+  if (next.azimuth !== undefined) view.azimuth = next.azimuth;
+  if (next.elevation !== undefined) view.elevation = next.elevation;
+  if (next.zoom !== undefined)
+    view.zoom = Math.min(3, Math.max(0.5, next.zoom));
+  updateCamera(true);
+  emitView();
+};
+
+defineExpose({ setRotation, rotateWorld, resetRotation, setView });
 
 // ---- pointer interaction ----
 let dragButton: number | null = null;
