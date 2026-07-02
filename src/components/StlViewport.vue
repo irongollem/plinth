@@ -165,6 +165,9 @@ const updateGizmo = () => {
   if (meshGroup) {
     const box = new THREE.Box3().setFromObject(pivot);
     if (!box.isEmpty()) box.getCenter(gizmo.position);
+    // The rings ride along with the model (local-axis gizmo, like
+    // Blender's): turning one visibly tilts the other two
+    gizmo.quaternion.copy(pivot.quaternion);
   }
 };
 
@@ -205,7 +208,12 @@ const pickRing = (e: PointerEvent): THREE.Mesh | null => {
 
 const beginRingDrag = (e: PointerEvent, mesh: THREE.Mesh): boolean => {
   if (!pivot || !gizmo) return false;
-  const axis = AXIS_VECTORS[mesh.userData.axis as "x" | "y" | "z"].clone();
+  // The grabbed ring's axis in WORLD space: rings are model-attached, so
+  // the model's current orientation carries the axis with it
+  const axis = AXIS_VECTORS[mesh.userData.axis as "x" | "y" | "z"]
+    .clone()
+    .applyQuaternion(pivot.quaternion)
+    .normalize();
   // In-plane basis: u ⟂ axis, w = axis × u closes the right-handed frame
   const helper =
     Math.abs(axis.z) < 0.9
