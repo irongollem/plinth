@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import AddSTL from "./views/AddSTL.vue";
-import CreateRelease from "./views/CreateRelease.vue";
-import Settings from "./views/Settings.vue";
+import { computed } from "vue";
 import ToastContainer from "./components/ToastContainer.vue";
 import { use3DPackageHandler } from "./composables/use3DPackageHandler";
 import { useReleasesStore } from "./stores/releasesStore";
+import AddSTL from "./views/AddSTL.vue";
+import CreateRelease from "./views/CreateRelease.vue";
 import Finalize from "./views/Finalize.vue";
-import { computed } from "vue";
+import Render from "./views/Render.vue";
+import Settings from "./views/Settings.vue";
 
 use3DPackageHandler();
 const releasesStore = useReleasesStore();
@@ -19,6 +20,8 @@ const currentTabComponent = computed(() => {
       return CreateRelease;
     case "addStl":
       return AddSTL;
+    case "render":
+      return Render;
     case "finalize":
       return Finalize;
     default:
@@ -62,6 +65,16 @@ const currentTabComponent = computed(() => {
         @change="releasesStore.setActiveTab('addStl')"
         aria-label="Add STL"
         :disabled="!releasesStore.releaseExists"
+      />
+
+      <input
+        type="radio"
+        name="release"
+        class="tab"
+        :class="{ 'tab-active': releasesStore.activeTab === 'render' }"
+        :checked="releasesStore.activeTab === 'render'"
+        @change="releasesStore.setActiveTab('render')"
+        aria-label="Render"
       />
 
       <label

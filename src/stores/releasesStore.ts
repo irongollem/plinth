@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref, computed } from "vue";
+import { computed, ref } from "vue";
 import type {
   ModelLocation,
   ModelReference,
@@ -8,7 +8,7 @@ import type {
 } from "../bindings";
 import { useToastStore } from "./toastStore.ts";
 
-export type Tab = "settings" | "release" | "addStl" | "finalize";
+export type Tab = "settings" | "release" | "addStl" | "render" | "finalize";
 export const useReleasesStore = defineStore("releases", () => {
   const toastStore = useToastStore();
   const release = ref<Release | undefined>();
