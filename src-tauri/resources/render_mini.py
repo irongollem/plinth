@@ -169,12 +169,26 @@ def camera(obj, azimuth, elev, zoom):
     mn = Vector((min(c.x for c in coords),min(c.y for c in coords),min(c.z for c in coords)))
     mx = Vector((max(c.x for c in coords),max(c.y for c in coords),max(c.z for c in coords)))
     bbc = (mn+mx)*0.5
-    # Bounding-box half-diagonal, NOT max vertex distance: the in-app
-    # preview (StlViewport.vue) fits its camera with the exact same number,
-    # so preview framing and render framing stay WYSIWYG. Keep in sync.
-    radius = (mx - mn).length * 0.5
-    D = radius/math.tan(cam.data.angle/2)*zoom; az = math.radians(azimuth)
-    cam.location = bbc + Vector((math.sin(az), -math.cos(az), elev)).normalized()*D
+    az = math.radians(azimuth)
+    # Exact fit: project all 8 bbox corners through the camera and solve the
+    # distance at which every corner is inside the (square) frame. Unlike a
+    # bounding-sphere fit this cannot clip and does not depend on model
+    # shape. The in-app preview (StlViewport.vue) runs the IDENTICAL
+    # algorithm — keep them in sync for WYSIWYG framing.
+    d = Vector((math.sin(az), -math.cos(az), elev)).normalized()  # target -> camera
+    fwd = -d
+    right = fwd.cross(Vector((0.0, 0.0, 1.0))).normalized()
+    up = right.cross(fwd)
+    half = math.tan(cam.data.angle / 2)
+    D = 0.0
+    for cx in (mn.x, mx.x):
+        for cy in (mn.y, mx.y):
+            for cz in (mn.z, mx.z):
+                e = Vector((cx, cy, cz)) - bbc
+                needed = e.dot(d) + max(abs(e.dot(right)), abs(e.dot(up))) / half
+                D = max(D, needed)
+    D *= zoom
+    cam.location = bbc + d * D
     cam.rotation_euler = (bbc-Vector(cam.location)).to_track_quat('-Z','Y').to_euler()
     cam.data.dof.use_dof = False
 

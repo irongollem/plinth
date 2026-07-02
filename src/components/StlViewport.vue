@@ -163,9 +163,8 @@ const buildGizmo = () => {
 const updateGizmo = () => {
   if (!gizmo || !pivot) return;
   gizmo.visible = !!meshGroup;
-  if (meshGroup) {
-    const box = new THREE.Box3().setFromObject(pivot);
-    if (!box.isEmpty()) box.getCenter(gizmo.position);
+  if (worldBox) {
+    worldBox.getCenter(gizmo.position);
     // The rings ride along with the model (local-axis gizmo, like
     // Blender's): turning one visibly tilts the other two
     gizmo.quaternion.copy(pivot.quaternion);
@@ -249,29 +248,63 @@ const requestRender = () => {
   });
 };
 
-const updateCamera = (precise = false) => {
+// World-space model bounds, cached after every rotation change (precise
+// vertex bounds on release/load, fast approximate mid-drag). Camera and
+// gizmo updates reuse the cache: recomputing per wheel tick was both slow
+// and — when the fast approximate box was used — INFLATED under rotation,
+// making the preview roomier than the render at the same zoom.
+let worldBox: THREE.Box3 | null = null;
+
+const refreshBounds = (precise: boolean) => {
+  if (!pivot || !meshGroup) {
+    worldBox = null;
+    return;
+  }
+  const box = new THREE.Box3().setFromObject(pivot, precise);
+  worldBox = box.isEmpty() ? null : box;
+};
+
+const updateCamera = () => {
   if (!camera || !pivot) return;
   const target = new THREE.Vector3(0, 0, 0.7);
-  // Fallback radius for the empty scene only — with a model loaded the fit
-  // must use the model's real bounds or preview and render zoom diverge
-  let radius = Math.sqrt(3);
-  if (meshGroup) {
-    const box = new THREE.Box3().setFromObject(pivot, precise);
-    if (!box.isEmpty()) {
-      box.getCenter(target);
-      // Bounding-box half-diagonal — the IDENTICAL quantity render_mini.py
-      // fits its camera with, so the final render frames like the preview
-      radius = box.getSize(new THREE.Vector3()).length() / 2;
-    }
-  }
-  const distance =
-    (radius / Math.tan((camera.fov * Math.PI) / 360)) * view.zoom;
   const az = (view.azimuth * Math.PI) / 180;
+  // target -> camera direction, identical parametrization to render_mini.py
   const direction = new THREE.Vector3(
     Math.sin(az),
     -Math.cos(az),
     view.elevation,
   ).normalize();
+  const half = Math.tan((camera.fov * Math.PI) / 360);
+
+  let distance = (Math.sqrt(3) / half) * view.zoom; // empty-scene fallback
+  if (worldBox) {
+    worldBox.getCenter(target);
+    // Exact fit, same algorithm as render_mini.py camera(): the distance at
+    // which all 8 bbox corners sit inside the SQUARE render frame. Cannot
+    // clip and is shape-independent — keep the two implementations in sync.
+    const forward = direction.clone().negate();
+    const right = new THREE.Vector3()
+      .crossVectors(forward, new THREE.Vector3(0, 0, 1))
+      .normalize();
+    const up = new THREE.Vector3().crossVectors(right, forward);
+    let needed = 0;
+    const corner = new THREE.Vector3();
+    for (const x of [worldBox.min.x, worldBox.max.x]) {
+      for (const y of [worldBox.min.y, worldBox.max.y]) {
+        for (const z of [worldBox.min.z, worldBox.max.z]) {
+          corner.set(x, y, z).sub(target);
+          needed = Math.max(
+            needed,
+            corner.dot(direction) +
+              Math.max(Math.abs(corner.dot(right)), Math.abs(corner.dot(up))) /
+                half,
+          );
+        }
+      }
+    }
+    distance = needed * view.zoom;
+  }
+
   camera.position.copy(target).addScaledVector(direction, distance);
   camera.lookAt(target);
   requestRender();
@@ -311,8 +344,9 @@ const emitView = () => {
 // minis, so drags use fast approximate boxes and snap precise on release.
 const afterRotationChange = (precise = false) => {
   floorModel(precise);
+  refreshBounds(precise);
   updateGizmo();
-  updateCamera(precise);
+  updateCamera();
   emitRotation();
 };
 
@@ -357,7 +391,7 @@ const setView = (next: {
   if (next.elevation !== undefined) view.elevation = next.elevation;
   if (next.zoom !== undefined)
     view.zoom = Math.min(3, Math.max(0.5, next.zoom));
-  updateCamera(true);
+  updateCamera();
   emitView();
 };
 
@@ -482,6 +516,7 @@ const loadParts = async () => {
   const token = ++loadToken;
   disposeModel();
   if (!props.parts.length) {
+    refreshBounds(false);
     updateGizmo();
     requestRender();
     return;
