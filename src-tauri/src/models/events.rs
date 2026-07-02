@@ -51,6 +51,86 @@ pub struct CancelledStatus {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
+pub enum ScanStatus {
+    Started(ScanStartedStatus),
+    Progress(ScanProgressStatus),
+    Completed(ScanCompletedStatus),
+    Failed(ScanFailedStatus),
+    Cancelled(ScanCancelledStatus),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ScanStartedStatus {
+    pub job_id: String,
+    pub root: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ScanProgressStatus {
+    pub job_id: String,
+    pub files_indexed: u32,
+    pub current_dir: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ScanCompletedStatus {
+    pub job_id: String,
+    pub total_files: u32,
+    pub total_models: u32,
+    pub elapsed_seconds: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ScanFailedStatus {
+    pub job_id: String,
+    pub error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ScanCancelledStatus {
+    pub job_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
+pub enum DuplicateStatus {
+    Started(DuplicateStartedStatus),
+    Progress(DuplicateProgressStatus),
+    Completed(DuplicateCompletedStatus),
+    Failed(DuplicateFailedStatus),
+    Cancelled(DuplicateCancelledStatus),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct DuplicateStartedStatus {
+    pub job_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct DuplicateProgressStatus {
+    pub job_id: String,
+    pub processed: u32,
+    pub total: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct DuplicateCompletedStatus {
+    pub job_id: String,
+    pub group_count: u32,
+    pub wasted_bytes: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct DuplicateFailedStatus {
+    pub job_id: String,
+    pub error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct DuplicateCancelledStatus {
+    pub job_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
 pub enum RenderStatus {
     Started(RenderStartedStatus),
     Progress(RenderProgressStatus),

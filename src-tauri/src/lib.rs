@@ -1,3 +1,4 @@
+mod catalog;
 mod error;
 mod file;
 mod image;
@@ -5,8 +6,13 @@ mod models;
 mod render;
 mod settings;
 
+use catalog::commands::{
+    add_catalog_tag, cancel_catalog_job, get_catalog_model_files, get_catalog_stats,
+    get_catalog_tags, get_duplicate_groups, remove_catalog_tag, search_catalog, start_catalog_scan,
+    start_duplicate_scan,
+};
 use file::commands::{add_model, cancel_compression, create_release, finalize_release};
-use models::events::{CompressionStatus, RenderStatus};
+use models::events::{CompressionStatus, DuplicateStatus, RenderStatus, ScanStatus};
 use render::commands::{cancel_render, detect_blender, start_render};
 use std::env;
 use std::sync::Mutex;
@@ -45,8 +51,23 @@ fn create_specta_builder() -> Builder {
             start_render,
             cancel_render,
             get_pending_3dpak,
+            start_catalog_scan,
+            start_duplicate_scan,
+            cancel_catalog_job,
+            search_catalog,
+            get_catalog_tags,
+            add_catalog_tag,
+            remove_catalog_tag,
+            get_catalog_model_files,
+            get_catalog_stats,
+            get_duplicate_groups,
         ])
-        .events(collect_events![CompressionStatus, RenderStatus,])
+        .events(collect_events![
+            CompressionStatus,
+            RenderStatus,
+            ScanStatus,
+            DuplicateStatus,
+        ])
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

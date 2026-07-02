@@ -12,6 +12,7 @@ pub struct Settings {
     pub chunk_size: Option<u32>,
     pub max_compression_threads: Option<u32>,
     pub blender_path: Option<String>,
+    pub catalog_root: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

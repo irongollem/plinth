@@ -48,6 +48,14 @@
         }
       ]
     },
+    {
+      "identifier": "opener:allow-reveal-item-in-dir",
+      "allow": [
+        {
+          "path": "**"
+        }
+      ]
+    },
     "os:default"
   ]
 }

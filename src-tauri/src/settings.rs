@@ -13,6 +13,7 @@ pub(crate) static SETTINGS_CACHE: Lazy<Mutex<Settings>> = Lazy::new(|| {
         chunk_size: None,
         max_compression_threads: None,
         blender_path: None,
+        catalog_root: None,
     })
 });
 
@@ -75,6 +76,10 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         .get("blender_path")
         .and_then(|v| v.as_str().map(String::from));
 
+    let catalog_root = store
+        .get("catalog_root")
+        .and_then(|v| v.as_str().map(String::from));
+
     let settings = Settings {
         scratch_dir,
         target_dir,
@@ -82,6 +87,7 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         chunk_size,
         max_compression_threads,
         blender_path,
+        catalog_root,
     };
 
     {
@@ -140,6 +146,11 @@ pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(
         &store,
         "blender_path",
         settings.blender_path.as_deref().map(|v| json!(v)),
+    );
+    set_or_delete(
+        &store,
+        "catalog_root",
+        settings.catalog_root.as_deref().map(|v| json!(v)),
     );
 
     store.save().map_err(|e| e.to_string())?;
