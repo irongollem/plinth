@@ -147,6 +147,7 @@
           <label class="label text-sm" for="render-look">Look</label>
           <select id="render-look" class="select select-sm" v-model="look">
             <option value="flat">Classic (locked look)</option>
+            <option value="resin">Resin (glossy coat)</option>
             <option value="rich">Rich (experimental)</option>
           </select>
         </div>
@@ -361,8 +362,8 @@ const matchCamera = ref(true);
 const resolution = ref(1600);
 const samples = ref(96);
 // "flat" (the handover's locked look) won the three-way comparison against
-// the DTL reference; "rich" stays selectable for further tuning
-const look = ref<"rich" | "flat">("flat");
+// the DTL reference; "resin" adds the physical-print sheen on top of it
+const look = ref<"rich" | "flat" | "resin">("flat");
 // sRGB of the default linear resin color (0.85, 0.65, 0.43) — pale warm
 // cream, matched against formal DTL product renders
 const DEFAULT_RESIN_HEX = "#edd3af";

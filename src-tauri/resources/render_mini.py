@@ -133,6 +133,21 @@ def resin_material(obj, color, look="flat"):
                       ("Subsurface Radius", LOOK["sss_radius"]),
                       ("Subsurface Scale",  LOOK["sss_scale"])):
         if name in b.inputs: b.inputs[name].default_value = val
+    if look == "resin":
+        # Cured resin is satin with a tighter glossy layer on top — the
+        # dual-lobe "gloss over matte" a single roughness can't give
+        for name, val in (("Coat Weight", 0.3), ("Coat Roughness", 0.12)):
+            if name in b.inputs: b.inputs[name].default_value = val
+        # Faint surface speckle: micro-noise bump breaks the highlights up
+        # so they sparkle like a physical print instead of CAD-smooth
+        nt = m.node_tree
+        noise = nt.nodes.new("ShaderNodeTexNoise")
+        noise.inputs["Scale"].default_value = 450.0
+        noise.inputs["Detail"].default_value = 3.0
+        bump = nt.nodes.new("ShaderNodeBump")
+        bump.inputs["Strength"].default_value = 0.035
+        nt.links.new(noise.outputs["Fac"], bump.inputs["Height"])
+        nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
     obj.data.materials.clear(); obj.data.materials.append(m)
 
 def lights(look="flat"):
@@ -149,19 +164,43 @@ def lights(look="flat"):
         "Fill": (1.0, 0.90, 0.78),
         "Rim":  (1.0, 0.92, 0.82),
     }
+    # Resin look: Classic energies, but the rim runs slightly COOL against
+    # the warm key — the subtle temperature split real product shots have
+    resin_colors = {
+        "Key":  LOOK["key"]["color"],
+        "Fill": (0.95, 0.93, 0.90),
+        "Rim":  (0.85, 0.90, 1.0),
+    }
     def mk(spec, name, energy_scale=1.0, size_scale=1.0):
         d = bpy.data.lights.new(name, "AREA"); d.energy=spec["energy"]*energy_scale; d.size=spec["size"]*size_scale
-        d.color = rich_colors[name] if look == "rich" else spec["color"]
+        if look == "rich":   d.color = rich_colors[name]
+        elif look == "resin": d.color = resin_colors[name]
+        else:                d.color = spec["color"]
         o = bpy.data.objects.new(name, d); o.location = spec["loc"]
         bpy.context.collection.objects.link(o)
         v = Vector((0,0,0.6)) - Vector(spec["loc"])
         o.rotation_euler = v.to_track_quat("-Z","Y").to_euler()
     mk(LOOK["key"],"Key",key_scale,key_size); mk(LOOK["fill"],"Fill",fill_scale); mk(LOOK["rim"],"Rim")
 
-def black_world():
+def black_world(look="flat"):
     w = bpy.data.worlds.new("World"); bpy.context.scene.world = w; w.use_nodes = True
-    bg = w.node_tree.nodes.get("Background")
+    nt = w.node_tree
+    bg = nt.nodes.get("Background")
     bg.inputs["Color"].default_value = (0,0,0,1); bg.inputs["Strength"].default_value = 0.0
+    if look == "resin":
+        # The backdrop stays pure black for CAMERA rays, but the surface
+        # gets to reflect a dim neutral studio — with a void-black world the
+        # speculars contain only three lamps, which is the big "CG" tell.
+        env = nt.nodes.new("ShaderNodeBackground")
+        env.inputs["Color"].default_value = (0.9, 0.88, 0.85, 1.0)
+        env.inputs["Strength"].default_value = 0.12
+        lp = nt.nodes.new("ShaderNodeLightPath")
+        mix = nt.nodes.new("ShaderNodeMixShader")
+        out = nt.nodes.get("World Output")
+        nt.links.new(lp.outputs["Is Camera Ray"], mix.inputs["Fac"])
+        nt.links.new(env.outputs["Background"], mix.inputs[1])   # non-camera rays
+        nt.links.new(bg.outputs["Background"], mix.inputs[2])    # camera rays: black
+        nt.links.new(mix.outputs["Shader"], out.inputs["Surface"])
 
 def camera(obj, azimuth, elev, zoom):
     cd = bpy.data.cameras.new("Camera"); cd.lens = LOOK["cam_lens"]
@@ -234,7 +273,7 @@ def build_and_render(cfg, rotate, out, res, samples):
     obj = import_join(cfg["paths"])
     normalize(obj, rotate)
     resin_material(obj, cfg["color"], cfg["look"])
-    lights(cfg["look"]); black_world()
+    lights(cfg["look"]); black_world(cfg["look"])
     camera(obj, cfg["azimuth"], cfg["elev"], cfg["zoom"])
     setup_render(res, samples, cfg["look"])
     bpy.context.scene.render.filepath = os.path.abspath(out).replace("\\","/")
