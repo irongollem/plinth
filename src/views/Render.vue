@@ -361,8 +361,9 @@ const matchCamera = ref(true);
 const resolution = ref(1600);
 const samples = ref(96);
 const look = ref<"rich" | "flat">("rich");
-// sRGB of the locked linear resin color (0.80, 0.54, 0.35)
-const DEFAULT_RESIN_HEX = "#e7c2a0";
+// sRGB of the default linear resin color (0.85, 0.65, 0.43) — pale warm
+// cream, matched against formal DTL product renders
+const DEFAULT_RESIN_HEX = "#edd3af";
 const colorHex = ref(DEFAULT_RESIN_HEX);
 const outputPath = ref("");
 

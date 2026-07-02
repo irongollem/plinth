@@ -32,7 +32,8 @@ const emit = defineEmits<{
 const container = ref<HTMLDivElement | null>(null);
 const isLoading = ref(false);
 
-const DEFAULT_COLOR: [number, number, number] = [0.8, 0.54, 0.35];
+// Keep in sync with LOOK.base_color in render_mini.py
+const DEFAULT_COLOR: [number, number, number] = [0.85, 0.65, 0.43];
 // 60mm lens on a 36mm sensor, square frame
 const CAMERA_FOV = (2 * Math.atan(18 / 60) * 180) / Math.PI;
 

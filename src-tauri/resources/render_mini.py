@@ -32,7 +32,10 @@ from mathutils import Vector
 
 # ----------------------------- locked recipe -----------------------------
 LOOK = dict(
-    base_color   = (0.80, 0.54, 0.35),   # warm resin
+    # Creamier and less saturated than the original (0.80, 0.54, 0.35):
+    # stacked with warm lights the old value rendered orange/"digital"
+    # next to formal product renders.
+    base_color   = (0.85, 0.65, 0.43),   # pale warm resin
     roughness    = 0.52,
     sss_weight   = 0.35,
     sss_radius   = (0.70, 0.35, 0.20),   # reddish scatter
@@ -134,12 +137,19 @@ def resin_material(obj, color, look="flat"):
 
 def lights(look="flat"):
     # "rich" = the promo-grade tonal shift: a harder (smaller), stronger key
-    # against a near-absent fill, so the form rolls from pale cream through
-    # saturated warm midtones into deep shadow instead of flattening out.
-    key_scale, key_size, fill_scale = (1.2, 0.55, 0.2) if look == "rich" else (1.0, 1.0, 1.0)
+    # against a low fill, so the form rolls from pale cream through warm
+    # midtones into deep shadow. Light color stays close to white — the
+    # warmth should come from the resin, not from orange lamps stacking
+    # onto an orange material.
+    key_scale, key_size, fill_scale = (1.2, 0.55, 0.3) if look == "rich" else (1.0, 1.0, 1.0)
+    rich_colors = {
+        "Key":  (1.0, 0.92, 0.80),
+        "Fill": (1.0, 0.90, 0.78),
+        "Rim":  (1.0, 0.92, 0.82),
+    }
     def mk(spec, name, energy_scale=1.0, size_scale=1.0):
         d = bpy.data.lights.new(name, "AREA"); d.energy=spec["energy"]*energy_scale; d.size=spec["size"]*size_scale
-        d.color = spec["color"]
+        d.color = rich_colors[name] if look == "rich" else spec["color"]
         o = bpy.data.objects.new(name, d); o.location = spec["loc"]
         bpy.context.collection.objects.link(o)
         v = Vector((0,0,0.6)) - Vector(spec["loc"])
@@ -190,9 +200,10 @@ def setup_render(res, samples, look="flat"):
     except Exception: pass
     sc.view_settings.exposure = LOOK["exposure"]
     if look == "rich":
-        # gamma < 1 is a cheap contrast curve: deepens shadows and midtone
-        # saturation while the near-white key side barely moves
-        sc.view_settings.gamma = 0.85
+        # gamma < 1 is a cheap contrast curve: deepens shadows while the
+        # near-white key side barely moves. Kept gentle — pushing it also
+        # over-saturates midtones, which reads "digital"
+        sc.view_settings.gamma = 0.9
     sc.render.resolution_x = res; sc.render.resolution_y = res
     sc.render.resolution_percentage = 100
     sc.render.image_settings.file_format = "PNG"
