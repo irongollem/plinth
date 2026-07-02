@@ -159,7 +159,10 @@ def camera(obj, azimuth, elev, zoom):
     mn = Vector((min(c.x for c in coords),min(c.y for c in coords),min(c.z for c in coords)))
     mx = Vector((max(c.x for c in coords),max(c.y for c in coords),max(c.z for c in coords)))
     bbc = (mn+mx)*0.5
-    radius = max((c-bbc).length for c in coords)
+    # Bounding-box half-diagonal, NOT max vertex distance: the in-app
+    # preview (StlViewport.vue) fits its camera with the exact same number,
+    # so preview framing and render framing stay WYSIWYG. Keep in sync.
+    radius = (mx - mn).length * 0.5
     D = radius/math.tan(cam.data.angle/2)*zoom; az = math.radians(azimuth)
     cam.location = bbc + Vector((math.sin(az), -math.cos(az), elev)).normalized()*D
     cam.rotation_euler = (bbc-Vector(cam.location)).to_track_quat('-Z','Y').to_euler()

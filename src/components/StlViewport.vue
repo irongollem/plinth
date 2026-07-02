@@ -240,14 +240,21 @@ const requestRender = () => {
   });
 };
 
-const updateCamera = () => {
+const updateCamera = (precise = false) => {
   if (!camera || !pivot) return;
   const target = new THREE.Vector3(0, 0, 0.7);
+  // Fallback radius for the empty scene only — with a model loaded the fit
+  // must use the model's real bounds or preview and render zoom diverge
+  let radius = Math.sqrt(3);
   if (meshGroup) {
-    const box = new THREE.Box3().setFromObject(pivot);
-    if (!box.isEmpty()) box.getCenter(target);
+    const box = new THREE.Box3().setFromObject(pivot, precise);
+    if (!box.isEmpty()) {
+      box.getCenter(target);
+      // Bounding-box half-diagonal — the IDENTICAL quantity render_mini.py
+      // fits its camera with, so the final render frames like the preview
+      radius = box.getSize(new THREE.Vector3()).length() / 2;
+    }
   }
-  const radius = Math.sqrt(3); // bounding sphere of the 2-unit normalized model
   const distance =
     (radius / Math.tan((camera.fov * Math.PI) / 360)) * view.zoom;
   const az = (view.azimuth * Math.PI) / 180;
@@ -261,11 +268,11 @@ const updateCamera = () => {
   requestRender();
 };
 
-const floorModel = () => {
+const floorModel = (precise = false) => {
   if (!pivot) return;
   pivot.position.set(0, 0, 0);
   pivot.updateWorldMatrix(true, true);
-  const box = new THREE.Box3().setFromObject(pivot);
+  const box = new THREE.Box3().setFromObject(pivot, precise);
   if (!box.isEmpty()) {
     pivot.position.z = -box.min.z;
   }
@@ -290,10 +297,13 @@ const emitView = () => {
   });
 };
 
-const afterRotationChange = () => {
-  floorModel();
+// `precise` iterates real vertices for exact bounds (matching Blender's
+// framing exactly) — too slow for every drag frame on million-vertex
+// minis, so drags use fast approximate boxes and snap precise on release.
+const afterRotationChange = (precise = false) => {
+  floorModel(precise);
   updateGizmo();
-  updateCamera();
+  updateCamera(precise);
   emitRotation();
 };
 
@@ -307,7 +317,7 @@ const setRotation = (degrees: [number, number, number]) => {
     "ZYX",
   );
   pivot.quaternion.setFromEuler(euler);
-  afterRotationChange();
+  afterRotationChange(true);
 };
 
 /** Rotate around a world axis by degrees (snap buttons). */
@@ -323,7 +333,7 @@ const rotateWorld = (axis: "x" | "y" | "z", degrees: number) => {
     THREE.MathUtils.degToRad(degrees),
   );
   pivot.quaternion.premultiply(q);
-  afterRotationChange();
+  afterRotationChange(true);
 };
 
 const resetRotation = () => setRotation([0, 0, 0]);
@@ -413,9 +423,12 @@ const onPointerMove = (e: PointerEvent) => {
 };
 
 const onPointerUp = (e: PointerEvent) => {
+  const wasRotating = dragButton === 0;
   dragButton = null;
   ringDrag = null;
   (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+  // Snap floor + framing to exact vertex bounds now that the drag is over
+  if (wasRotating) afterRotationChange(true);
 };
 
 const onWheel = (e: WheelEvent) => {
@@ -486,7 +499,7 @@ const loadParts = async () => {
 
     meshGroup = group;
     pivot.add(group);
-    afterRotationChange();
+    afterRotationChange(true);
     emit("loaded");
   } catch (error) {
     emit("error", `Failed to load STL: ${error}`);
@@ -565,12 +578,22 @@ onBeforeUnmount(() => {
     >
       Select STL files to preview
     </div>
-    <div
-      v-else
-      class="absolute bottom-2 left-2 text-xs text-base-content/40 pointer-events-none"
-    >
-      drag ring: rotate on axis · drag: free rotate · right-drag: orbit · wheel:
-      zoom
-    </div>
+    <template v-else>
+      <!-- The render is square; this guide marks the actual capture area
+           inside the rectangular viewport -->
+      <div
+        class="absolute inset-0 flex items-center justify-center pointer-events-none"
+      >
+        <div
+          class="h-full max-w-full aspect-square border-x border-dashed border-white/15"
+        ></div>
+      </div>
+      <div
+        class="absolute bottom-2 left-2 text-xs text-base-content/40 pointer-events-none"
+      >
+        drag ring: rotate on axis · drag: free rotate · right-drag: orbit ·
+        wheel: zoom · dashed lines: render crop
+      </div>
+    </template>
   </div>
 </template>
