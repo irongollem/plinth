@@ -19,6 +19,31 @@ export interface FileFilter {
   extensions: string[];
 }
 
+/** Build SelectedFile entries from known paths (dialog-free). */
+export async function filesFromPaths(paths: string[]): Promise<SelectedFile[]> {
+  const files: SelectedFile[] = [];
+  for (const path of paths) {
+    try {
+      const fileInfo = await stat(path);
+      const fileName = path.split(/[/\\]/).pop() || "";
+      const extension = fileName.split(".").pop()?.toLowerCase() || "";
+
+      files.push({
+        path,
+        name: fileName,
+        info: fileInfo,
+        fileType: extension ? `.${extension}` : "Unknown",
+        getPreviewUrl() {
+          return convertFileSrc(this.path);
+        },
+      });
+    } catch (error) {
+      console.error(`Failed to read file metadata for ${path}:`, error);
+    }
+  }
+  return files;
+}
+
 export function useFileSelect() {
   const selectedFiles = ref<SelectedFile[]>([]);
 
@@ -114,29 +139,7 @@ export function useFileSelect() {
       if (!selected) return null;
 
       const paths = Array.isArray(selected) ? selected : [selected];
-      const files: SelectedFile[] = [];
-
-      for (const path of paths) {
-        try {
-          const fileInfo = await stat(path);
-          const fileName = path.split(/[/\\]/).pop() || "";
-          const extension = fileName.split(".").pop()?.toLowerCase() || "";
-
-          files.push({
-            path,
-            name: fileName,
-            info: fileInfo,
-            fileType: extension ? `.${extension}` : "Unknown",
-            getPreviewUrl() {
-              return convertFileSrc(this.path);
-            },
-          });
-        } catch (error) {
-          console.error(`Failed to read file metadata for ${path}:`, error);
-        }
-      }
-
-      return files;
+      return await filesFromPaths(paths);
     } catch (error) {
       console.error("Selection failed:", error);
       return null;

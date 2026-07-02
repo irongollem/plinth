@@ -90,6 +90,7 @@ const settings = ref<Settings>({
   chunk_size: null,
   max_compression_threads: null,
   blender_path: null,
+  catalog_root: null,
 });
 
 const blenderStatus = ref("");

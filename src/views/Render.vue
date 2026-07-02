@@ -145,13 +145,15 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { computed, onMounted, ref } from "vue";
+import { storeToRefs } from "pinia";
+import { computed, onMounted, ref, watch } from "vue";
 import { type BlenderInfo, commands } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
 import ProgressBar from "../components/ProgressBar.vue";
 // NOT `import type`: the component is used in the template, which
 // biome's useImportType can't see (rule disabled for .vue in biome.json)
 import StlViewport from "../components/StlViewport.vue";
+import { filesFromPaths } from "../composables/useFileSelect";
 import type { SelectedFile } from "../composables/useFileSelect";
 import { useRenderStatus } from "../composables/useRenderStatus";
 import { useReleasesStore } from "../stores/releasesStore.ts";
@@ -172,6 +174,14 @@ const {
 const viewport = ref<InstanceType<typeof StlViewport> | null>(null);
 const parts = ref<SelectedFile[]>([]);
 const partPaths = computed(() => parts.value.map((f) => f.path));
+
+// The catalog hands STL parts over via the store ("Render promo" button)
+const { renderParts } = storeToRefs(releasesStore);
+watch(renderParts, async (paths) => {
+  if (!paths.length) return;
+  parts.value = await filesFromPaths(paths);
+  renderParts.value = [];
+});
 
 const rotation = ref<[number, number, number]>([90, 0, 0]);
 const view = ref({ azimuth: -15, elevation: 0.22, zoom: 1.15 });

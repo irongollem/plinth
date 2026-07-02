@@ -4,6 +4,7 @@ import ToastContainer from "./components/ToastContainer.vue";
 import { use3DPackageHandler } from "./composables/use3DPackageHandler";
 import { useReleasesStore } from "./stores/releasesStore";
 import AddSTL from "./views/AddSTL.vue";
+import Catalog from "./views/Catalog.vue";
 import CreateRelease from "./views/CreateRelease.vue";
 import Finalize from "./views/Finalize.vue";
 import Render from "./views/Render.vue";
@@ -16,6 +17,8 @@ const currentTabComponent = computed(() => {
   switch (releasesStore.activeTab) {
     case "settings":
       return Settings;
+    case "catalog":
+      return Catalog;
     case "release":
       return CreateRelease;
     case "addStl":
@@ -44,6 +47,16 @@ const currentTabComponent = computed(() => {
         :checked="releasesStore.activeTab === 'settings'"
         @change="releasesStore.setActiveTab('settings')"
         aria-label="⚙️"
+      />
+
+      <input
+        type="radio"
+        name="release"
+        class="tab"
+        :class="{ 'tab-active': releasesStore.activeTab === 'catalog' }"
+        :checked="releasesStore.activeTab === 'catalog'"
+        @change="releasesStore.setActiveTab('catalog')"
+        aria-label="Catalog"
       />
 
       <input

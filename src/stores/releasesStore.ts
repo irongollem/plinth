@@ -8,16 +8,29 @@ import type {
 } from "../bindings";
 import { useToastStore } from "./toastStore.ts";
 
-export type Tab = "settings" | "release" | "addStl" | "render" | "finalize";
+export type Tab =
+  | "settings"
+  | "catalog"
+  | "release"
+  | "addStl"
+  | "render"
+  | "finalize";
 export const useReleasesStore = defineStore("releases", () => {
   const toastStore = useToastStore();
   const release = ref<Release | undefined>();
   const models = ref<StlModel[]>([]);
   const releaseDir = ref<string | undefined>();
   const activeTab = ref<Tab>("release");
+  // Cross-tab handoff: the catalog can push STL parts into the Render tab
+  const renderParts = ref<string[]>([]);
 
   const setActiveTab = (tab: Tab) => {
     activeTab.value = tab;
+  };
+
+  const requestRender = (paths: string[]) => {
+    renderParts.value = paths;
+    activeTab.value = "render";
   };
 
   const releaseExists = computed(() => !!release.value);
@@ -101,6 +114,8 @@ export const useReleasesStore = defineStore("releases", () => {
   return {
     activeTab,
     setActiveTab,
+    renderParts,
+    requestRender,
     release,
     releaseDir,
     releaseExists,
