@@ -86,7 +86,7 @@ pub async fn perform_compression(
     app_handle: AppHandle,
     release_dir_path: PathBuf,
     cancel_token: Arc<AtomicBool>,
-) -> Result<(u32, u32), AppError> {
+) -> Result<(u32, u32, PathBuf), AppError> {
     let target_base_path = storage::get_target_path(&app_handle)?;
 
     let release_name = release_dir_path
@@ -141,7 +141,7 @@ pub async fn perform_compression(
     fs::remove_dir_all(&release_dir_path)
         .map_err(|e| AppError::IoError(format!("Failed to clean up release directory: {}", e)))?;
 
-    Ok((total_files, total_size_kb))
+    Ok((total_files, total_size_kb, target_dir_path))
 }
 
 async fn run_compression_tasks(

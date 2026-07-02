@@ -68,8 +68,6 @@ const currentTabComponent = computed(() => {
         class="tab"
         :class="{
           'tab-active': releasesStore.activeTab === 'finalize',
-          'tab-disabled':
-            !releasesStore.releaseExists || !releasesStore.models.length,
         }"
       >
         <span class="tab-text mr-2">Finalize</span>
@@ -85,9 +83,6 @@ const currentTabComponent = computed(() => {
           :checked="releasesStore.activeTab === 'finalize'"
           @change="releasesStore.setActiveTab('finalize')"
           aria-label="Finalize"
-          :disabled="
-            !releasesStore.releaseExists || !releasesStore.models.length
-          "
         />
       </label>
     </div>

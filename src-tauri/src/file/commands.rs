@@ -170,12 +170,13 @@ pub async fn finalize_release(
 
         // Send appropriate completion event
         match result {
-            Ok((files, size)) => {
+            Ok((files, size, target_dir)) => {
                 let elapsed = start_time.elapsed().as_secs_f64();
                 CompressionStatus::Completed(CompletedStatus {
                     total_files: files,
                     total_size_kb: size,
                     elapsed_seconds: elapsed,
+                    folder_path: target_dir.to_string_lossy().into_owned(),
                 })
                 .emit(&app_handle_clone)
                 .ok();

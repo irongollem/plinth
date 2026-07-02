@@ -5,10 +5,12 @@ defineProps<{
 </script>
 
 <template>
-  <div class="radial-progress"
+  <div
+    class="radial-progress"
     :style="`--value:${progress};`"
-    :aria-valuenow="progress" role="progressbar"
+    :aria-valuenow="progress"
+    role="progressbar"
   >
-    {{progress}}%
+    {{ progress }}%
   </div>
 </template>

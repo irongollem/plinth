@@ -1,17 +1,20 @@
+import { computed, ref } from "vue";
 import type {
-  CompressionStatus,
-  StartedStatus,
-  ProgressStatus,
-  CompletedStatus,
-  FailedStatus,
   CancelledStatus,
+  CompletedStatus,
+  CompressionStatus,
+  FailedStatus,
+  ProgressStatus,
+  StartedStatus,
 } from "../bindings";
-import { ref, computed } from "vue";
+
+// Module-scoped so every component using this composable shares ONE status:
+// Finalize.vue starts the job and CompressionStatus.vue receives the events;
+// with per-call refs they would each track their own copy and disagree.
+const compressionStatus = ref<CompressionStatus | null>(null);
+const activeJobId = ref<string>("");
 
 export function useCompressionStatus() {
-  const compressionStatus = ref<CompressionStatus | null>(null);
-  const activeJobId = ref<string>("");
-
   // Type guards
   const isStartedStatus = (
     status: CompressionStatus,
@@ -68,21 +71,31 @@ export function useCompressionStatus() {
     activeJobId.value = "";
   };
 
+  const getStatus = () => {
+    if (!compressionStatus.value) return "None";
+    if (isStartedStatus(compressionStatus.value)) return "Started";
+    if (isProgressStatus(compressionStatus.value)) return "Progress";
+    if (isCompletedStatus(compressionStatus.value)) return "Completed";
+    if (isFailedStatus(compressionStatus.value)) return "Failed";
+    if (isCancelledStatus(compressionStatus.value)) return "Cancelled";
+  };
+
   // Get user-friendly title based on current status
   const getStatusTitle = () => {
-    if (!compressionStatus.value) return "Ready to Compress";
-
-    if (isStartedStatus(compressionStatus.value))
-      return "Starting Compression...";
-    if (isProgressStatus(compressionStatus.value))
-      return "Compressing Files...";
-    if (isCompletedStatus(compressionStatus.value))
-      return "Compression Complete";
-    if (isFailedStatus(compressionStatus.value)) return "Compression Failed";
-    if (isCancelledStatus(compressionStatus.value))
-      return "Compression Cancelled";
-
-    return "Ready to Compress";
+    switch (getStatus()) {
+      case "None":
+        return "Ready to Compress";
+      case "Started":
+        return "Starting Compression...";
+      case "Progress":
+        return "Compressing Files...";
+      case "Completed":
+        return "Compression Complete";
+      case "Failed":
+        return "Compression Failed";
+      case "Cancelled":
+        return "Compression Cancelled";
+    }
   };
 
   // Format bytes to human-readable string
@@ -106,6 +119,7 @@ export function useCompressionStatus() {
     activeJobId,
     isCompressing,
     resetStatus,
+    getStatus,
     getStatusTitle,
     formatBytes,
     formatTime,

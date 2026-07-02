@@ -33,6 +33,7 @@ pub struct CompletedStatus {
     pub total_files: u32,
     pub total_size_kb: u32,
     pub elapsed_seconds: f64,
+    pub folder_path: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
