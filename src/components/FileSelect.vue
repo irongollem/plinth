@@ -124,7 +124,7 @@ const clearFiles = () => {
               <td>{{ formatFileSize(file.info.size) }}</td>
               <td>{{ file.fileType }}</td>
               <td>
-                <button class="btn btn-error btn-xs" @click="removeFile(file)">
+                <button type="button" class="btn btn-error btn-xs" @click="removeFile(file)">
                   Remove
                 </button>
               </td>
@@ -133,7 +133,7 @@ const clearFiles = () => {
         </table>
 
         <div class="mt-2 flex justify-end">
-          <button class="btn btn-sm btn-outline" @click="clearFiles">
+          <button type="button" class="btn btn-sm btn-outline" @click="clearFiles">
             Clear All
           </button>
         </div>

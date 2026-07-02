@@ -3,15 +3,13 @@
   <View>
     <template #left>
       <h1 class="text-xl font-bold">Settings</h1>
-      <form class="mt-4 space-y-6" @change="debouncedSave">
+      <form class="mt-4 space-y-6" @submit.prevent>
         <FileSelect
           id="scratch_dir"
           label="Temporary Files Directory"
           dir-mode
           v-model="settings.scratch_dir"
           tooltip="Your files will be temporarily stored here before being compressed."
-          @blur="debouncedSave"
-          @keydown.enter="debouncedSave"
         />
 
         <FileSelect
@@ -20,8 +18,6 @@
           dir-mode
           v-model="settings.target_dir"
           tooltip="Your compressed files will be saved here."
-          @blur="debouncedSave"
-          @keydown.enter="debouncedSave"
         />
 
         <div class="form-control mb-2">
@@ -63,7 +59,6 @@
               :max="availableCores"
               v-model.number="settings.max_compression_threads"
               class="mr-2 w-full h-2 rounded-lg appearance-none cursor-pointer bg-gray-200"
-              @change="debouncedSave"
             />
             <span class="text-sm text-gray-600">{{ settings.max_compression_threads || 'Auto' }}</span>
           </div>
@@ -78,7 +73,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { type Settings, commands } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
 import View from "../components/View.vue";
@@ -107,7 +102,6 @@ const browseBlender = async () => {
   });
   if (files?.length) {
     settings.value.blender_path = files[0].path;
-    await saveSettings();
     await checkBlender();
   }
 };
@@ -138,6 +132,18 @@ const debouncedSave = () => {
   }, 500) as unknown as number;
 };
 
+// Watch the settings object itself instead of relying on native form
+// events: the directory pickers update the model via a Vue emit, which
+// fires no DOM change/blur event, so form listeners never saw them.
+const settingsLoaded = ref(false);
+watch(
+  settings,
+  () => {
+    if (settingsLoaded.value) debouncedSave();
+  },
+  { deep: true },
+);
+
 onMounted(async () => {
   try {
     const savedSettings = await commands.getSettings();
@@ -147,15 +153,15 @@ onMounted(async () => {
       settings.value = savedSettings.data;
       toastStore.addToast("Settings loaded successfully", "success", 3000);
     } else {
-      toastStore.addToast(
-        `Failed to load settings: ${savedSettings.error}`,
-        "error",
-        0,
-      );
+      toastStore.reportError("Failed to load settings", savedSettings.error);
     }
   } catch (error) {
-    console.error("Failed to load settings:", error);
-    toastStore.addToast(`Failed to load settings: ${error}`, "error", 0);
+    toastStore.reportError("Failed to load settings", error);
+  } finally {
+    // Enable auto-save only after the initial load has populated the form
+    setTimeout(() => {
+      settingsLoaded.value = true;
+    }, 0);
   }
 });
 
@@ -166,16 +172,10 @@ const saveSettings = async () => {
       toastStore.addToast("Settings saved successfully", "success", 3000);
     }
     if (result.status === "error") {
-      console.error("Failed to save settings:", result.error);
-      toastStore.addToast(
-        `Failed to save settings: ${result.error}`,
-        "error",
-        0,
-      );
+      toastStore.reportError("Failed to save settings", result.error);
     }
   } catch (error) {
-    console.error("Error saving settings:", error);
-    toastStore.addToast(`Error saving settings: ${error}`, "error", 0);
+    toastStore.reportError("Error saving settings", error);
   }
 };
 </script>

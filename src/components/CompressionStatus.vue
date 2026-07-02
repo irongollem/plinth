@@ -115,7 +115,10 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { onMounted, onUnmounted, ref } from "vue";
 import { events } from "../bindings";
-import { useCompressionStatus } from "../composables/useCompressionStatus";
+import {
+  compressionJobId,
+  useCompressionStatus,
+} from "../composables/useCompressionStatus";
 import { useToastStore } from "../stores/toastStore";
 import ProgressBar from "./ProgressBar.vue";
 
@@ -142,6 +145,15 @@ const listenerTracker = ref<UnlistenFn>();
 
 onMounted(async () => {
   listenerTracker.value = await events.compressionStatus.listen((event) => {
+    // Ignore stragglers from an earlier job (e.g. cancel then restart):
+    // without this, job 1's late Cancelled/Completed would clear job 2's
+    // state and toast the wrong outcome
+    if (
+      activeJobId.value &&
+      compressionJobId(event.payload) !== activeJobId.value
+    ) {
+      return;
+    }
     compressionStatus.value = event.payload;
 
     // Auto-clear on completion

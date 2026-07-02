@@ -26,6 +26,11 @@ export const useReleasesStore = defineStore("releases", () => {
       ...newRelease,
       model_references: [...(newRelease.model_references || [])],
     };
+    // Keep the local model list consistent with the new reference list —
+    // e.g. creating a fresh release must not keep the previous one's models
+    models.value = models.value.filter((model) =>
+      release.value?.model_references.some((ref) => ref.id === model.id),
+    );
   };
 
   const addModel = (model: StlModel, path: string) => {
@@ -48,10 +53,18 @@ export const useReleasesStore = defineStore("releases", () => {
     if (!release.value || !release.value.model_references || !models.value)
       return;
 
-    const index = models.value.findIndex((m) => m.name === model.name);
+    // Match by id in EACH list independently: names are not unique across
+    // groups, and coupling the two arrays by index deletes the wrong
+    // reference the moment they drift
+    const index = models.value.findIndex((m) => m.id === model.id);
     if (index !== -1) {
       models.value.splice(index, 1);
-      release.value.model_references.splice(index, 1);
+    }
+    const refIndex = release.value.model_references.findIndex(
+      (ref) => ref.id === model.id,
+    );
+    if (refIndex !== -1) {
+      release.value.model_references.splice(refIndex, 1);
     }
   };
 
@@ -60,9 +73,12 @@ export const useReleasesStore = defineStore("releases", () => {
   );
 
   const clearModels = () => {
-    if (!release.value) return;
-    release.value.model_references = [];
+    // Unconditional: clearRelease clears the release ref too, and a guard
+    // on release.value would skip wiping models[] depending on call order
     models.value = [];
+    if (release.value) {
+      release.value.model_references = [];
+    }
   };
 
   const setReleaseDir = (dir: string) => {
@@ -70,9 +86,8 @@ export const useReleasesStore = defineStore("releases", () => {
   };
 
   const clearRelease = () => {
-    if (!release.value) return;
-    release.value = undefined;
     clearModels();
+    release.value = undefined;
   };
 
   const groups = computed(() =>

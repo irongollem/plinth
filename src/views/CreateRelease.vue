@@ -54,7 +54,7 @@
             </template>
             <span v-else>Create Release</span>
           </button>
-          <button class="btn btn-error" @click="clearRelease">
+          <button type="button" class="btn btn-error" @click="clearRelease">
             Clear Release
           </button>
         </div>
@@ -133,43 +133,30 @@ const saveRelease = async () => {
     return;
   }
   isStoring.value = true;
-  const dirName = formatDirName(release.value);
-  release.value.release_dir = dirName;
-  const result = await commands.createRelease(
-    release.value,
-    releaseImages.value.map((image) => image.path),
-    extraFiles.value.map((file) => file.path),
-  );
-  if (result.status === "ok") {
-    releasesStore.updateRelease(release.value);
-    releasesStore.setReleaseDir(result.data);
-    releasesStore.setActiveTab("addStl");
-    if (openOnSafe.value) {
-      await openPath(result.data);
-    }
-  } else {
-    toastStore.addToast(
-      `Failed to create release: ${result.error}`,
-      "error",
-      0,
+  try {
+    const result = await commands.createRelease(
+      release.value,
+      releaseImages.value.map((image) => image.path),
+      extraFiles.value.map((file) => file.path),
     );
+    if (result.status === "ok") {
+      // The backend computes the real directory name (and persists it in
+      // release.json); mirror it locally instead of re-deriving it here
+      release.value.release_dir =
+        result.data.split(/[/\\]/).pop() ?? result.data;
+      releasesStore.updateRelease(release.value);
+      releasesStore.setReleaseDir(result.data);
+      releasesStore.setActiveTab("addStl");
+      if (openOnSafe.value) {
+        await openPath(result.data);
+      }
+    } else {
+      toastStore.reportError("Failed to create release", result.error);
+    }
+  } catch (error) {
+    toastStore.reportError("Failed to create release", error);
+  } finally {
+    isStoring.value = false;
   }
-  isStoring.value = false;
-};
-
-const formatDirName = (release: Release) => {
-  const cleanDesignerName = release.designer
-    .toLowerCase()
-    .replace(/\s+/g, "-")
-    .replace(/[^\w-]/g, "");
-
-  const cleanName = release.name
-    .toLowerCase()
-    .replace(/\s+/g, "-")
-    .replace(/[^\w-]/g, "");
-
-  const [month, year] = release.date.split("/");
-
-  return `${cleanDesignerName} - ${month.padStart(2, "0")}-${year} - ${cleanName}`;
 };
 </script>

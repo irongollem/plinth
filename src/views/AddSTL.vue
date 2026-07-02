@@ -31,16 +31,16 @@
             :enabled="model.name.length > 0"
         />
 
-        <ul v-if="model.model_files.length > 0" class="list">
-          <li v-for="modelFile in modelFiles" :key="modelFile.name" class="list-row">
+        <ul v-if="modelFiles.length > 0" class="list">
+          <li v-for="modelFile in modelFiles" :key="modelFile.path" class="list-row">
             <div>
-              <img class="size-8 rounded-box" :src="getLogo(modelFile.name)" alt="File icon" />
+              <img class="size-8 rounded-box" :src="logoForFileName(modelFile.name)" alt="File icon" />
             </div>
             <div>
               {{modelFile.name}}
             </div>
             <div>
-              <button class="btn btn-xs btn-error" @click="model.model_files.splice(modelFiles.indexOf(modelFile), 1)">Remove</button>
+              <button type="button" class="btn btn-xs btn-error" @click="modelFiles.splice(modelFiles.indexOf(modelFile), 1)">Remove</button>
             </div>
           </li>
         </ul>
@@ -65,6 +65,7 @@
 </template>
 
 <script setup lang="ts">
+import { storeToRefs } from "pinia";
 import { computed, ref } from "vue";
 import type { Ref } from "vue";
 import { type StlModel, commands } from "../bindings.ts";
@@ -77,10 +78,15 @@ import View from "../components/View.vue";
 import type { SelectedFile } from "../composables/useFileSelect";
 import { useReleasesStore } from "../stores/releasesStore.ts";
 import { useToastStore } from "../stores/toastStore.ts";
-import { fileLogos } from "../types.ts";
+import { logoForFileName } from "../types.ts";
 
 const toastStore = useToastStore();
-const { groups, releaseDir, addModel } = useReleasesStore();
+const releasesStore = useReleasesStore();
+// storeToRefs keeps these live: a plain destructure freezes releaseDir at
+// first mount, and this KeepAlive'd component would then save a second
+// release's models into the FIRST release's directory
+const { groups, releaseDir } = storeToRefs(releasesStore);
+const { addModel } = releasesStore;
 const model: Ref<StlModel> = ref({
   id: null,
   name: "",
@@ -108,13 +114,13 @@ const saveModelData = async () => {
 
   isStoring.value = true;
   try {
-    if (!releaseDir) {
+    if (!releaseDir.value) {
       throw new Error("Release directory name is missing");
     }
 
     const savedModelTupleResult = await commands.addModel(
       model.value,
-      releaseDir,
+      releaseDir.value,
       modelFiles.value.map((f) => f.path),
       images.value.map((f) => f.path),
     );
@@ -123,14 +129,13 @@ const saveModelData = async () => {
       addModel(...savedModelTupleResult.data);
       clearModel();
     } else {
-      toastStore.addToast(
-        `Failed to save model: ${JSON.stringify(savedModelTupleResult.error)}`,
-        "error",
-        0,
+      toastStore.reportError(
+        "Failed to save model",
+        savedModelTupleResult.error,
       );
     }
   } catch (error) {
-    toastStore.addToast(`Failed to save model: ${error}`, "error", 0);
+    toastStore.reportError("Failed to save model", error);
   } finally {
     isStoring.value = false;
   }
@@ -148,19 +153,5 @@ const clearModel = () => {
   };
   images.value = [];
   modelFiles.value = [];
-};
-
-const getLogo = (fileName: string) => {
-  const ext = fileName.split(".").pop();
-  if (ext === "stl") {
-    return fileLogos.stl;
-  }
-  if (ext === "chitu" || ext === "chitubox") {
-    return fileLogos.chitubox;
-  }
-  if (ext === "lyt" || ext === "lys" || ext === "lychee") {
-    return fileLogos.lychee;
-  }
-  return "tauri.svg";
 };
 </script>
