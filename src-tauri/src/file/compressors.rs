@@ -1,39 +1,15 @@
 use crate::error::AppError;
-use crate::models::CompressionType;
-use crate::settings::SETTINGS_CACHE;
 use std::fs::File;
-use std::io::{Read, Seek, Write};
+use std::io::{Seek, Write};
 use std::path::PathBuf;
 use walkdir::WalkDir;
 use zip::write::SimpleFileOptions;
 
-pub fn get_compression_type() -> Result<CompressionType, AppError> {
-    let compression_type = {
-        SETTINGS_CACHE
-            .lock()
-            .map_err(|e| AppError::ConfigError(format!("{}", e)))?
-            .compression_type
-            .clone()
-    };
-    match compression_type {
-        Some(comp) => Ok(comp),
-        None => Err(AppError::ConfigError(
-            "Compression type not set".to_string(),
-        )),
-    }
-}
-
 pub fn get_extension_for_compression_type() -> String {
-    let compression_type_result = get_compression_type();
-
-    match compression_type_result {
-        Ok(compression_type) => match compression_type {
-            CompressionType::SevenZip => "7z",
-            CompressionType::Zip => "zip",
-        }
-        .to_string(),
-        Err(_) => "zip".to_string(), // Default to zip if settings access fails
-    }
+    // compress_files always writes ZIP data (there is no 7z writer yet), so
+    // the extension must say zip regardless of the configured preference —
+    // labelling ZIP bytes as .7z breaks tools that dispatch on the extension.
+    "zip".to_string()
 }
 
 pub fn determine_dir_size_kb(paths: &[PathBuf]) -> Result<(u32, u32), AppError> {
@@ -61,6 +37,9 @@ pub fn determine_dir_size_kb(paths: &[PathBuf]) -> Result<(u32, u32), AppError> 
     Ok((total_size_kb, total_files))
 }
 
+/// Compress `paths` into a ZIP written to `writer`. The progress callback
+/// receives each file's size in KiB and returns whether to CONTINUE —
+/// returning false aborts the archive (used for user cancellation).
 pub fn compress_files<T, F>(
     paths: &[PathBuf],
     writer: T,
@@ -68,14 +47,12 @@ pub fn compress_files<T, F>(
 ) -> Result<(), AppError>
 where
     T: Write + Seek,
-    F: FnMut(u32),
+    F: FnMut(u32) -> bool,
 {
     let mut zip = zip::ZipWriter::new(writer);
     let options = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o755);
-
-    let mut buffer = Vec::new();
 
     for path in paths {
         if path.is_dir() {
@@ -91,28 +68,30 @@ where
                 })?;
 
                 if entry_path.is_file() {
-                    // Add file to ZIP
+                    // Add file to ZIP, streaming so multi-GB files don't
+                    // occupy RAM in full
                     zip.start_file(path_as_string, options).map_err(|e| {
                         AppError::FileProcessingError(format!("Error starting file: {}", e))
                     })?;
                     let mut f = File::open(entry_path)?;
-                    f.read_to_end(&mut buffer)?;
-                    zip.write_all(&buffer)?;
-                    buffer.clear();
+                    std::io::copy(&mut f, &mut zip)?;
 
                     if let Some(ref mut callback) = progress_callback {
-                        callback(
-                            (entry
-                                .metadata()
-                                .map_err(|e| {
-                                    AppError::FileProcessingError(format!(
-                                        "Failed to read metadata from entry: {}",
-                                        e
-                                    ))
-                                })?
-                                .len()
-                                / 1024) as u32,
-                        );
+                        let size_kb = (entry
+                            .metadata()
+                            .map_err(|e| {
+                                AppError::FileProcessingError(format!(
+                                    "Failed to read metadata from entry: {}",
+                                    e
+                                ))
+                            })?
+                            .len()
+                            / 1024) as u32;
+                        if !callback(size_kb) {
+                            return Err(AppError::UserCancelled(
+                                "Compression cancelled by user".to_string(),
+                            ));
+                        }
                     }
                 } else if !name.as_os_str().is_empty() {
                     zip.add_directory(path_as_string, options).map_err(|e| {
@@ -134,12 +113,14 @@ where
                 AppError::FileProcessingError(format!("Error starting file: {}", e))
             })?;
             let mut f = File::open(path)?;
-            f.read_to_end(&mut buffer)?;
-            zip.write_all(&buffer)?;
-            buffer.clear();
+            std::io::copy(&mut f, &mut zip)?;
 
             if let Some(ref mut callback) = progress_callback {
-                callback((path.metadata()?.len() / 1024) as u32);
+                if !callback((path.metadata()?.len() / 1024) as u32) {
+                    return Err(AppError::UserCancelled(
+                        "Compression cancelled by user".to_string(),
+                    ));
+                }
             }
         }
     }

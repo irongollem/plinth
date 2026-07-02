@@ -83,16 +83,31 @@ pub async fn create_release(
     let release_name = clean_name(&release.name);
     let designer_name = clean_name(&release.designer);
 
+    // The directory name doubles as the catalog's on-disk key; refuse a
+    // malformed date instead of silently stamping a wrong one
     let release_date = {
+        let invalid = || {
+            AppError::InvalidInput(format!(
+                "Invalid release date '{}': expected MM/YYYY",
+                release.date
+            ))
+        };
         let date_parts = release.date.split('/').collect::<Vec<_>>();
         match date_parts.as_slice() {
-            [month, year] => format!("{:02}-{}", month.parse::<u8>().unwrap_or(1), year),
-            _ => "01-2023".to_string(), // Default if parsing fails
+            [month, year] => {
+                let month: u8 = month.trim().parse().map_err(|_| invalid())?;
+                let year: u16 = year.trim().parse().map_err(|_| invalid())?;
+                if !(1..=12).contains(&month) {
+                    return Err(invalid());
+                }
+                format!("{:02}-{}", month, year)
+            }
+            _ => return Err(invalid()),
         }
     };
 
     let release_dir_name = format!("{}-{}-{}", designer_name, release_date, release_name);
-    let release_path = storage::create_dir_on_scratch(&app_handle, release_dir_name)?;
+    let release_path = storage::create_dir_on_scratch(&app_handle, release_dir_name.clone())?;
 
     let copied_images = storage::copy_images(&image_paths, &release_path, &release_name)?;
     let copied_files = storage::copy_files(&other_file_paths, &release_path)?;
@@ -100,9 +115,12 @@ pub async fn create_release(
     let relative_image_paths = storage::convert_to_relative_paths(&copied_images, &release_path)?;
     let relative_file_paths = storage::convert_to_relative_paths(&copied_files, &release_path)?;
 
+    // The backend owns the directory name — persisting a frontend-computed
+    // copy invites the two to drift apart
     let release_with_paths = Release {
         images: relative_image_paths,
         other_files: relative_file_paths,
+        release_dir: release_dir_name,
         ..release
     };
 
@@ -158,6 +176,7 @@ pub async fn finalize_release(
         // Run the actual compression
         let result = compression_jobs::perform_compression(
             app_handle_clone.clone(),
+            job_id_clone.clone(),
             release_dir_path.clone(),
             cancel_token,
         )
@@ -173,6 +192,7 @@ pub async fn finalize_release(
             Ok((files, size, target_dir)) => {
                 let elapsed = start_time.elapsed().as_secs_f64();
                 CompressionStatus::Completed(CompletedStatus {
+                    job_id: job_id_clone,
                     total_files: files,
                     total_size_kb: size,
                     elapsed_seconds: elapsed,
@@ -181,18 +201,22 @@ pub async fn finalize_release(
                 .emit(&app_handle_clone)
                 .ok();
             }
+            // Match the variant, not the message text: error strings can
+            // legitimately contain the word "cancelled" (e.g. in a path)
+            Err(AppError::UserCancelled(_)) => {
+                CompressionStatus::Cancelled(CancelledStatus {
+                    job_id: job_id_clone,
+                })
+                .emit(&app_handle_clone)
+                .ok();
+            }
             Err(e) => {
-                if e.to_string().contains("cancelled") {
-                    CompressionStatus::Cancelled(CancelledStatus {})
-                        .emit(&app_handle_clone)
-                        .ok();
-                } else {
-                    CompressionStatus::Failed(FailedStatus {
-                        error: e.to_string(),
-                    })
-                    .emit(&app_handle_clone)
-                    .ok();
-                }
+                CompressionStatus::Failed(FailedStatus {
+                    job_id: job_id_clone,
+                    error: e.to_string(),
+                })
+                .emit(&app_handle_clone)
+                .ok();
             }
         }
     });

@@ -13,12 +13,14 @@ pub enum CompressionStatus {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
 pub struct StartedStatus {
+    pub job_id: String,
     pub total_files: u32,
     pub total_size_kb: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
 pub struct ProgressStatus {
+    pub job_id: String,
     pub processed_files: u32,
     pub total_files: u32,
     pub processed_size_kb: u32,
@@ -30,6 +32,7 @@ pub struct ProgressStatus {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
 pub struct CompletedStatus {
+    pub job_id: String,
     pub total_files: u32,
     pub total_size_kb: u32,
     pub elapsed_seconds: f64,
@@ -38,11 +41,14 @@ pub struct CompletedStatus {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
 pub struct FailedStatus {
+    pub job_id: String,
     pub error: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
-pub struct CancelledStatus {}
+pub struct CancelledStatus {
+    pub job_id: String,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
 pub enum RenderStatus {

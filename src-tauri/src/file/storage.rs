@@ -91,8 +91,10 @@ pub fn get_destination_folder(model_folder: &Path, file_path: &Path) -> PathBuf 
                 .unwrap_or("")
                 .to_lowercase();
 
-            // Use a regex or precise matching for supported files
-            let is_presupported = filename.split(['-', '_', '.']).any(|part| {
+            // Split on every non-alphanumeric character so spaced or
+            // parenthesised names ("knight (supported).stl", "dragon sup.stl")
+            // tokenize correctly too
+            let is_presupported = filename.split(|c: char| !c.is_alphanumeric()).any(|part| {
                 part == "sup" || part == "supported" || part == "presupported" || part == "ps"
             });
 
@@ -140,6 +142,15 @@ pub fn copy_files(file_paths: &[String], model_folder: &Path) -> Result<Vec<Stri
         let destination_folder = get_destination_folder(model_folder, source_path);
         let destination_path = destination_folder.join(file_name);
 
+        // Same basename from two different source folders would silently
+        // overwrite here — fail loudly instead of losing a part
+        if destination_path.exists() {
+            return Err(AppError::InvalidInput(format!(
+                "Duplicate file name '{}': a file with this name was already added to this model. Rename one of the files and try again.",
+                file_name.to_string_lossy()
+            )));
+        }
+
         fs::copy(source_path, &destination_path)
             .map_err(|e| AppError::IoError(format!("failed to copy file; {}", e)))?;
         copied_files.push(destination_path.to_string_lossy().into_owned());
@@ -149,21 +160,18 @@ pub fn copy_files(file_paths: &[String], model_folder: &Path) -> Result<Vec<Stri
 }
 
 pub fn convert_to_relative_path(absolute_path: &str, base_dir: &Path) -> Result<String, AppError> {
-    let base_str = base_dir.to_string_lossy().into_owned();
-    let absolute_str = absolute_path.to_string();
-
-    if absolute_str.starts_with(&base_str) {
-        let rel_path = absolute_str[base_str.len()..]
-            .trim_start_matches(std::path::MAIN_SEPARATOR)
-            .to_string();
-        Ok(rel_path)
-    } else {
-        Err(AppError::InvalidInput(format!(
-            "Path '{}' is not within base directory '{}'",
-            absolute_path,
-            base_dir.display()
-        )))
-    }
+    // strip_prefix is component-aware: unlike string starts_with it can't
+    // mistake a sibling like /x/ScratchOld for being inside /x/Scratch
+    Path::new(absolute_path)
+        .strip_prefix(base_dir)
+        .map(|rel| rel.to_string_lossy().into_owned())
+        .map_err(|_| {
+            AppError::InvalidInput(format!(
+                "Path '{}' is not within base directory '{}'",
+                absolute_path,
+                base_dir.display()
+            ))
+        })
 }
 
 pub fn convert_to_relative_paths(
