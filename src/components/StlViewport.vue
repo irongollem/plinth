@@ -100,7 +100,17 @@ const setupScene = (el: HTMLDivElement) => {
   });
 
   updateCamera();
-  renderer.setAnimationLoop(() => {
+};
+
+// Render on demand instead of a 60fps loop: the scene is static between
+// interactions, and a desktop app shouldn't burn GPU redrawing an
+// identical frame. Every mutation path below calls requestRender().
+let renderQueued = false;
+const requestRender = () => {
+  if (renderQueued || !renderer) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
     if (renderer && scene && camera) renderer.render(scene, camera);
   });
 };
@@ -123,6 +133,7 @@ const updateCamera = () => {
   ).normalize();
   camera.position.copy(target).addScaledVector(direction, distance);
   camera.lookAt(target);
+  requestRender();
 };
 
 const floorModel = () => {
@@ -259,7 +270,10 @@ const loadParts = async () => {
   if (!pivot || !material) return;
   const token = ++loadToken;
   disposeModel();
-  if (!props.parts.length) return;
+  if (!props.parts.length) {
+    requestRender();
+    return;
+  }
 
   isLoading.value = true;
   try {
@@ -312,6 +326,7 @@ watch(
   () => props.color,
   (color) => {
     material?.color.setRGB(...(color ?? DEFAULT_COLOR));
+    requestRender();
   },
   { deep: true },
 );
@@ -326,6 +341,7 @@ onMounted(() => {
     renderer.setSize(clientWidth, clientHeight);
     camera.aspect = clientWidth / clientHeight;
     camera.updateProjectionMatrix();
+    requestRender();
   });
   resizeObserver.observe(container.value);
   loadParts();
@@ -336,7 +352,6 @@ onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   disposeModel();
   material?.dispose();
-  renderer?.setAnimationLoop(null);
   renderer?.dispose();
   renderer?.domElement.remove();
   renderer = null;
