@@ -4,7 +4,29 @@ use crate::settings::SETTINGS_CACHE;
 use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use tauri::{AppHandle, Manager};
 use tokio::process::Command;
+
+/// The Blender script ships INSIDE the binary. As a bundled resource it was
+/// only re-copied next to the binary when the Rust code rebuilt, so pure
+/// script edits silently kept rendering with a stale copy during dev.
+const RENDER_SCRIPT: &str = include_str!("../../resources/render_mini.py");
+
+/// Write the embedded script where Blender can read it. Always overwrites,
+/// so the file on disk can never drift from the built app.
+pub fn materialize_render_script(app_handle: &AppHandle) -> Result<PathBuf, AppError> {
+    let dir = app_handle
+        .path()
+        .app_cache_dir()
+        .or_else(|_| app_handle.path().app_data_dir())
+        .map_err(|e| AppError::ConfigError(format!("No writable app dir: {}", e)))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| AppError::IoError(format!("Failed to create app dir: {}", e)))?;
+    let path = dir.join("render_mini.py");
+    std::fs::write(&path, RENDER_SCRIPT)
+        .map_err(|e| AppError::IoError(format!("Failed to write render script: {}", e)))?;
+    Ok(path)
+}
 
 /// (blender_path setting at detection time, detected install)
 type CachedDetection = (Option<String>, BlenderInfo);

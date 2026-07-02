@@ -10,8 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use tauri::path::BaseDirectory;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tauri_specta::Event;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Notify;
@@ -45,10 +44,7 @@ pub async fn start_render(
     }
 
     let blender = engine::detect_blender_cached().await?;
-    let script = app_handle
-        .path()
-        .resolve("resources/render_mini.py", BaseDirectory::Resource)
-        .map_err(|e| AppError::ConfigError(format!("Render script not found: {}", e)))?;
+    let script = engine::materialize_render_script(&app_handle)?;
 
     let output_path = match &options.output_path {
         Some(out) => PathBuf::from(out),
