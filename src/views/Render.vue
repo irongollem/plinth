@@ -146,8 +146,8 @@
         <div>
           <label class="label text-sm" for="render-look">Look</label>
           <select id="render-look" class="select select-sm" v-model="look">
-            <option value="rich">Rich (promo contrast)</option>
-            <option value="flat">Flat (even lighting)</option>
+            <option value="flat">Classic (locked look)</option>
+            <option value="rich">Rich (experimental)</option>
           </select>
         </div>
         <div>
@@ -360,7 +360,9 @@ const view = ref({ azimuth: -15, elevation: 0.22, zoom: 1.15 });
 const matchCamera = ref(true);
 const resolution = ref(1600);
 const samples = ref(96);
-const look = ref<"rich" | "flat">("rich");
+// "flat" (the handover's locked look) won the three-way comparison against
+// the DTL reference; "rich" stays selectable for further tuning
+const look = ref<"rich" | "flat">("flat");
 // sRGB of the default linear resin color (0.85, 0.65, 0.43) — pale warm
 // cream, matched against formal DTL product renders
 const DEFAULT_RESIN_HEX = "#edd3af";
@@ -384,6 +386,8 @@ const setViewField = (
   viewport.value?.setView({ [field]: value });
 };
 const showResult = ref(false);
+// What the user asked the render to be called, to detect auto-renames
+let requestedOutputPath = "";
 
 // A finished render takes over the viewport + toasts — previously it only
 // appeared as a small thumbnail below the fold and looked like nothing
@@ -391,7 +395,16 @@ const showResult = ref(false);
 watch(resultPath, (path) => {
   if (!path) return;
   showResult.value = true;
-  toastStore.addToast("Render complete", "success");
+  if (requestedOutputPath && path !== requestedOutputPath) {
+    const savedAs = path.split(/[/\\]/).pop();
+    toastStore.addToast(
+      `Existing file kept — render saved as ${savedAs}`,
+      "info",
+      8000,
+    );
+  } else {
+    toastStore.addToast("Render complete", "success");
+  }
 });
 
 const sendToAddStl = () => {
@@ -470,6 +483,7 @@ const render = async () => {
   const roundedColor = colorLinear.value.map(
     (c) => Math.round(c * 1000) / 1000,
   ) as [number, number, number];
+  requestedOutputPath = outputPath.value || defaultOutputPath.value;
 
   const result = await start(partPaths.value, {
     rotate: rotation.value,

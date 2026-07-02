@@ -141,7 +141,9 @@ def lights(look="flat"):
     # midtones into deep shadow. Light color stays close to white — the
     # warmth should come from the resin, not from orange lamps stacking
     # onto an orange material.
-    key_scale, key_size, fill_scale = (1.2, 0.55, 0.3) if look == "rich" else (1.0, 1.0, 1.0)
+    # Key energy stays at 1.0: with the pale resin a boosted key blows the
+    # lit side out to clipping. Hardness comes from the smaller size alone.
+    key_scale, key_size, fill_scale = (1.0, 0.55, 0.3) if look == "rich" else (1.0, 1.0, 1.0)
     rich_colors = {
         "Key":  (1.0, 0.92, 0.80),
         "Fill": (1.0, 0.90, 0.78),
@@ -218,6 +220,8 @@ def setup_render(res, samples, look="flat"):
         # near-white key side barely moves. Kept gentle — pushing it also
         # over-saturates midtones, which reads "digital"
         sc.view_settings.gamma = 0.9
+        # pull the highlights back off the clipping point
+        sc.view_settings.exposure = LOOK["exposure"] - 0.25
     sc.render.resolution_x = res; sc.render.resolution_y = res
     sc.render.resolution_percentage = 100
     sc.render.image_settings.file_format = "PNG"
