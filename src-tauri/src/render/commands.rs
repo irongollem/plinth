@@ -32,9 +32,21 @@ pub async fn start_render(
     parts: Vec<String>,
     options: RenderOptions,
 ) -> Result<String, AppError> {
+    // The Blender script imports STL only — slicer scenes (.lys, .chitubox)
+    // and other sidecar files that ride along in model folders would make
+    // the import step die mid-render with an opaque Blender error. Filter
+    // here so every caller gets the same guarantee.
+    let parts: Vec<String> = parts
+        .into_iter()
+        .filter(|p| {
+            Path::new(p)
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("stl"))
+        })
+        .collect();
     if parts.is_empty() {
         return Err(AppError::InvalidInput(
-            "At least one STL part is required".to_string(),
+            "No renderable files: the render engine imports .stl parts only".to_string(),
         ));
     }
     for part in &parts {

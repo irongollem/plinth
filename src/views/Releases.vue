@@ -204,9 +204,15 @@ const saveModel = async () => {
 
 /* ---------------------------- step 3: render summary ---------------------------- */
 const openRenderStudio = (paths?: string[]) => {
-  if (paths?.length) {
-    releasesStore.requestRender(paths);
+  // model_files can carry slicer scenes (.lys) and other sidecars; the
+  // render engine imports STL only, so hand over just those
+  const stls = paths?.filter((p) => p.toLowerCase().endsWith(".stl")) ?? [];
+  if (stls.length) {
+    releasesStore.requestRender(stls);
   } else {
+    if (paths?.length) {
+      toastStore.addToast("This model has no .stl parts to render", "warning");
+    }
     releasesStore.setActiveTab("render");
   }
 };
