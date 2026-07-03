@@ -16,8 +16,8 @@ use tauri_specta::Event;
 use uuid::Uuid;
 
 use super::{
-    db, dups, scanner, CatalogFile, CatalogSearchResult, CatalogStats, DuplicateGroup,
-    ReleaseSummary, TagCount,
+    db, dups, scanner, BatchOutcome, CatalogFile, CatalogSearchResult, CatalogStats,
+    DuplicateGroup, MoveOperation, ReleaseSummary, TagCount,
 };
 
 /// Scan and duplicate jobs share one registry; both cancel through
@@ -357,31 +357,45 @@ pub async fn update_model_metadata(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn delete_duplicate_files(file_paths: Vec<String>) -> Result<u32, AppError> {
+pub async fn delete_duplicate_files(
+    app_handle: AppHandle,
+    file_paths: Vec<String>,
+) -> Result<BatchOutcome, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut deleted = 0u32;
+        let mut removed: Vec<String> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
         for path in file_paths {
-            if std::fs::remove_file(&path).is_ok() {
-                deleted += 1;
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed.push(path),
+                // Already gone from disk still means gone from the catalog
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => removed.push(path),
+                Err(e) => errors.push(format!("{}: {}", path, e)),
             }
         }
-        Ok(deleted)
+        // Prune the index too, or the duplicate groups keep showing the
+        // deleted copies until the next full rescan
+        if !removed.is_empty() {
+            let mut conn = open_db(&app_handle)?;
+            db::remove_files(&mut conn, &removed)?;
+        }
+        Ok(BatchOutcome {
+            succeeded: removed.len() as u32,
+            errors,
+        })
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("File deletion task failed: {}", e)))?
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
-pub struct MoveOperation {
-    pub from: String,
-    pub to: String,
-}
-
 #[tauri::command]
 #[specta::specta]
-pub async fn batch_move_models(operations: Vec<MoveOperation>) -> Result<(u32, Vec<String>), AppError> {
+pub async fn batch_move_models(
+    app_handle: AppHandle,
+    operations: Vec<MoveOperation>,
+) -> Result<BatchOutcome, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut successful = 0u32;
+        let mut conn = open_db(&app_handle)?;
+        let mut succeeded = 0u32;
         let mut errors: Vec<String> = Vec::new();
 
         for op in operations {
@@ -392,21 +406,34 @@ pub async fn batch_move_models(operations: Vec<MoveOperation>) -> Result<(u32, V
                 errors.push(format!("Source not found: {}", op.from));
                 continue;
             }
-
+            // rename() onto an existing path is platform-dependent (may
+            // clobber a file, may fail on a dir) — refuse up front instead
+            if to_path.exists() {
+                errors.push(format!("Destination already exists: {}", op.to));
+                continue;
+            }
             if let Some(parent) = to_path.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
                     errors.push(format!("Failed to create parent dirs for {}: {}", op.to, e));
                     continue;
                 }
             }
-
-            match std::fs::rename(&from_path, &to_path) {
-                Ok(_) => successful += 1,
-                Err(e) => errors.push(format!("Failed to move {} to {}: {}", op.from, op.to, e)),
+            if let Err(e) = std::fs::rename(&from_path, &to_path) {
+                errors.push(format!("Failed to move {} to {}: {}", op.from, op.to, e));
+                continue;
+            }
+            // Disk and index must move together: a stale dir_path drops the
+            // model's user tags on the next rescan (see db::move_model)
+            match db::move_model(&mut conn, &op.from, &op.to) {
+                Ok(()) => succeeded += 1,
+                Err(e) => errors.push(format!(
+                    "Moved {} on disk but failed to update the catalog (rescan to fix): {}",
+                    op.to, e
+                )),
             }
         }
 
-        Ok((successful, errors))
+        Ok(BatchOutcome { succeeded, errors })
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Batch move task failed: {}", e)))?

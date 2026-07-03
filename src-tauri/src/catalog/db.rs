@@ -82,15 +82,24 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
     .map_err(|e| AppError::ConfigError(format!("Failed to init catalog schema: {}", e)))?;
 
     if version < 2 {
-        conn.execute_batch(
-            r#"
-            ALTER TABLE models ADD COLUMN pose TEXT;
-            ALTER TABLE models ADD COLUMN scale TEXT;
-            ALTER TABLE models ADD COLUMN support_status TEXT;
-            ALTER TABLE models ADD COLUMN release_date TEXT;
-            "#,
-        )
-        .ok();
+        // One ALTER per column: a half-applied batch (e.g. a crash mid-
+        // migration) leaves some columns present, and re-running the whole
+        // batch would fail on the first duplicate. Only "duplicate column"
+        // is safe to ignore — anything else must surface, or later queries
+        // die with "no such column" far from the cause.
+        for column in ["pose", "scale", "support_status", "release_date"] {
+            if let Err(e) = conn.execute(
+                &format!("ALTER TABLE models ADD COLUMN {} TEXT", column),
+                [],
+            ) {
+                if !e.to_string().contains("duplicate column name") {
+                    return Err(AppError::ConfigError(format!(
+                        "Failed to migrate catalog schema (add {}): {}",
+                        column, e
+                    )));
+                }
+            }
+        }
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -581,12 +590,109 @@ pub fn update_model_metadata(
     support_status: Option<String>,
     release_date: Option<String>,
 ) -> Result<(), AppError> {
-    conn.execute(
-        "UPDATE models SET pose = ?1, scale = ?2, support_status = ?3, release_date = ?4
-         WHERE dir_path = ?5",
-        params![pose, scale, support_status, release_date, dir_path],
-    )
-    .map_err(|e| AppError::ConfigError(format!("Failed to update metadata: {}", e)))?;
+    let changed = conn
+        .execute(
+            "UPDATE models SET pose = ?1, scale = ?2, support_status = ?3, release_date = ?4
+             WHERE dir_path = ?5",
+            params![pose, scale, support_status, release_date, dir_path],
+        )
+        .map_err(|e| AppError::ConfigError(format!("Failed to update metadata: {}", e)))?;
+    if changed == 0 {
+        return Err(AppError::NotFoundError(format!(
+            "No cataloged model at '{}'",
+            dir_path
+        )));
+    }
+    Ok(())
+}
+
+/// Prune file rows after an on-disk delete. Duplicate groups and stats
+/// both derive from `files`, so this is what makes a dedup delete visible
+/// immediately instead of only after the next full rescan. Per-model
+/// counters are recomputed for the affected dirs so the UI stays honest.
+pub fn remove_files(conn: &mut Connection, paths: &[String]) -> Result<(), AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Catalog prune failed: {}", e));
+    let tx = conn.transaction().map_err(map_err)?;
+    {
+        let mut affected_dirs: Vec<String> = Vec::new();
+        let mut dir_stmt = tx
+            .prepare("SELECT dir_path FROM files WHERE path = ?1")
+            .map_err(map_err)?;
+        let mut delete_stmt = tx
+            .prepare("DELETE FROM files WHERE path = ?1")
+            .map_err(map_err)?;
+        for path in paths {
+            if let Ok(dir) = dir_stmt.query_row([path], |row| row.get::<_, String>(0)) {
+                if !affected_dirs.contains(&dir) {
+                    affected_dirs.push(dir);
+                }
+            }
+            delete_stmt.execute([path]).map_err(map_err)?;
+        }
+        drop(dir_stmt);
+        drop(delete_stmt);
+
+        let mut recount_stmt = tx
+            .prepare(
+                "UPDATE models SET
+                     file_count = (SELECT COUNT(*) FROM files WHERE dir_path = ?1),
+                     total_size_bytes =
+                         (SELECT COALESCE(SUM(size_bytes), 0) FROM files WHERE dir_path = ?1)
+                 WHERE dir_path = ?1",
+            )
+            .map_err(map_err)?;
+        for dir in &affected_dirs {
+            recount_stmt.execute([dir]).map_err(map_err)?;
+        }
+    }
+    tx.commit().map_err(map_err)?;
+    Ok(())
+}
+
+/// Repoint every indexed path after a model directory moves on disk.
+/// model_tags is keyed by dir_path, and replace_catalog deletes tags whose
+/// dir_path no longer matches a model — so skipping this doesn't just leave
+/// the catalog stale, it silently loses user tags on the next rescan.
+pub fn move_model(conn: &mut Connection, from: &str, to: &str) -> Result<(), AppError> {
+    let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Catalog move failed: {}", e));
+    let tx = conn.transaction().map_err(map_err)?;
+    {
+        // substr comparison instead of LIKE: paths may contain % or _
+        tx.execute(
+            "UPDATE models SET
+                 preview_path = CASE
+                     WHEN substr(preview_path, 1, length(?1) + 1) = ?1 || '/'
+                     THEN ?2 || substr(preview_path, length(?1) + 1)
+                     ELSE preview_path END,
+                 dir_path = ?2
+             WHERE dir_path = ?1",
+            params![from, to],
+        )
+        .map_err(map_err)?;
+        tx.execute(
+            "UPDATE files SET
+                 path = ?2 || substr(path, length(?1) + 1),
+                 dir_path = ?2
+             WHERE dir_path = ?1",
+            params![from, to],
+        )
+        .map_err(map_err)?;
+        // OR IGNORE + sweep: if the destination somehow already carries the
+        // same tag, the PK collision shouldn't abort the whole move
+        tx.execute(
+            "UPDATE OR IGNORE model_tags SET dir_path = ?2 WHERE dir_path = ?1",
+            params![from, to],
+        )
+        .map_err(map_err)?;
+        tx.execute("DELETE FROM model_tags WHERE dir_path = ?1", [from])
+            .map_err(map_err)?;
+
+        tx.execute("DELETE FROM models_fts WHERE dir_path = ?1", [from])
+            .map_err(map_err)?;
+        refresh_fts_row(&tx, to).map_err(map_err)?;
+    }
+    tx.commit().map_err(map_err)?;
     Ok(())
 }
 
@@ -772,6 +878,92 @@ mod tests {
         let groups = duplicate_groups(&conn).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].paths.len(), 2);
+    }
+
+    #[test]
+    fn remove_files_prunes_dups_and_recounts_models() {
+        let mut conn = test_conn();
+        let (mut files, models, tags) = sample_rows();
+        // two identical-content files -> one duplicate group
+        files[1].size_bytes = 2048;
+        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        store_hash(&conn, &files[0].path, "same").unwrap();
+        store_hash(&conn, &files[1].path, "same").unwrap();
+        assert_eq!(duplicate_groups(&conn).unwrap().len(), 1);
+
+        remove_files(&mut conn, &[files[1].path.clone()]).unwrap();
+
+        // group dissolves without a rescan, and the model's counters follow
+        assert!(duplicate_groups(&conn).unwrap().is_empty());
+        let (count, size): (u32, i64) = conn
+            .query_row(
+                "SELECT file_count, total_size_bytes FROM models WHERE dir_path = '/lib/bugbear'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(size, 0);
+    }
+
+    #[test]
+    fn move_model_repoints_index_and_keeps_tags_through_rescan() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        add_tag(&conn, "/lib/newt", "painted").unwrap();
+
+        move_model(&mut conn, "/lib/newt", "/lib/amphibians/newt").unwrap();
+
+        // model, files and search index all follow the new path
+        let page = search(&conn, "newt", &[], 10, 0).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.entries[0].dir_path, "/lib/amphibians/newt");
+        assert!(page.entries[0].tags.contains(&"painted".to_string()));
+        let moved_file: String = conn
+            .query_row(
+                "SELECT path FROM files WHERE dir_path = '/lib/amphibians/newt'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(moved_file, "/lib/amphibians/newt/GiantNewt_v02.stl");
+
+        // the regression this guards: a rescan reflecting the new location
+        // must not drop the user tag (model_tags is keyed by dir_path)
+        let (mut files, mut models, _) = sample_rows();
+        files[0].path = "/lib/amphibians/newt/GiantNewt_v02.stl".into();
+        files[0].dir_path = "/lib/amphibians/newt".into();
+        models[0].dir_path = "/lib/amphibians/newt".into();
+        replace_catalog(&mut conn, &files, &models, &[]).unwrap();
+        assert_eq!(
+            search(&conn, "", &["painted".to_string()], 10, 0)
+                .unwrap()
+                .total,
+            1
+        );
+    }
+
+    #[test]
+    fn update_model_metadata_rejects_unknown_model() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+
+        update_model_metadata(
+            &conn,
+            "/lib/newt",
+            Some("A".into()),
+            Some("32mm".into()),
+            Some("supported".into()),
+            None,
+        )
+        .unwrap();
+        let page = search(&conn, "newt", &[], 10, 0).unwrap();
+        assert_eq!(page.entries[0].pose.as_deref(), Some("A"));
+        assert_eq!(page.entries[0].scale.as_deref(), Some("32mm"));
+
+        assert!(update_model_metadata(&conn, "/nope", None, None, None, None).is_err());
     }
 
     #[test]

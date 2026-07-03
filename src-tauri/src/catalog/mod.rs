@@ -103,6 +103,22 @@ pub struct TagCount {
     pub count: u32,
 }
 
+/// One requested directory move: rename `from` to `to` on disk and repoint
+/// the catalog index to match.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct MoveOperation {
+    pub from: String,
+    pub to: String,
+}
+
+/// Outcome of a batch that may partially succeed — the counts and the
+/// per-item errors travel together so the UI can report both.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct BatchOutcome {
+    pub succeeded: u32,
+    pub errors: Vec<String>,
+}
+
 /// One distinct release_name found across scanned models — a read-only
 /// aggregation over already-indexed data, NOT a persisted publish log (the
 /// catalog doesn't track a "finalized" event, so this just reflects what
