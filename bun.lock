@@ -8,7 +8,7 @@
         "@tauri-apps/api": "^2.11.1",
         "@tauri-apps/plugin-dialog": "^2.7.1",
         "@tauri-apps/plugin-fs": "^2.5.1",
-        "@tauri-apps/plugin-opener": "^2.5.4",
+        "@tauri-apps/plugin-opener": "2.2.7",
         "@tauri-apps/plugin-os": "^2.3.2",
         "cally": "^0.9.2",
         "pinia": "^3.0.4",
@@ -22,8 +22,8 @@
         "@vitejs/plugin-vue": "^6.0.7",
         "autoprefixer": "^10.5.2",
         "daisyui": "^5.6.7",
-        "oxfmt": "^0.57.0",
-        "oxlint": "^1.72.0",
+        "oxfmt": "0.57.0",
+        "oxlint": "1.72.0",
         "postcss": "^8.5.16",
         "tailwindcss": "^4.3.2",
         "typescript": "~6.0.3",
@@ -234,7 +234,7 @@
 
     "@tauri-apps/plugin-fs": ["@tauri-apps/plugin-fs@2.5.1", "", { "dependencies": { "@tauri-apps/api": "^2.11.0" } }, "sha512-9Lz+Jopp6QyeEWhlpkMx4R/+P9HgR+AVAI4vOZhlT8Xaymtz8iVI/Ov984/XTqgJz/5gz5NretqPB/XEMS3NhQ=="],
 
-    "@tauri-apps/plugin-opener": ["@tauri-apps/plugin-opener@2.5.4", "", { "dependencies": { "@tauri-apps/api": "^2.11.0" } }, "sha512-1HnPkb+AmgO29HBazm4uPLKB+r7zzcTBW1d0fyYp1uP+jwtpoiNDGKMMzz58SFp49nOIrxdE3aUJtT57lfO9CQ=="],
+    "@tauri-apps/plugin-opener": ["@tauri-apps/plugin-opener@2.2.7", "", { "dependencies": { "@tauri-apps/api": "^2.0.0" } }, "sha512-uduEyvOdjpPOEeDRrhwlCspG/f9EQalHumWBtLBnp3fRp++fKGLqDOyUhSIn7PzX45b/rKep//ZQSAQoIxobLA=="],
 
     "@tauri-apps/plugin-os": ["@tauri-apps/plugin-os@2.3.2", "", { "dependencies": { "@tauri-apps/api": "^2.8.0" } }, "sha512-n+nXWeuSeF9wcEsSPmRnBEGrRgOy6jjkSU+UVCOV8YUGKb2erhDOxis7IqRXiRVHhY8XMKks00BJ0OAdkpf6+A=="],
 
