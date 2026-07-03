@@ -94,3 +94,15 @@ pub struct TagCount {
     pub tag: String,
     pub count: u32,
 }
+
+/// One distinct release_name found across scanned models — a read-only
+/// aggregation over already-indexed data, NOT a persisted publish log (the
+/// catalog doesn't track a "finalized" event, so this just reflects what
+/// scanning found on disk).
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct ReleaseSummary {
+    pub release_name: String,
+    pub designer: Option<String>,
+    pub model_count: u32,
+    pub total_size_bytes: f64,
+}

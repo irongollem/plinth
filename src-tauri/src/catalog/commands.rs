@@ -16,7 +16,8 @@ use tauri_specta::Event;
 use uuid::Uuid;
 
 use super::{
-    db, dups, scanner, CatalogFile, CatalogSearchResult, CatalogStats, DuplicateGroup, TagCount,
+    db, dups, scanner, CatalogFile, CatalogSearchResult, CatalogStats, DuplicateGroup,
+    ReleaseSummary, TagCount,
 };
 
 /// Scan and duplicate jobs share one registry; both cancel through
@@ -323,4 +324,15 @@ pub async fn get_duplicate_groups(app_handle: AppHandle) -> Result<Vec<Duplicate
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Duplicate task failed: {}", e)))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_catalog_releases(app_handle: AppHandle) -> Result<Vec<ReleaseSummary>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::list_releases(&conn)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Release listing task failed: {}", e)))?
 }

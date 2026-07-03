@@ -4,6 +4,7 @@ use std::path::Path;
 
 use super::{
     CatalogEntry, CatalogFile, CatalogStats, DuplicateGroup, ExtensionStat, FileRow, ModelRow,
+    ReleaseSummary,
 };
 
 const SCHEMA_VERSION: i64 = 1;
@@ -512,6 +513,42 @@ pub fn duplicate_groups(conn: &Connection) -> Result<Vec<DuplicateGroup>, AppErr
     Ok(groups)
 }
 
+/// Distinct release_name groups found across scanned models, most-models
+/// first. Purely a read over already-indexed columns — see ReleaseSummary
+/// for why this isn't a "publish log".
+pub fn list_releases(conn: &Connection) -> Result<Vec<ReleaseSummary>, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Release listing failed: {}", e));
+    let mut stmt = conn
+        .prepare(
+            "SELECT release_name,
+                    -- designer isn't guaranteed uniform across a release's
+                    -- models (heuristic entries may lack one); take the
+                    -- first non-null value as a representative label
+                    (SELECT designer FROM models m2
+                     WHERE m2.release_name = m1.release_name AND designer IS NOT NULL
+                     LIMIT 1),
+                    COUNT(*), COALESCE(SUM(total_size_bytes), 0)
+             FROM models m1
+             WHERE release_name IS NOT NULL AND release_name != ''
+             GROUP BY release_name
+             ORDER BY COUNT(*) DESC",
+        )
+        .map_err(map_err)?;
+    let releases = stmt
+        .query_map([], |row| {
+            Ok(ReleaseSummary {
+                release_name: row.get(0)?,
+                designer: row.get(1)?,
+                model_count: row.get(2)?,
+                total_size_bytes: row.get::<_, i64>(3)? as f64,
+            })
+        })
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(map_err)?;
+    Ok(releases)
+}
+
 /// Schema init for in-memory test databases in sibling modules.
 #[cfg(test)]
 pub(crate) fn test_init(conn: &Connection) {
@@ -686,5 +723,20 @@ mod tests {
         let groups = duplicate_groups(&conn).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].paths.len(), 2);
+    }
+
+    #[test]
+    fn lists_releases_grouped_from_scanned_models() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        // sample_rows' bugbear model has no release_name (heuristic, no
+        // metadata) — only the newt's "Critterfolk" should surface
+        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+
+        let releases = list_releases(&conn).unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].release_name, "Critterfolk");
+        assert_eq!(releases[0].designer.as_deref(), Some("DTL"));
+        assert_eq!(releases[0].model_count, 1);
     }
 }
