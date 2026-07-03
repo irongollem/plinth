@@ -111,43 +111,41 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to init catalog schema: {}", e)))?;
 
-    if version >= SCHEMA_VERSION {
-        return Ok(());
-    }
-
-    if version < 2 {
-        // One ALTER per column: a half-applied batch (e.g. a crash mid-
-        // migration) leaves some columns present, and re-running the whole
-        // batch would fail on the first duplicate. Only "duplicate column"
-        // is safe to ignore — anything else must surface, or later queries
-        // die with "no such column" far from the cause.
-        for column in ["pose", "scale", "support_status", "release_date"] {
-            if let Err(e) = conn.execute(
+    // Column migrations are shape-checked, NOT version-gated: during dev
+    // iteration a build can stamp user_version before an ALTER exists in
+    // code, and a version gate then locks that ALTER out forever ("no such
+    // column" with no way back). Asking the table what it actually has
+    // makes the check idempotent and self-healing on every open.
+    let existing_columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(models)")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .and_then(|rows| rows.collect())
+        })
+        .map_err(|e| AppError::ConfigError(format!("Failed to inspect catalog schema: {}", e)))?;
+    for column in [
+        "pose",
+        "scale",
+        "support_status",
+        "release_date",
+        "group_name",
+    ] {
+        if !existing_columns.iter().any(|c| c == column) {
+            conn.execute(
                 &format!("ALTER TABLE models ADD COLUMN {} TEXT", column),
                 [],
-            ) {
-                if !e.to_string().contains("duplicate column name") {
-                    return Err(AppError::ConfigError(format!(
-                        "Failed to migrate catalog schema (add {}): {}",
-                        column, e
-                    )));
-                }
-            }
+            )
+            .map_err(|e| {
+                AppError::ConfigError(format!(
+                    "Failed to migrate catalog schema (add {}): {}",
+                    column, e
+                ))
+            })?;
         }
     }
 
-    // v4: grouping column; nullable and rebuilt by the next scan, so the
-    // migration is just the ALTER (same duplicate-column tolerance as v2 —
-    // fresh databases already have it from the base CREATE)
-    if version < 4 {
-        if let Err(e) = conn.execute("ALTER TABLE models ADD COLUMN group_name TEXT", []) {
-            if !e.to_string().contains("duplicate column name") {
-                return Err(AppError::ConfigError(format!(
-                    "Failed to migrate catalog schema (add group_name): {}",
-                    e
-                )));
-            }
-        }
+    if version >= SCHEMA_VERSION {
+        return Ok(());
     }
 
     // v3: rescue metadata that v2 stored in models — those values were
@@ -1299,6 +1297,24 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM group_renames", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0, "table recreated despite current user_version");
+    }
+
+    #[test]
+    fn model_columns_self_heal_on_a_version_stamped_db() {
+        // Sibling failure: user_version stamped before the group_name ALTER
+        // existed in code — the version gate then skipped it forever ("no
+        // such column: m.group_name"). Columns are now shape-checked.
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute_batch("ALTER TABLE models DROP COLUMN group_name")
+            .unwrap();
+
+        init_schema(&conn).unwrap();
+
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        assert_eq!(page.total, 2, "grouped search works after self-heal");
     }
 
     #[test]
