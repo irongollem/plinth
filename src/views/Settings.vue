@@ -1,102 +1,146 @@
 <template>
-  <View>
-    <template #left>
-      <h1 class="text-xl font-bold">Settings</h1>
-      <form class="mt-4 space-y-6" @submit.prevent>
+  <main class="h-full overflow-y-auto p-7">
+    <div class="max-w-[600px] flex flex-col gap-4">
+      <div class="font-bold text-[17px]">Settings</div>
+
+      <div class="flex flex-col gap-1.5">
+        <FileSelect
+          id="catalog_root"
+          label="Catalog root — scanned for models"
+          dir-mode
+          v-model="settings.catalog_root"
+          tooltip="The folder scanned to build your catalog."
+        />
+      </div>
+
+      <div class="flex flex-col gap-1.5">
         <FileSelect
           id="scratch_dir"
-          label="Temporary Files Directory"
+          label="Temporary files directory"
           dir-mode
           v-model="settings.scratch_dir"
           tooltip="Your files will be temporarily stored here before being compressed."
         />
+        <span class="text-[10.5px] text-base-content/40"
+          >Files are staged here before compression.</span
+        >
+      </div>
 
+      <div class="flex flex-col gap-1.5">
         <FileSelect
           id="target_dir"
-          label="Target Directory"
+          label="Target directory — finished .3pk releases"
           dir-mode
           v-model="settings.target_dir"
           tooltip="Your compressed files will be saved here."
         />
+      </div>
 
-        <div class="form-control mb-2">
-          <label class="floating-label" for="blender_path">
-            <span class="label">Blender Location</span>
-          </label>
-          <div class="flex">
-            <input
-              id="blender_path"
-              type="text"
-              readonly
-              :value="settings.blender_path"
-              class="input flex-1"
-              placeholder="Auto-detect (PATH, /Applications, BLENDER_BIN)"
-            />
-            <div
-              class="tooltip"
-              data-tip="Blender is used to render promo images of your models. Leave empty to auto-detect."
-            >
-              <button type="button" class="btn" @click="browseBlender">
-                Browse
-              </button>
-            </div>
-            <button type="button" class="btn" @click="checkBlender">
-              Detect
-            </button>
-          </div>
-          <p
-            v-if="blenderStatus"
-            class="mt-1 text-xs"
-            :class="blenderFound ? 'text-success' : 'text-error'"
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
+          >BLENDER LOCATION</span
+        >
+        <div
+          class="flex items-center gap-2.5 bg-base-200 border border-base-content/10 rounded-lg px-2.5 py-1.5"
+        >
+          <span
+            class="font-mono text-[12px] text-base-content/60 flex-1 truncate"
           >
-            {{ blenderStatus }}
-          </p>
+            {{
+              settings.blender_path ||
+              "Auto-detect (PATH, /Applications, BLENDER_BIN)"
+            }}
+          </span>
+          <button type="button" class="btn btn-xs" @click="browseBlender">
+            Browse…
+          </button>
+          <button type="button" class="btn btn-xs" @click="checkBlender">
+            Detect
+          </button>
         </div>
+        <p
+          v-if="blenderStatus"
+          class="text-[10.5px] font-mono"
+          :class="blenderFound ? 'text-success' : 'text-error'"
+        >
+          {{ blenderStatus }}
+        </p>
+      </div>
 
-        <div class="mb-4">
-          <label
-            for="max_compression_threads"
-            class="block text-sm font-medium text-gray-700"
-          >
-            Max Compression Threads
-            <span class="text-xs text-gray-500"
-              >(Detected {{ availableCores }} cores)</span
-            >
-          </label>
-          <div class="mt-1 flex items-center">
-            <input
-              id="max_compression_threads"
-              type="range"
-              min="1"
-              :max="availableCores"
-              v-model.number="settings.max_compression_threads"
-              class="mr-2 w-full h-2 rounded-lg appearance-none cursor-pointer bg-gray-200"
-            />
-            <span class="text-sm text-gray-600">{{
-              settings.max_compression_threads || "Auto"
-            }}</span>
-          </div>
-          <p class="mt-1 text-xs text-gray-500">
-            Maximum CPU cores to use for compression. Lower for better system
-            responsiveness, higher for faster compression. Default is
-            automatically calculated ({{ defaultThreadCount }}).
-          </p>
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
+          >MAX COMPRESSION THREADS — {{ availableCores }} CORES DETECTED</span
+        >
+        <div class="flex items-center gap-3">
+          <input
+            id="max_compression_threads"
+            type="range"
+            min="1"
+            :max="availableCores"
+            v-model.number="settings.max_compression_threads"
+            class="range range-primary range-sm flex-1"
+          />
+          <span class="font-mono font-semibold text-[13px] w-6 text-right">
+            {{ settings.max_compression_threads || "Auto" }}
+          </span>
         </div>
-      </form>
-    </template>
-  </View>
+        <p class="text-[10.5px] text-base-content/40">
+          Lower for better system responsiveness, higher for faster compression.
+          Default is automatically calculated ({{ defaultThreadCount }}).
+        </p>
+      </div>
+
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
+          >APPEARANCE</span
+        >
+        <div
+          class="flex gap-1 bg-base-200 border border-base-content/10 rounded-full p-[3px] w-[220px]"
+        >
+          <button
+            type="button"
+            class="flex-1 text-center font-semibold text-[11px] py-1.5 rounded-full cursor-pointer"
+            :class="
+              themeStore.isDark()
+                ? 'bg-primary text-primary-content'
+                : 'text-base-content/60'
+            "
+            @click="themeStore.setDark"
+          >
+            Dark
+          </button>
+          <button
+            type="button"
+            class="flex-1 text-center font-semibold text-[11px] py-1.5 rounded-full cursor-pointer"
+            :class="
+              !themeStore.isDark()
+                ? 'bg-primary text-primary-content'
+                : 'text-base-content/60'
+            "
+            @click="themeStore.setLight"
+          >
+            Light
+          </button>
+        </div>
+      </div>
+    </div>
+  </main>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { type Settings, commands } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
-import View from "../components/View.vue";
 import { useFileSelect } from "../composables/useFileSelect";
+import { useThemeStore } from "../stores/themeStore";
 import { useToastStore } from "../stores/toastStore";
 
 const toastStore = useToastStore();
 const { selectFiles } = useFileSelect();
+const themeStore = useThemeStore();
 
 const settings = ref<Settings>({
   scratch_dir: null,
@@ -127,7 +171,7 @@ const checkBlender = async () => {
   const result = await commands.detectBlender();
   if (result.status === "ok") {
     blenderFound.value = true;
-    blenderStatus.value = `Found ${result.data.version} at ${result.data.path}`;
+    blenderStatus.value = `✓ Found ${result.data.version} at ${result.data.path}`;
   } else {
     blenderFound.value = false;
     blenderStatus.value =
