@@ -354,3 +354,19 @@ pub async fn update_model_metadata(
     .await
     .map_err(|e| AppError::ConfigError(format!("Metadata update failed: {}", e)))?
 }
+
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_duplicate_files(file_paths: Vec<String>) -> Result<u32, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut deleted = 0u32;
+        for path in file_paths {
+            if std::fs::remove_file(&path).is_ok() {
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("File deletion task failed: {}", e)))?
+}
