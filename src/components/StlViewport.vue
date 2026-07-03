@@ -20,6 +20,8 @@ const props = defineProps<{
   parts: string[];
   /** Linear RGB resin color, matching the Blender script */
   color?: [number, number, number];
+  /** Small-embed mode (catalog drawer): hides the help text and crop guide */
+  compact?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -115,7 +117,10 @@ const AXIS_VECTORS: Record<"x" | "y" | "z", THREE.Vector3> = {
 };
 
 let gizmo: THREE.Group | null = null;
+/** Invisible fat tori — what the raycaster actually hits. */
 let gizmoRings: THREE.Mesh[] = [];
+/** Thin visible tori, keyed by axis, for hover/drag feedback. */
+let visibleRings: Partial<Record<"x" | "y" | "z", THREE.Mesh>> = {};
 let hoveredRing: THREE.Mesh | null = null;
 let ringDrag: {
   axis: THREE.Vector3;
@@ -146,7 +151,25 @@ const buildGizmo = () => {
     orient(mesh);
     mesh.userData.axis = axis;
     gizmo?.add(mesh);
-    gizmoRings.push(mesh);
+    visibleRings[axis] = mesh;
+
+    // What the raycaster hits: an invisible torus 6x fatter than the
+    // visible one. The drawn ring is ~2px thick — as an actual hit target
+    // it demands pixel-perfect aim, and in small viewports (the catalog
+    // drawer) grabbing it is pure luck. opacity 0 instead of visible=false
+    // because three.js skips invisible objects during raycasting.
+    const hit = new THREE.Mesh(
+      new THREE.TorusGeometry(GIZMO_RADIUS, 0.15, 6, 48),
+      new THREE.MeshBasicMaterial({
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+      }),
+    );
+    orient(hit);
+    hit.userData.axis = axis;
+    gizmo?.add(hit);
+    gizmoRings.push(hit);
   };
   // A torus lies in the XY plane (normal +Z); orient the others to match
   ring("z", 0x5588f0, () => {});
@@ -419,13 +442,15 @@ const onPointerDown = (e: PointerEvent) => {
 const onPointerMove = (e: PointerEvent) => {
   if (!pivot || !camera) return;
 
-  // Hover feedback when not dragging
+  // Hover feedback when not dragging — the raycast hits the invisible fat
+  // ring; the highlight goes on its visible twin of the same axis
   if (dragButton === null) {
     const ring = pickRing(e);
     if (ring !== hoveredRing) {
-      for (const mesh of gizmoRings) {
+      const axis = ring?.userData.axis;
+      for (const [ringAxis, mesh] of Object.entries(visibleRings)) {
         (mesh.material as THREE.MeshBasicMaterial).opacity =
-          mesh === ring ? RING_OPACITY_HOVER : RING_OPACITY;
+          ringAxis === axis ? RING_OPACITY_HOVER : RING_OPACITY;
       }
       hoveredRing = ring;
       if (container.value) {
@@ -610,11 +635,12 @@ onBeforeUnmount(() => {
   loadToken++;
   resizeObserver?.disconnect();
   disposeModel();
-  for (const mesh of gizmoRings) {
+  for (const mesh of [...gizmoRings, ...Object.values(visibleRings)]) {
     mesh.geometry.dispose();
     (mesh.material as THREE.MeshBasicMaterial).dispose();
   }
   gizmoRings = [];
+  visibleRings = {};
   gizmo = null;
   material?.dispose();
   renderer?.dispose();
@@ -627,7 +653,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="relative w-full h-full min-h-64">
+  <div class="relative w-full h-full" :class="compact ? '' : 'min-h-64'">
     <div
       ref="container"
       class="w-full h-full rounded-box overflow-hidden cursor-grab active:cursor-grabbing"
@@ -651,7 +677,7 @@ onBeforeUnmount(() => {
     >
       Select STL files to preview
     </div>
-    <template v-else>
+    <template v-else-if="!compact">
       <!-- The render is square; this guide marks the actual capture area
            inside the rectangular viewport -->
       <div
