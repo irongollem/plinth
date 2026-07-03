@@ -55,20 +55,12 @@ unbundle) hang off.
   extractable in place.
 - **Health checks** — corrupt/zero-byte STL detection, orphaned
   metadata, empty dirs, cleanup suggestions.
-- **Full bundle flow** — build the whole release without leaving the
-  app: catalog → new release → pick model → render (promo image hands
-  itself back as the model image — the render→Add STL leg already
-  works) → finalize. The catalog becomes the entry point, the bundler
-  the exit.
-- **Promo overlay** — composite title text, designer logo and a base
-  size badge onto renders (the formal DTL card layout), saving both
-  the clean and the overlaid variant. Likely Rust-side with the
-  existing `image` crate + a font rasterizer, so it also works in
-  future batch renders.
-- **Design pass** — the v1 UI is functional daisyUI; a dedicated design
-  iteration (Claude design tooling) once the workflows settle. Include
-  de-purpling: the current theme is the daisyUI default, i.e. exactly
-  the obligatory AI-app purple.
+- **Promo overlay compositing** — the Render studio's branding panel
+  (logo watermark + text overlay: position/font/size) is built and
+  previews live over the viewport, but isn't baked into the output PNG
+  yet. Needs a font-rendering approach + a Rust-side compositing design
+  (the `image` crate + a font rasterizer), so it also works in future
+  batch renders. Save both the clean and the overlaid variant.
 
 ## Architecture
 

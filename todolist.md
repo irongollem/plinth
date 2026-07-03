@@ -13,8 +13,7 @@
 - [ ] Store chosen rotation in model metadata (`model.json`) so catalog re-renders don't need repositioning
 - [ ] Scale reference figure / true-scale rendering (handover roadmap; current look normalizes size)
 - [ ] Sidecar JSON per render (dimensions mm, parts, rotation) for future catalog search
-- [ ] Promo overlay: title text + designer logo + base-size badge composited on renders (save with and without), matching the formal DTL card layout
-- [ ] Full in-app bundle flow: catalog → new release → render per model (image auto-returns to Add STL — that leg ships already) → finalize
+- [ ] Promo overlay compositing: the Render studio branding panel (logo/text, position/font/size) previews live over the viewport but isn't baked into the output PNG yet — needs a font-rendering approach + Rust-side compositing design
 - [ ] render_mini.py uses `use_nodes` (deprecated, removal in Blender 6.0) — needs a tweak when 6.x lands
 - [ ] Parse STLs in a Web Worker: mergeVertices on million-triangle minis still freezes the main thread during load (the overlay paints now, but a worker would keep the UI fully responsive)
 
@@ -63,3 +62,4 @@
 - [x] BUG: make sure tab navigation works and respects disabled tabs
 - [x] Make sure the release remains in the release tab
 - [x] Add uuid to models (and releases) to find them back once they move or to "symlink" them in case a model is part of multiple releases
+- [x] Rebrand to Plinth; implement the "Plinth App" design overhaul (persistent sidebar nav, 4-step release stepper folding in Release/Add STL/Finalize, catalog list+grid, dark/light theme, de-purpled palette)
