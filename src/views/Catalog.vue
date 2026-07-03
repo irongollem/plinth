@@ -298,7 +298,9 @@
               v-else-if="drawerPreview"
               :src="convertFileSrc(drawerPreview)"
               :alt="selected.name"
-              class="w-full h-full object-cover"
+              class="w-full h-full object-cover cursor-zoom-in"
+              title="Click to view large"
+              @click="showImageModal = true"
             />
             <span v-else class="text-5xl">🗿</span>
             <button
@@ -679,6 +681,17 @@
         <StlViewport v-if="show3dModal" :parts="stlPaths" />
       </div>
     </ModalView>
+
+    <!-- Image lightbox, opened by clicking the drawer preview -->
+    <ModalView :is-open="showImageModal" @close="showImageModal = false">
+      <img
+        v-if="drawerPreview"
+        :src="convertFileSrc(drawerPreview)"
+        alt=""
+        class="max-w-[85vw] max-h-[85vh] object-contain rounded-box cursor-zoom-out"
+        @click="showImageModal = false"
+      />
+    </ModalView>
   </main>
 </template>
 
@@ -753,6 +766,7 @@ const combineName = ref("");
 const renamingGroup = ref(false);
 const groupNameDraft = ref("");
 const show3dModal = ref(false);
+const showImageModal = ref(false);
 const metaDraft = ref({
   name: "",
   pose: "",

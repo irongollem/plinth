@@ -211,14 +211,24 @@
         </div>
       </div>
 
-      <label class="label cursor-pointer gap-2 text-sm">
-        <input
-          type="checkbox"
-          class="checkbox checkbox-sm"
-          v-model="matchCamera"
-        />
-        Match preview camera
-      </label>
+      <div class="flex items-center gap-2">
+        <label class="label cursor-pointer gap-2 text-sm flex-1">
+          <input
+            type="checkbox"
+            class="checkbox checkbox-sm"
+            v-model="matchCamera"
+          />
+          Match preview camera
+        </label>
+        <button
+          type="button"
+          class="btn btn-xs btn-ghost"
+          title="Back to the studio defaults (settings are otherwise remembered between sessions)"
+          @click="resetRenderSettings"
+        >
+          Reset settings
+        </button>
+      </div>
 
       <!-- BRANDING — UI only, not yet baked into the render -->
       <div class="flex flex-col gap-2 border-t border-base-content/10 pt-3">
@@ -641,7 +651,7 @@ const fontOptions: { value: string; label: string; css: string }[] = [
   { value: "IBM Plex Mono", label: "Mono", css: "'IBM Plex Mono', monospace" },
 ];
 
-const branding = reactive({
+const BRANDING_DEFAULTS = {
   logoOn: true,
   logoPos: "tr" as CornerPos,
   textOn: true,
@@ -650,7 +660,88 @@ const branding = reactive({
   credit: "",
   font: "Archivo",
   size: 20,
-});
+};
+const branding = reactive({ ...BRANDING_DEFAULTS });
+
+/* ------------------------- sticky settings ------------------------- */
+// Studio knobs persist across restarts so a dialed-in look isn't lost.
+// Rotation is deliberately NOT persisted: it belongs to the model on the
+// stage, not to the studio.
+const STICKY_KEY = "plinth.renderSettings";
+const VIEW_DEFAULTS = { azimuth: -15, elevation: 0.22, zoom: 1.15 };
+
+const persistRenderSettings = () => {
+  localStorage.setItem(
+    STICKY_KEY,
+    JSON.stringify({
+      view: view.value,
+      matchCamera: matchCamera.value,
+      resolution: resolution.value,
+      samples: samples.value,
+      look: look.value,
+      colorHex: colorHex.value,
+      branding: { ...branding },
+    }),
+  );
+};
+
+/** Restore persisted knobs, ignoring anything malformed or out of range. */
+const loadRenderSettings = () => {
+  try {
+    const raw = localStorage.getItem(STICKY_KEY);
+    if (!raw) return;
+    const saved = JSON.parse(raw);
+    if (typeof saved.matchCamera === "boolean")
+      matchCamera.value = saved.matchCamera;
+    if ([512, 1024, 1600, 2048].includes(saved.resolution))
+      resolution.value = saved.resolution;
+    if ([32, 96, 256].includes(saved.samples)) samples.value = saved.samples;
+    if (["rich", "flat", "resin"].includes(saved.look)) look.value = saved.look;
+    if (typeof saved.colorHex === "string" && saved.colorHex.startsWith("#"))
+      colorHex.value = saved.colorHex;
+    if (
+      saved.view &&
+      [saved.view.azimuth, saved.view.elevation, saved.view.zoom].every(
+        (v: unknown) => typeof v === "number",
+      )
+    ) {
+      view.value = { ...saved.view };
+      viewport.value?.setView(saved.view);
+    }
+    if (saved.branding && typeof saved.branding === "object") {
+      for (const key of Object.keys(BRANDING_DEFAULTS) as Array<
+        keyof typeof BRANDING_DEFAULTS
+      >) {
+        if (typeof saved.branding[key] === typeof BRANDING_DEFAULTS[key]) {
+          // biome/oxlint: keyed assignment keeps both sides' types aligned
+          (branding as Record<string, unknown>)[key] = saved.branding[key];
+        }
+      }
+    }
+  } catch {
+    // a corrupt blob must never break the studio — fall back to defaults
+    localStorage.removeItem(STICKY_KEY);
+  }
+};
+
+const resetRenderSettings = () => {
+  view.value = { ...VIEW_DEFAULTS };
+  viewport.value?.setView(VIEW_DEFAULTS);
+  matchCamera.value = true;
+  resolution.value = 1600;
+  samples.value = 96;
+  look.value = "flat";
+  colorHex.value = DEFAULT_RESIN_HEX;
+  Object.assign(branding, BRANDING_DEFAULTS);
+  localStorage.removeItem(STICKY_KEY);
+  toastStore.addToast("Render settings reset to defaults", "success");
+};
+
+watch(
+  [view, matchCamera, resolution, samples, look, colorHex, branding],
+  persistRenderSettings,
+  { deep: true },
+);
 
 const cornerStyle: Record<CornerPos, Record<string, string>> = {
   tl: { top: "18px", left: "18px" },
@@ -678,6 +769,7 @@ const blenderInfo = ref<BlenderInfo | null>(null);
 const blenderStatus = ref<"unknown" | "found" | "missing">("unknown");
 
 onMounted(async () => {
+  loadRenderSettings();
   const result = await commands.detectBlender();
   if (result.status === "ok") {
     blenderInfo.value = result.data;
