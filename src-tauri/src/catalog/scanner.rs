@@ -131,6 +131,14 @@ pub fn scan(
             continue;
         }
         let release = nearest_release(&releases, dir_path);
+        // An image beside the files, else one in a nested folder — creators
+        // routinely ship renders in a "renders"/"images" subdir next to the
+        // STLs, and those dirs hold no model files so they never become
+        // models themselves; without this lookup their images were orphaned
+        let own_image = info
+            .first_image
+            .clone()
+            .or_else(|| descendant_image(&dirs, dir_path));
         let (name, description, uuid, source, preview, inferred) = match &info.metadata {
             Some(meta) => {
                 // model.json image paths are relative to the model dir
@@ -140,7 +148,7 @@ pub fn scan(
                     .map(|rel| Path::new(dir_path).join(rel))
                     .filter(|p| p.is_file())
                     .map(|p| p.to_string_lossy().into_owned())
-                    .or_else(|| info.first_image.clone());
+                    .or(own_image);
                 for tag in &meta.tags {
                     metadata_tags.push((dir_path.clone(), tag.clone()));
                 }
@@ -160,7 +168,7 @@ pub fn scan(
                     None,
                     None,
                     "heuristic",
-                    info.first_image.clone(),
+                    own_image,
                     Some(inferred),
                 )
             }
@@ -197,6 +205,16 @@ pub fn scan(
         models,
         metadata_tags,
     })
+}
+
+/// First image found in any subdirectory of `dir_path`. BTreeMap keys are
+/// sorted, so all descendants sit in one contiguous range after the
+/// prefix — no full-map scan.
+fn descendant_image(dirs: &BTreeMap<String, DirInfo>, dir_path: &str) -> Option<String> {
+    let prefix = format!("{}{}", dir_path, std::path::MAIN_SEPARATOR);
+    dirs.range(prefix.clone()..)
+        .take_while(|(key, _)| key.starts_with(&prefix))
+        .find_map(|(_, info)| info.first_image.clone())
 }
 
 // ---- stacked-folder identity inference (heuristic models only) ----
@@ -297,17 +315,51 @@ fn support_from_segment(segment: &str) -> Option<&'static str> {
     }
 }
 
-/// "A", "B2", "01", "pose 3" — variant markers, not names.
+/// Descriptive variant dirs; a lexicon rather than a length rule because
+/// "minotaur" must stay a NAME while "standing" is a pose. Deliberately
+/// conservative — anything it misses is one click away in the pose field.
+const POSE_WORDS: &[&str] = &[
+    "sitting",
+    "standing",
+    "kneeling",
+    "crouching",
+    "lying",
+    "mounted",
+    "dismounted",
+    "riding",
+    "walking",
+    "running",
+    "flying",
+    "jumping",
+    "attacking",
+    "charging",
+    "casting",
+    "shooting",
+    "idle",
+    "resting",
+];
+
+/// Variant markers, not names: "A", "B2", "01", "pose 3", "sitting",
+/// "on a horse".
 fn pose_from_segment(segment: &str) -> Option<String> {
     let lower = segment.trim().to_lowercase();
-    let candidate = lower
-        .strip_prefix("pose")
-        .map(|rest| rest.trim_start_matches([' ', '-', '_']))
-        .unwrap_or(&lower);
-    (!candidate.is_empty()
-        && candidate.len() <= 2
-        && candidate.chars().all(|c| c.is_ascii_alphanumeric()))
-    .then(|| candidate.to_uppercase())
+    // explicit "pose <x>" prefix takes whatever follows it
+    if let Some(rest) = lower.strip_prefix("pose") {
+        let rest = rest.trim_start_matches([' ', '-', '_']);
+        if !rest.is_empty() {
+            return Some(rest.to_uppercase());
+        }
+    }
+    // short codes: A, B2, 01
+    if !lower.is_empty() && lower.len() <= 2 && lower.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Some(lower.to_uppercase());
+    }
+    // descriptive poses keep their wording ("on a horse", not "ON A HORSE")
+    let normalized = prettify_segment(&lower.replace('-', " "));
+    if POSE_WORDS.contains(&normalized.as_str()) || normalized.starts_with("on ") {
+        return Some(normalized);
+    }
+    None
 }
 
 /// Container words that describe packaging, not the model.
@@ -468,6 +520,20 @@ mod tests {
         let inferred = infer_model_identity(root, "/lib/xx/minotaur/stls");
         assert_eq!(inferred.name, "minotaur");
         assert!(inferred.pose.is_none());
+
+        // descriptive poses: lexicon words and "on ..." phrases are
+        // variants, but an unknown word stays a NAME (a "sitting" dir must
+        // never become the model — or every mini's sitting pose would
+        // merge into one giant "sitting" group)
+        let inferred = infer_model_identity(root, "/lib/knight/supported/on_a_horse");
+        assert_eq!(inferred.name, "knight on a horse");
+        assert_eq!(inferred.pose.as_deref(), Some("on a horse"));
+        let inferred = infer_model_identity(root, "/lib/knight/unsupported/standing");
+        assert_eq!(inferred.name, "knight standing");
+        assert_eq!(inferred.pose.as_deref(), Some("standing"));
+        assert_eq!(inferred.group_name, "knight");
+        let inferred = infer_model_identity(root, "/lib/creatures/minotaur");
+        assert_eq!(inferred.name, "minotaur", "unknown words are names");
     }
 
     #[test]
