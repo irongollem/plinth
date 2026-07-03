@@ -1,21 +1,34 @@
 <template>
-  <main
-    class="bg-gray-800 text-gray-100 flex flex-col md:flex-row gap-6 p-6 pb-2 h-full rounded-b-lg"
-  >
+  <main class="flex h-full min-w-0">
     <!-- Controls -->
     <section
-      class="md:w-96 shrink-0 overflow-y-auto pr-2 max-h-full mb-6 space-y-4"
+      class="w-[330px] shrink-0 border-r border-base-content/10 overflow-y-auto p-4 flex flex-col gap-3.5"
     >
-      <h1 class="text-xl font-bold">Render</h1>
+      <div class="flex items-baseline justify-between">
+        <span class="font-bold text-[17px]">Render studio</span>
+        <span
+          class="font-mono text-[10px]"
+          :class="
+            blenderStatus === 'found' ? 'text-success' : 'text-base-content/40'
+          "
+          >{{
+            blenderStatus === "found"
+              ? `${blenderInfo?.version} ✓`
+              : blenderStatus === "missing"
+                ? "not found"
+                : ""
+          }}</span
+        >
+      </div>
 
       <div
         v-if="blenderStatus === 'missing'"
         class="alert alert-warning text-sm"
       >
-        <span>
-          Blender was not found. Install Blender 4.x+ or set its location in
-          settings.
-        </span>
+        <span
+          >Blender was not found. Install Blender 4.x+ or set its location in
+          settings.</span
+        >
         <button
           class="btn btn-xs"
           @click="releasesStore.setActiveTab('settings')"
@@ -23,25 +36,27 @@
           Open Settings
         </button>
       </div>
-      <div v-else-if="blenderInfo" class="text-xs opacity-60">
-        {{ blenderInfo.version }}
+
+      <div class="flex flex-col gap-1">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
+          >MODEL PARTS — JOINED INTO ONE MINI</span
+        >
+        <FileSelect
+          id="render-parts"
+          label=""
+          multiple
+          accept=".stl"
+          v-model="parts"
+        />
       </div>
 
-      <FileSelect
-        id="render-parts"
-        label="Model Parts (joined into one mini)"
-        multiple
-        accept=".stl"
-        v-model="parts"
-      />
-
-      <div>
-        <h2 class="font-semibold mb-1">Orientation</h2>
-        <p class="text-xs opacity-60 mb-2">
-          Drag the model (or a gizmo ring), or type exact angles to reproduce a
-          pose.
-        </p>
-        <div class="grid grid-cols-3 gap-2 mb-2">
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
+          >ORIENTATION — DRAG, GIZMO RING, OR TYPE EXACT ANGLES</span
+        >
+        <div class="grid grid-cols-3 gap-2">
           <label
             v-for="(axis, index) in ['X', 'Y', 'Z'] as const"
             :key="axis"
@@ -57,7 +72,7 @@
             />
           </label>
         </div>
-        <div class="flex flex-wrap gap-1">
+        <div class="flex flex-wrap gap-1.5">
           <button class="btn btn-xs" @click="viewport?.setRotation([90, 0, 0])">
             Stand up
           </button>
@@ -70,49 +85,49 @@
           <button class="btn btn-xs" @click="viewport?.rotateWorld('z', 90)">
             Z +90°
           </button>
-          <button class="btn btn-xs" @click="viewport?.resetRotation()">
+          <button
+            class="btn btn-xs btn-ghost"
+            @click="viewport?.resetRotation()"
+          >
             Reset
           </button>
         </div>
       </div>
 
-      <div>
-        <h2 class="font-semibold mb-1">Camera</h2>
-        <div class="grid grid-cols-3 gap-2">
-          <label class="input input-xs flex items-center gap-1">
-            <span class="opacity-50">az°</span>
-            <input
-              type="number"
-              step="1"
-              class="w-full"
-              :value="view.azimuth"
-              @change="setViewField('azimuth', $event)"
-            />
-          </label>
-          <label class="input input-xs flex items-center gap-1">
-            <span class="opacity-50">elev</span>
-            <input
-              type="number"
-              step="0.05"
-              class="w-full"
-              :value="view.elevation"
-              @change="setViewField('elevation', $event)"
-            />
-          </label>
-          <label class="input input-xs flex items-center gap-1">
-            <span class="opacity-50">zoom</span>
-            <input
-              type="number"
-              step="0.05"
-              class="w-full"
-              :value="view.zoom"
-              @change="setViewField('zoom', $event)"
-            />
-          </label>
-        </div>
+      <div class="grid grid-cols-3 gap-2">
+        <label class="input input-xs flex items-center gap-1">
+          <span class="opacity-50">az°</span>
+          <input
+            type="number"
+            step="1"
+            class="w-full"
+            :value="view.azimuth"
+            @change="setViewField('azimuth', $event)"
+          />
+        </label>
+        <label class="input input-xs flex items-center gap-1">
+          <span class="opacity-50">elev</span>
+          <input
+            type="number"
+            step="0.05"
+            class="w-full"
+            :value="view.elevation"
+            @change="setViewField('elevation', $event)"
+          />
+        </label>
+        <label class="input input-xs flex items-center gap-1">
+          <span class="opacity-50">zoom</span>
+          <input
+            type="number"
+            step="0.05"
+            class="w-full"
+            :value="view.zoom"
+            @change="setViewField('zoom', $event)"
+          />
+        </label>
       </div>
 
-      <div class="grid grid-cols-2 gap-3">
+      <div class="grid grid-cols-2 gap-2">
         <div>
           <label class="label text-sm" for="render-resolution"
             >Resolution</label
@@ -142,26 +157,49 @@
         </div>
       </div>
 
-      <div class="flex items-center gap-3">
+      <div class="grid grid-cols-2 gap-2">
         <div>
           <label class="label text-sm" for="render-look">Look</label>
-          <select id="render-look" class="select select-sm" v-model="look">
+          <select
+            id="render-look"
+            class="select select-sm w-full"
+            v-model="look"
+          >
             <option value="flat">Classic (locked look)</option>
             <option value="resin">Resin (glossy coat)</option>
             <option value="rich">Rich (experimental)</option>
           </select>
         </div>
         <div>
-          <label class="label text-sm" for="render-color">Resin color</label>
-          <div class="flex items-center gap-1">
-            <input
-              id="render-color"
-              type="color"
-              class="block h-8 w-16 cursor-pointer"
-              v-model="colorHex"
-            />
+          <label class="label text-sm">Resin color</label>
+          <div class="flex items-center gap-1.5 pt-0.5">
             <button
-              v-if="colorHex !== DEFAULT_RESIN_HEX"
+              v-for="swatch in resinSwatches"
+              :key="swatch.hex"
+              type="button"
+              class="w-6 h-6 rounded-full cursor-pointer"
+              :style="{
+                background: swatch.hex,
+                boxShadow:
+                  colorHex === swatch.hex
+                    ? '0 0 0 2px var(--color-base-100), 0 0 0 4px var(--color-primary)'
+                    : '0 0 0 1px var(--color-base-content, #000)',
+              }"
+              :title="swatch.name"
+              @click="colorHex = swatch.hex"
+            ></button>
+            <label
+              class="w-6 h-6 rounded-full cursor-pointer relative overflow-hidden border border-base-content/30"
+              title="Custom color"
+            >
+              <input
+                type="color"
+                class="absolute -top-1 -left-1 w-8 h-8 cursor-pointer"
+                v-model="colorHex"
+              />
+            </label>
+            <button
+              v-if="!isPresetColor"
               type="button"
               class="btn btn-xs"
               title="Back to the locked resin color"
@@ -171,14 +209,118 @@
             </button>
           </div>
         </div>
-        <label class="label cursor-pointer gap-2 text-sm mt-4">
+      </div>
+
+      <label class="label cursor-pointer gap-2 text-sm">
+        <input
+          type="checkbox"
+          class="checkbox checkbox-sm"
+          v-model="matchCamera"
+        />
+        Match preview camera
+      </label>
+
+      <!-- BRANDING — UI only, not yet baked into the render -->
+      <div class="flex flex-col gap-2 border-t border-base-content/10 pt-3">
+        <div class="flex items-center gap-1.5">
+          <span
+            class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
+            >BRANDING — OVERLAY PREVIEW ONLY (NOT YET BAKED INTO RENDERS)</span
+          >
+        </div>
+        <div class="flex items-center gap-2">
           <input
             type="checkbox"
-            class="checkbox checkbox-sm"
-            v-model="matchCamera"
+            class="checkbox checkbox-xs"
+            v-model="branding.logoOn"
           />
-          Match preview camera
-        </label>
+          <span class="text-[12px] font-medium">Logo watermark</span>
+          <span class="flex-1"></span>
+          <div class="flex gap-1">
+            <button
+              v-for="pos in cornerPositions"
+              :key="pos"
+              type="button"
+              class="font-mono text-[9px] px-1.5 py-0.5 rounded cursor-pointer border"
+              :class="
+                branding.logoPos === pos
+                  ? 'bg-primary text-primary-content border-primary'
+                  : 'text-base-content/60 border-base-content/15'
+              "
+              @click="branding.logoPos = pos"
+            >
+              {{ pos.toUpperCase() }}
+            </button>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <input
+            type="checkbox"
+            class="checkbox checkbox-xs"
+            v-model="branding.textOn"
+          />
+          <span class="text-[12px] font-medium">Text overlay</span>
+          <span class="flex-1"></span>
+          <div class="flex gap-1 flex-wrap justify-end">
+            <button
+              v-for="pos in textPositions"
+              :key="pos"
+              type="button"
+              class="font-mono text-[9px] px-1.5 py-0.5 rounded cursor-pointer border"
+              :class="
+                branding.textPos === pos
+                  ? 'bg-primary text-primary-content border-primary'
+                  : 'text-base-content/60 border-base-content/15'
+              "
+              @click="branding.textPos = pos"
+            >
+              {{ pos.toUpperCase() }}
+            </button>
+          </div>
+        </div>
+        <input
+          v-model="branding.title"
+          placeholder="Overlay title…"
+          class="input input-sm w-full"
+        />
+        <input
+          v-model="branding.credit"
+          placeholder="Credit line…"
+          class="input input-sm font-mono w-full"
+        />
+        <div class="flex gap-1.5">
+          <button
+            v-for="f in fontOptions"
+            :key="f.value"
+            type="button"
+            class="flex-1 text-center text-[11px] py-1.5 rounded cursor-pointer border"
+            :style="{ fontFamily: f.css }"
+            :class="
+              branding.font === f.value
+                ? 'bg-primary text-primary-content border-primary'
+                : 'text-base-content/60 border-base-content/15'
+            "
+            @click="branding.font = f.value"
+          >
+            {{ f.label }}
+          </button>
+        </div>
+        <div class="flex items-center gap-2.5">
+          <span
+            class="font-mono font-semibold text-[9.5px] text-base-content/40"
+            >SIZE</span
+          >
+          <input
+            type="range"
+            min="12"
+            max="48"
+            v-model.number="branding.size"
+            class="range range-xs flex-1"
+          />
+          <span class="font-mono text-[11px] w-9 text-right"
+            >{{ branding.size }}px</span
+          >
+        </div>
       </div>
 
       <div>
@@ -236,9 +378,9 @@
       <div v-if="resultPath" class="space-y-2">
         <h2 class="font-semibold">
           Result
-          <span v-if="elapsedSeconds" class="text-xs opacity-60">
-            ({{ elapsedSeconds.toFixed(1) }}s)
-          </span>
+          <span v-if="elapsedSeconds" class="text-xs opacity-60"
+            >({{ elapsedSeconds.toFixed(1) }}s)</span
+          >
         </h2>
         <button
           type="button"
@@ -264,13 +406,13 @@
           class="btn btn-sm btn-secondary w-full"
           @click="sendToAddStl"
         >
-          Use as model image in Add STL
+          Use as model image in release step 2
         </button>
       </div>
     </section>
 
     <!-- Viewport / result -->
-    <aside class="flex-1 max-h-full mb-6 relative">
+    <aside class="flex-1 min-w-0 relative">
       <StlViewport
         ref="viewport"
         :parts="partPaths"
@@ -280,6 +422,35 @@
         @loaded="onLoaded"
         @error="onViewportError"
       />
+      <!-- Branding overlay preview (position-only — not composited into the file) -->
+      <div
+        v-if="branding.logoOn && parts.length"
+        class="absolute w-[52px] h-[52px] rounded-lg border-2 border-dashed border-base-content/40 flex items-center justify-center font-mono text-[8px] tracking-[0.08em] text-base-content/40 pointer-events-none"
+        :style="logoPosStyle"
+      >
+        LOGO
+      </div>
+      <div
+        v-if="branding.textOn && parts.length"
+        class="absolute pointer-events-none"
+        :style="textPosStyle"
+      >
+        <div
+          :style="{
+            fontFamily: fontCss,
+            fontSize: `${branding.size}px`,
+            fontWeight: 700,
+          }"
+        >
+          {{ branding.title || "Untitled" }}
+        </div>
+        <div
+          class="font-mono text-[9.5px] tracking-[0.18em] text-base-content/60 mt-0.5"
+        >
+          {{ branding.credit }}
+        </div>
+      </div>
+
       <!-- Finished render takes over the viewport so it can't be missed -->
       <div
         v-if="showResult && resultUrl"
@@ -288,9 +459,9 @@
         <div class="flex items-center gap-2 p-2">
           <span class="text-sm font-semibold opacity-80">
             Render result
-            <span v-if="elapsedSeconds" class="opacity-50">
-              — {{ elapsedSeconds.toFixed(1) }}s
-            </span>
+            <span v-if="elapsedSeconds" class="opacity-50"
+              >— {{ elapsedSeconds.toFixed(1) }}s</span
+            >
           </span>
           <span class="flex-1"></span>
           <button
@@ -319,7 +490,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { storeToRefs } from "pinia";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 import { type BlenderInfo, commands } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
 import ProgressBar from "../components/ProgressBar.vue";
@@ -348,7 +519,8 @@ const viewport = ref<InstanceType<typeof StlViewport> | null>(null);
 const parts = ref<SelectedFile[]>([]);
 const partPaths = computed(() => parts.value.map((f) => f.path));
 
-// The catalog hands STL parts over via the store ("Render promo" button)
+// The catalog hands STL parts over via the store ("Render promo" button, or
+// per-model "open studio" links from the release stepper's Render step)
 const { renderParts } = storeToRefs(releasesStore);
 watch(renderParts, async (paths) => {
   if (!paths.length) return;
@@ -368,6 +540,15 @@ const look = ref<"rich" | "flat" | "resin">("flat");
 // cream, matched against formal DTL product renders
 const DEFAULT_RESIN_HEX = "#edd3af";
 const colorHex = ref(DEFAULT_RESIN_HEX);
+const resinSwatches = [
+  { name: "Warm cream (default)", hex: DEFAULT_RESIN_HEX },
+  { name: "Neutral gray", hex: "#b9bcbe" },
+  { name: "Sage green", hex: "#9aa78b" },
+  { name: "Charcoal", hex: "#4a4c4e" },
+];
+const isPresetColor = computed(() =>
+  resinSwatches.some((s) => s.hex === colorHex.value),
+);
 const outputPath = ref("");
 
 const setRotationAxis = (index: number, event: Event) => {
@@ -411,9 +592,58 @@ watch(resultPath, (path) => {
 const sendToAddStl = () => {
   if (!resultPath.value) return;
   releasesStore.queueModelImage(resultPath.value);
-  toastStore.addToast("Render queued as model image in Add STL", "success");
-  releasesStore.setActiveTab("addStl");
+  toastStore.addToast("Render queued as a model image", "success");
+  releasesStore.setReleaseStep(2);
 };
+
+/* ------------------------- branding overlay (UI-only stub) ------------------------- */
+type CornerPos = "tl" | "tr" | "bl" | "br";
+type TextPos = "tl" | "tc" | "tr" | "bl" | "bc" | "br";
+const cornerPositions: CornerPos[] = ["tl", "tr", "bl", "br"];
+const textPositions: TextPos[] = ["tl", "tc", "tr", "bl", "bc", "br"];
+const fontOptions: { value: string; label: string; css: string }[] = [
+  { value: "Archivo", label: "Grotesk", css: "'Archivo', sans-serif" },
+  { value: "Bebas Neue", label: "Display", css: "'Bebas Neue', sans-serif" },
+  {
+    value: "Cormorant Garamond",
+    label: "Serif",
+    css: "'Cormorant Garamond', serif",
+  },
+  { value: "IBM Plex Mono", label: "Mono", css: "'IBM Plex Mono', monospace" },
+];
+
+const branding = reactive({
+  logoOn: true,
+  logoPos: "tr" as CornerPos,
+  textOn: true,
+  textPos: "bl" as TextPos,
+  title: "",
+  credit: "",
+  font: "Archivo",
+  size: 20,
+});
+
+const cornerStyle: Record<CornerPos, Record<string, string>> = {
+  tl: { top: "18px", left: "18px" },
+  tr: { top: "18px", right: "18px" },
+  bl: { bottom: "46px", left: "20px" },
+  br: { bottom: "46px", right: "20px" },
+};
+const textStyle: Record<TextPos, Record<string, string>> = {
+  tl: { top: "18px", left: "18px" },
+  tc: { top: "18px", left: "0", right: "0", textAlign: "center" },
+  tr: { top: "18px", right: "18px", textAlign: "right" },
+  bl: { bottom: "46px", left: "20px" },
+  bc: { bottom: "46px", left: "0", right: "0", textAlign: "center" },
+  br: { bottom: "46px", right: "20px", textAlign: "right" },
+};
+const logoPosStyle = computed(() => cornerStyle[branding.logoPos]);
+const textPosStyle = computed(() => textStyle[branding.textPos]);
+const fontCss = computed(
+  () =>
+    fontOptions.find((f) => f.value === branding.font)?.css ??
+    "'Archivo', sans-serif",
+);
 
 const blenderInfo = ref<BlenderInfo | null>(null);
 const blenderStatus = ref<"unknown" | "found" | "missing">("unknown");
