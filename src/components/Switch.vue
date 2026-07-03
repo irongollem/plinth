@@ -11,7 +11,7 @@ defineEmits<{
 
 <template>
   <fieldset
-    class="fieldset p-2 bg-base-100 border border-gray-500 rounded-box w-full mb-2"
+    class="fieldset p-2 bg-base-100 border border-base-content/15 rounded-box w-full mb-2"
   >
     <label class="fieldset-label">
       <input

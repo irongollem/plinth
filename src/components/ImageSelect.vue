@@ -1,7 +1,9 @@
 <template>
   <h2 class="text-xl font-bold">Images</h2>
 
-  <div class="border border-gray-500 rounded-box bg-base-100 p-2 w-full mb-2">
+  <div
+    class="border border-base-content/15 rounded-box bg-base-100 p-2 w-full mb-2"
+  >
     <div class="flex items-center gap-2 mb-3">
       <button
         type="button"

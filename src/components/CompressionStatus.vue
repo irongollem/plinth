@@ -1,6 +1,6 @@
 <template>
   <div
-    class="p-4 bg-base-100 border-1 border-gray-600 rounded-lg flex flex-col items-center"
+    class="p-4 bg-base-100 border-1 border-base-content/15 rounded-lg flex flex-col items-center"
   >
     <h2 class="text-lg font-semibold mb-4">
       {{ getStatusTitle() }}

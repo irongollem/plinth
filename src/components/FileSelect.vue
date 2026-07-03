@@ -89,7 +89,7 @@ const clearFiles = () => {
 
     <div
       v-else
-      class="border border-gray-500 rounded-box bg-base-100 p-2 w-full"
+      class="border border-base-content/15 rounded-box bg-base-100 p-2 w-full"
     >
       <div class="flex items-center gap-2 mb-3">
         <button

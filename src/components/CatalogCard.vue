@@ -21,7 +21,7 @@ const previewUrl = computed(() =>
 <template>
   <button
     type="button"
-    class="card bg-base-100 border border-gray-600 text-left hover:border-primary transition-colors overflow-hidden"
+    class="card bg-base-100 border border-base-content/15 text-left hover:border-primary transition-colors overflow-hidden"
     :class="{ 'border-primary ring-1 ring-primary': selected }"
     @click="$emit('select', entry)"
   >
