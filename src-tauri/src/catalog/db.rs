@@ -28,9 +28,11 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap_or(0);
-    if version >= SCHEMA_VERSION {
-        return Ok(());
-    }
+    // The base CREATEs are all IF NOT EXISTS and run on EVERY open — only
+    // the versioned migrations below are gated. Gating the base batch once
+    // burned us: a build stamped user_version before a newly-coded table
+    // existed, and the version check then guaranteed it could never appear
+    // ("no such table" with no way out short of deleting the db).
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS files (
@@ -108,6 +110,10 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
         "#,
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to init catalog schema: {}", e)))?;
+
+    if version >= SCHEMA_VERSION {
+        return Ok(());
+    }
 
     if version < 2 {
         // One ALTER per column: a half-applied batch (e.g. a crash mid-
@@ -1277,6 +1283,22 @@ mod tests {
 
         assert!(update_model_user_meta(&conn, "/nope", None, None, None, None, None).is_err());
         assert!(set_model_preview(&conn, "/nope", "/x.png").is_err());
+    }
+
+    #[test]
+    fn base_tables_self_heal_on_a_version_stamped_db() {
+        // The exact failure this guards: a dev build stamped user_version=4
+        // before group_renames existed in the code, so the versioned early
+        // return skipped its CREATE forever ("no such table: group_renames")
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute_batch("DROP TABLE group_renames").unwrap();
+
+        init_schema(&conn).unwrap();
+        let count: u32 = conn
+            .query_row("SELECT COUNT(*) FROM group_renames", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "table recreated despite current user_version");
     }
 
     #[test]
