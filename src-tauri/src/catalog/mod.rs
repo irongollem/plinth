@@ -39,6 +39,9 @@ pub struct ModelRow {
     pub scale: Option<String>,
     pub support_status: Option<String>,
     pub release_date: Option<String>,
+    /// The logical model this row is a variant of; rows sharing it collapse
+    /// into one catalog group (see db::search_groups).
+    pub group_name: Option<String>,
 }
 
 // ---- frontend-facing types ----
@@ -67,6 +70,27 @@ pub struct CatalogEntry {
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
 pub struct CatalogSearchResult {
     pub entries: Vec<CatalogEntry>,
+    pub total: u32,
+}
+
+/// One logical model: every variant dir (supported/unsupported builds,
+/// poses) sharing a group_name, aggregated for the card view. Drill in
+/// with get_catalog_group_members.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct CatalogGroup {
+    pub group_name: String,
+    pub designer: Option<String>,
+    pub variant_count: u32,
+    pub pose_count: u32,
+    pub support_statuses: Vec<String>,
+    pub file_count: u32,
+    pub total_size_bytes: f64,
+    pub preview_path: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct CatalogGroupResult {
+    pub groups: Vec<CatalogGroup>,
     pub total: u32,
 }
 

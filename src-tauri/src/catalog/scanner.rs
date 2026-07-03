@@ -166,6 +166,13 @@ pub fn scan(
             }
         };
 
+        // metadata models group under their own name (usually 1:1);
+        // heuristic models under the inferred base
+        let group_name = inferred
+            .as_ref()
+            .map(|i| i.group_name.clone())
+            .unwrap_or_else(|| name.clone());
+
         models.push(ModelRow {
             dir_path: dir_path.clone(),
             name,
@@ -181,6 +188,7 @@ pub fn scan(
             scale: None,
             support_status: inferred.as_ref().and_then(|i| i.support_status.clone()),
             release_date: inferred.as_ref().and_then(|i| i.release_date.clone()),
+            group_name: Some(group_name),
         });
     }
 
@@ -195,6 +203,9 @@ pub fn scan(
 
 struct InferredModel {
     name: String,
+    /// The base name without the pose suffix — variants of one model share
+    /// it, which is what groups "galeb duhr A/B/C" onto one catalog card.
+    group_name: String,
     pose: Option<String>,
     support_status: Option<String>,
     release_date: Option<String>,
@@ -232,28 +243,44 @@ fn infer_model_identity(root: &Path, dir_path: &str) -> InferredModel {
             if let Some(p) = pose_from_segment(&segment) {
                 pose.get_or_insert(p);
             } else if !is_generic_segment(&segment) {
-                base_name = Some(segment);
+                base_name = Some(prettify_segment(&segment));
             }
         }
         current = dir.parent();
     }
 
-    let name = match (&base_name, &pose) {
-        (Some(base), Some(p)) => format!("{} {}", base, p),
-        (Some(base), None) => base.clone(),
-        // nothing but packaging all the way up: keep the old leaf-dir name
-        (None, _) => Path::new(dir_path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| dir_path.to_string()),
+    // nothing but packaging all the way up: keep the old leaf-dir name
+    let group_name = base_name.clone().unwrap_or_else(|| {
+        prettify_segment(
+            &Path::new(dir_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| dir_path.to_string()),
+        )
+    });
+    let name = match &pose {
+        Some(p) if base_name.is_some() => format!("{} {}", group_name, p),
+        _ => group_name.clone(),
     };
 
     InferredModel {
         name,
+        group_name,
         pose,
         support_status,
         release_date,
     }
+}
+
+/// "galeb_duhr" reads like a filename; "galeb duhr" reads like a name.
+/// Underscores are transfer-armor, not identity — swap them for spaces and
+/// collapse the leftovers. Hyphens stay: they're often part of the name.
+fn prettify_segment(segment: &str) -> String {
+    segment
+        .replace('_', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn support_from_segment(segment: &str) -> Option<&'static str> {
@@ -412,9 +439,10 @@ mod tests {
         // release-with-date / model / support / pose
         let inferred = infer_model_identity(
             root,
-            "/lib/dungeon_classics-05-2026/galeb duhr/unsupported/A",
+            "/lib/dungeon_classics-05-2026/galeb_duhr/unsupported/A",
         );
-        assert_eq!(inferred.name, "galeb duhr A");
+        assert_eq!(inferred.name, "galeb duhr A", "underscores prettified");
+        assert_eq!(inferred.group_name, "galeb duhr");
         assert_eq!(inferred.pose.as_deref(), Some("A"));
         assert_eq!(inferred.support_status.as_deref(), Some("unsupported"));
         assert_eq!(inferred.release_date.as_deref(), Some("2026-05"));
@@ -422,6 +450,7 @@ mod tests {
         // presupported counts as supported; "pose 2" is a variant marker
         let inferred = infer_model_identity(root, "/lib/rats/pre-supported/pose 2");
         assert_eq!(inferred.name, "rats 2");
+        assert_eq!(inferred.group_name, "rats", "poses share the group");
         assert_eq!(inferred.pose.as_deref(), Some("2"));
         assert_eq!(inferred.support_status.as_deref(), Some("supported"));
 

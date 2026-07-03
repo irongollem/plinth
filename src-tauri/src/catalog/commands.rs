@@ -16,8 +16,8 @@ use tauri_specta::Event;
 use uuid::Uuid;
 
 use super::{
-    db, dups, scanner, BatchOutcome, CatalogFile, CatalogSearchResult, CatalogStats,
-    DuplicateGroup, MoveOperation, ReleaseSummary, TagCount,
+    db, dups, scanner, BatchOutcome, CatalogEntry, CatalogFile, CatalogGroupResult,
+    CatalogSearchResult, CatalogStats, DuplicateGroup, MoveOperation, ReleaseSummary, TagCount,
 };
 
 /// Scan and duplicate jobs share one registry; both cancel through
@@ -244,6 +244,56 @@ pub async fn search_catalog(
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Search task failed: {}", e)))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn search_catalog_groups(
+    app_handle: AppHandle,
+    query: String,
+    tags: Vec<String>,
+    limit: u32,
+    offset: u32,
+) -> Result<CatalogGroupResult, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        let page = db::search_groups(&conn, &query, &tags, limit.min(200), offset)?;
+        Ok(CatalogGroupResult {
+            groups: page.groups,
+            total: page.total,
+        })
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Group search task failed: {}", e)))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_catalog_group_members(
+    app_handle: AppHandle,
+    group_name: String,
+) -> Result<Vec<CatalogEntry>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::group_members(&conn, &group_name)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Group member task failed: {}", e)))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn rename_catalog_group(
+    app_handle: AppHandle,
+    group_name: String,
+    new_name: String,
+) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::rename_group(&conn, &group_name, &new_name)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Group rename task failed: {}", e)))?
 }
 
 #[tauri::command]

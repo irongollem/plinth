@@ -3,11 +3,11 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 
 use super::{
-    CatalogEntry, CatalogFile, CatalogStats, DuplicateGroup, ExtensionStat, FileRow, ModelRow,
-    ReleaseSummary,
+    CatalogEntry, CatalogFile, CatalogGroup, CatalogStats, DuplicateGroup, ExtensionStat, FileRow,
+    ModelRow, ReleaseSummary,
 };
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Open (and if needed initialize) the catalog database.
 pub fn open(db_path: &Path) -> Result<Connection, AppError> {
@@ -57,6 +57,10 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             uuid         TEXT,
             file_count   INTEGER NOT NULL DEFAULT 0,
             total_size_bytes INTEGER NOT NULL DEFAULT 0,
+            -- The logical model this row is a variant of ("galeb duhr" for
+            -- galeb duhr/unsupported/A). Scanner-derived; rows sharing a
+            -- group_name (case-insensitive) render as ONE catalog card.
+            group_name   TEXT,
             indexed_at   INTEGER NOT NULL
         );
 
@@ -92,6 +96,15 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             release_date   TEXT,
             preview_path   TEXT
         );
+
+        -- Group display-name overrides, keyed by the SCANNER's group name
+        -- so they survive rescans (folder names are stable; the override
+        -- rides on top). Renaming two groups to the same display name
+        -- merges them — that's the manual "combine under one model" tool.
+        CREATE TABLE IF NOT EXISTS group_renames (
+            source_group TEXT PRIMARY KEY COLLATE NOCASE,
+            display_name TEXT NOT NULL
+        );
         "#,
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to init catalog schema: {}", e)))?;
@@ -113,6 +126,20 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
                         column, e
                     )));
                 }
+            }
+        }
+    }
+
+    // v4: grouping column; nullable and rebuilt by the next scan, so the
+    // migration is just the ALTER (same duplicate-column tolerance as v2 —
+    // fresh databases already have it from the base CREATE)
+    if version < 4 {
+        if let Err(e) = conn.execute("ALTER TABLE models ADD COLUMN group_name TEXT", []) {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(AppError::ConfigError(format!(
+                    "Failed to migrate catalog schema (add group_name): {}",
+                    e
+                )));
             }
         }
     }
@@ -202,8 +229,8 @@ pub fn replace_catalog(
                 "INSERT OR REPLACE INTO models
                  (dir_path, name, description, designer, release_name, preview_path,
                   source, uuid, file_count, total_size_bytes, pose, scale, support_status,
-                  release_date, indexed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                  release_date, group_name, indexed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
                   strftime('%s','now'))",
             )
             .map_err(map_err)?;
@@ -223,7 +250,8 @@ pub fn replace_catalog(
                     m.pose,
                     m.scale,
                     m.support_status,
-                    m.release_date
+                    m.release_date,
+                    m.group_name
                 ])
                 .map_err(map_err)?;
         }
@@ -256,6 +284,13 @@ pub fn replace_catalog(
             [],
         )
         .map_err(map_err)?;
+        tx.execute(
+            "DELETE FROM group_renames
+             WHERE lower(source_group) NOT IN
+                 (SELECT DISTINCT lower(COALESCE(group_name, name)) FROM models)",
+            [],
+        )
+        .map_err(map_err)?;
 
         rebuild_fts(&tx).map_err(map_err)?;
 
@@ -270,18 +305,23 @@ pub fn replace_catalog(
     Ok(())
 }
 
-fn rebuild_fts(conn: &Connection) -> Result<(), rusqlite::Error> {
-    conn.execute("DELETE FROM models_fts", [])?;
-    conn.execute(
-        "INSERT INTO models_fts (name, description, tags, dir_path)
+// The group's display name is folded into the tags text so a search for a
+// RENAMED group ("Stone Guardian") still finds its member rows, whose own
+// names may say something else entirely ("galeb duhr A").
+const FTS_INSERT_SELECT: &str = "INSERT INTO models_fts (name, description, tags, dir_path)
          SELECT COALESCE(u.custom_name, m.name),
                 COALESCE(m.description, ''),
                 COALESCE((SELECT group_concat(t.tag, ' ') FROM model_tags t
-                          WHERE t.dir_path = m.dir_path), ''),
+                          WHERE t.dir_path = m.dir_path), '')
+                    || ' ' || COALESCE(r.display_name, ''),
                 m.dir_path
-         FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path",
-        [],
-    )?;
+         FROM models m
+         LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
+         LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)";
+
+fn rebuild_fts(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute("DELETE FROM models_fts", [])?;
+    conn.execute(FTS_INSERT_SELECT, [])?;
     Ok(())
 }
 
@@ -289,14 +329,7 @@ fn rebuild_fts(conn: &Connection) -> Result<(), rusqlite::Error> {
 fn refresh_fts_row(conn: &Connection, dir_path: &str) -> Result<(), rusqlite::Error> {
     conn.execute("DELETE FROM models_fts WHERE dir_path = ?1", [dir_path])?;
     conn.execute(
-        "INSERT INTO models_fts (name, description, tags, dir_path)
-         SELECT COALESCE(u.custom_name, m.name),
-                COALESCE(m.description, ''),
-                COALESCE((SELECT group_concat(t.tag, ' ') FROM model_tags t
-                          WHERE t.dir_path = m.dir_path), ''),
-                m.dir_path
-         FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
-         WHERE m.dir_path = ?1",
+        &format!("{} WHERE m.dir_path = ?1", FTS_INSERT_SELECT),
         [dir_path],
     )?;
     Ok(())
@@ -315,16 +348,12 @@ pub struct SearchPage {
     pub total: u32,
 }
 
-pub fn search(
-    conn: &Connection,
+/// FTS + tag filters shared by the flat and grouped searches; both operate
+/// on `models m` so the clauses are interchangeable.
+fn build_search_filter(
     query: &str,
     tags: &[String],
-    limit: u32,
-    offset: u32,
-) -> Result<SearchPage, AppError> {
-    let map_err =
-        |e: rusqlite::Error| AppError::ConfigError(format!("Catalog search failed: {}", e));
-
+) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
     let mut where_clauses: Vec<String> = Vec::new();
     let mut bound: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -347,7 +376,63 @@ pub fn search(
     } else {
         format!("WHERE {}", where_clauses.join(" AND "))
     };
+    (where_sql, bound)
+}
 
+/// The one SELECT that yields CatalogEntry rows. name/preview/details
+/// resolve user overrides over scanner values; custom_name additionally
+/// travels raw so the UI can tell an override apart from an inferred name
+/// (and clear it to revert).
+fn entry_select_sql(where_sql: &str, tail_sql: &str) -> String {
+    format!(
+        "SELECT m.dir_path, COALESCE(u.custom_name, m.name), m.description, m.designer,
+                m.release_name, COALESCE(u.preview_path, m.preview_path),
+                m.file_count, m.total_size_bytes,
+                COALESCE((SELECT group_concat(t.tag, char(31)) FROM model_tags t
+                          WHERE t.dir_path = m.dir_path), ''),
+                COALESCE(u.pose, m.pose), COALESCE(u.scale, m.scale),
+                COALESCE(u.support_status, m.support_status),
+                COALESCE(u.release_date, m.release_date),
+                u.custom_name
+         FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path {} {}",
+        where_sql, tail_sql
+    )
+}
+
+fn map_entry_row(row: &rusqlite::Row) -> rusqlite::Result<CatalogEntry> {
+    let tags_joined: String = row.get(8)?;
+    Ok(CatalogEntry {
+        dir_path: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        designer: row.get(3)?,
+        release_name: row.get(4)?,
+        preview_path: row.get(5)?,
+        file_count: row.get(6)?,
+        total_size_bytes: row.get::<_, i64>(7)? as f64,
+        tags: if tags_joined.is_empty() {
+            Vec::new()
+        } else {
+            tags_joined.split('\u{1f}').map(String::from).collect()
+        },
+        pose: row.get(9)?,
+        scale: row.get(10)?,
+        support_status: row.get(11)?,
+        release_date: row.get(12)?,
+        custom_name: row.get(13)?,
+    })
+}
+
+pub fn search(
+    conn: &Connection,
+    query: &str,
+    tags: &[String],
+    limit: u32,
+    offset: u32,
+) -> Result<SearchPage, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Catalog search failed: {}", e));
+    let (where_sql, bound) = build_search_filter(query, tags);
     let params_ref: Vec<&dyn rusqlite::types::ToSql> = bound.iter().map(|b| b.as_ref()).collect();
 
     let total: u32 = conn
@@ -358,55 +443,164 @@ pub fn search(
         )
         .map_err(map_err)?;
 
-    // name/preview/details resolve user overrides over scanner values;
-    // custom_name additionally travels raw so the UI can tell an override
-    // apart from an inferred name (and clear it to revert)
+    let sql = entry_select_sql(
+        &where_sql,
+        &format!(
+            "ORDER BY COALESCE(u.custom_name, m.name) COLLATE NOCASE LIMIT {} OFFSET {}",
+            limit, offset
+        ),
+    );
+    let mut stmt = conn.prepare(&sql).map_err(map_err)?;
+    let entries = stmt
+        .query_map(params_ref.as_slice(), map_entry_row)
+        .map_err(map_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_err)?;
+
+    Ok(SearchPage { entries, total })
+}
+
+pub struct GroupPage {
+    pub groups: Vec<CatalogGroup>,
+    pub total: u32,
+}
+
+/// One row per LOGICAL model: variants sharing a group_name (supported/
+/// unsupported builds, poses A/B/C) collapse into a single group with
+/// aggregate counts. Rows scanned before v4 have no group_name and fall
+/// back to their own name — a group of one, i.e. the old behavior.
+pub fn search_groups(
+    conn: &Connection,
+    query: &str,
+    tags: &[String],
+    limit: u32,
+    offset: u32,
+) -> Result<GroupPage, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Catalog group search failed: {}", e));
+    let (where_sql, bound) = build_search_filter(query, tags);
+    let params_ref: Vec<&dyn rusqlite::types::ToSql> = bound.iter().map(|b| b.as_ref()).collect();
+
+    // Effective group = rename override > scanner group > own name. The
+    // rename join keys on the scanner name so it survives rescans, and two
+    // groups renamed alike collapse into one (deliberate merge tool).
+    let total: u32 = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(DISTINCT lower(COALESCE(r.display_name, m.group_name, m.name)))
+                 FROM models m
+                 LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name) {}",
+                where_sql
+            ),
+            params_ref.as_slice(),
+            |row| row.get(0),
+        )
+        .map_err(map_err)?;
+
+    // MAX(preview) = any variant's image is better than none;
+    // MAX(designer) likewise picks an arbitrary non-null representative
     let sql = format!(
-        "SELECT m.dir_path, COALESCE(u.custom_name, m.name), m.description, m.designer,
-                m.release_name, COALESCE(u.preview_path, m.preview_path),
-                m.file_count, m.total_size_bytes,
-                COALESCE((SELECT group_concat(t.tag, char(31)) FROM model_tags t
-                          WHERE t.dir_path = m.dir_path), ''),
-                COALESCE(u.pose, m.pose), COALESCE(u.scale, m.scale),
-                COALESCE(u.support_status, m.support_status),
-                COALESCE(u.release_date, m.release_date),
-                u.custom_name
-         FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path {}
-         ORDER BY COALESCE(u.custom_name, m.name) COLLATE NOCASE
+        "SELECT COALESCE(r.display_name, m.group_name, m.name) AS gname,
+                MAX(m.designer),
+                COUNT(*),
+                COUNT(DISTINCT COALESCE(u.pose, m.pose)),
+                group_concat(DISTINCT COALESCE(u.support_status, m.support_status)),
+                SUM(m.file_count),
+                SUM(m.total_size_bytes),
+                MAX(COALESCE(u.preview_path, m.preview_path))
+         FROM models m
+         LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
+         LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name) {}
+         GROUP BY lower(gname)
+         ORDER BY gname COLLATE NOCASE
          LIMIT {} OFFSET {}",
         where_sql, limit, offset
     );
-
     let mut stmt = conn.prepare(&sql).map_err(map_err)?;
-    let entries = stmt
+    let groups = stmt
         .query_map(params_ref.as_slice(), |row| {
-            let tags_joined: String = row.get(8)?;
-            Ok(CatalogEntry {
-                dir_path: row.get(0)?,
-                name: row.get(1)?,
-                description: row.get(2)?,
-                designer: row.get(3)?,
-                release_name: row.get(4)?,
-                preview_path: row.get(5)?,
-                file_count: row.get(6)?,
-                total_size_bytes: row.get::<_, i64>(7)? as f64,
-                tags: if tags_joined.is_empty() {
-                    Vec::new()
-                } else {
-                    tags_joined.split('\u{1f}').map(String::from).collect()
-                },
-                pose: row.get(9)?,
-                scale: row.get(10)?,
-                support_status: row.get(11)?,
-                release_date: row.get(12)?,
-                custom_name: row.get(13)?,
+            let supports: Option<String> = row.get(4)?;
+            Ok(CatalogGroup {
+                group_name: row.get(0)?,
+                designer: row.get(1)?,
+                variant_count: row.get(2)?,
+                pose_count: row.get(3)?,
+                support_statuses: supports
+                    .map(|s| s.split(',').map(String::from).collect())
+                    .unwrap_or_default(),
+                file_count: row.get::<_, i64>(5)? as u32,
+                total_size_bytes: row.get::<_, i64>(6)? as f64,
+                preview_path: row.get(7)?,
             })
         })
         .map_err(map_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(map_err)?;
 
-    Ok(SearchPage { entries, total })
+    Ok(GroupPage { groups, total })
+}
+
+/// All variants of one logical model, ordered for the drawer: support
+/// status first (alphabetical puts supported before unsupported, unknowns
+/// last), then pose.
+pub fn group_members(conn: &Connection, group_name: &str) -> Result<Vec<CatalogEntry>, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Group member query failed: {}", e));
+    let sql = entry_select_sql(
+        "LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)
+         WHERE lower(COALESCE(r.display_name, m.group_name, m.name)) = lower(?)",
+        "ORDER BY COALESCE(u.support_status, m.support_status) IS NULL,
+                  COALESCE(u.support_status, m.support_status),
+                  COALESCE(u.pose, m.pose) IS NULL,
+                  COALESCE(u.pose, m.pose),
+                  m.dir_path",
+    );
+    let mut stmt = conn.prepare(&sql).map_err(map_err)?;
+    let entries = stmt
+        .query_map([group_name], map_entry_row)
+        .map_err(map_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_err)?;
+    Ok(entries)
+}
+
+/// Rename the group shown as `group_name` to `new_name` — stored against
+/// the scanner-level source groups so it survives rescans. An empty
+/// new_name clears the override(s), reverting to the folder-derived name.
+/// Renaming a group to another group's name merges the two.
+pub fn rename_group(conn: &Connection, group_name: &str, new_name: &str) -> Result<(), AppError> {
+    let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Group rename failed: {}", e));
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        conn.execute(
+            "DELETE FROM group_renames
+             WHERE lower(display_name) = lower(?1) OR lower(source_group) = lower(?1)",
+            [group_name],
+        )
+        .map_err(map_err)?;
+    } else {
+        let changed = conn
+            .execute(
+                "INSERT INTO group_renames (source_group, display_name)
+                 SELECT DISTINCT COALESCE(m.group_name, m.name), ?2
+                 FROM models m
+                 LEFT JOIN group_renames r
+                     ON r.source_group = COALESCE(m.group_name, m.name)
+                 WHERE lower(COALESCE(r.display_name, m.group_name, m.name)) = lower(?1)
+                 ON CONFLICT(source_group) DO UPDATE SET display_name = excluded.display_name",
+                params![group_name, new_name],
+            )
+            .map_err(map_err)?;
+        if changed == 0 {
+            return Err(AppError::NotFoundError(format!(
+                "No catalog group named '{}'",
+                group_name
+            )));
+        }
+    }
+    // renamed groups must be findable by their new name
+    rebuild_fts(conn).map_err(map_err)?;
+    Ok(())
 }
 
 pub fn list_tags(conn: &Connection) -> Result<Vec<(String, u32)>, AppError> {
@@ -840,6 +1034,7 @@ mod tests {
                 scale: None,
                 support_status: None,
                 release_date: None,
+                group_name: Some("Giant Newt".into()),
             },
             ModelRow {
                 dir_path: "/lib/bugbear".into(),
@@ -856,6 +1051,7 @@ mod tests {
                 scale: None,
                 support_status: None,
                 release_date: None,
+                group_name: Some("Bugbear".into()),
             },
         ];
         let tags = vec![("/lib/newt".to_string(), "amphibian".to_string())];
@@ -1081,6 +1277,108 @@ mod tests {
 
         assert!(update_model_user_meta(&conn, "/nope", None, None, None, None, None).is_err());
         assert!(set_model_preview(&conn, "/nope", "/x.png").is_err());
+    }
+
+    #[test]
+    fn groups_collapse_variants_and_members_come_back_ordered() {
+        let mut conn = test_conn();
+        // one logical model, four variant dirs: 2 supports x 2 poses
+        let variant = |support: &str, pose: &str| ModelRow {
+            dir_path: format!("/lib/galeb duhr/{}/{}", support, pose),
+            name: format!("galeb duhr {}", pose),
+            description: None,
+            designer: None,
+            release_name: None,
+            preview_path: None,
+            source: "heuristic".into(),
+            uuid: None,
+            file_count: 2,
+            total_size_bytes: 100,
+            pose: Some(pose.into()),
+            scale: None,
+            support_status: Some(support.into()),
+            release_date: None,
+            group_name: Some("galeb duhr".into()),
+        };
+        let models = vec![
+            variant("unsupported", "B"),
+            variant("unsupported", "A"),
+            variant("supported", "A"),
+            variant("supported", "B"),
+        ];
+        replace_catalog(&mut conn, &[], &models, &[]).unwrap();
+
+        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        assert_eq!(page.total, 1, "four variants, one card");
+        let group = &page.groups[0];
+        assert_eq!(group.group_name, "galeb duhr");
+        assert_eq!(group.variant_count, 4);
+        assert_eq!(group.pose_count, 2);
+        assert_eq!(group.file_count, 8);
+        let mut supports = group.support_statuses.clone();
+        supports.sort();
+        assert_eq!(supports, vec!["supported", "unsupported"]);
+
+        // FTS still finds the group through any variant's name
+        let page = search_groups(&conn, "galeb", &[], 10, 0).unwrap();
+        assert_eq!(page.total, 1);
+
+        // members ordered: supported A, supported B, unsupported A, ...
+        let members = group_members(&conn, "GALEB DUHR").unwrap();
+        assert_eq!(members.len(), 4, "lookup is case-insensitive");
+        let order: Vec<_> = members
+            .iter()
+            .map(|m| (m.support_status.clone().unwrap(), m.pose.clone().unwrap()))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("supported".to_string(), "A".to_string()),
+                ("supported".to_string(), "B".to_string()),
+                ("unsupported".to_string(), "A".to_string()),
+                ("unsupported".to_string(), "B".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn group_renames_survive_rescans_and_merge_when_named_alike() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+
+        rename_group(&conn, "Giant Newt", "Stone Guardian").unwrap();
+        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        assert!(page.groups.iter().any(|g| g.group_name == "Stone Guardian"));
+        assert!(!page.groups.iter().any(|g| g.group_name == "Giant Newt"));
+
+        // findable by the new name, both in FTS and member lookup
+        assert_eq!(
+            search_groups(&conn, "guardian", &[], 10, 0).unwrap().total,
+            1
+        );
+        assert_eq!(group_members(&conn, "stone guardian").unwrap().len(), 1);
+
+        // a rescan keeps the rename (keyed on the scanner's group name)
+        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        assert_eq!(
+            search_groups(&conn, "guardian", &[], 10, 0).unwrap().total,
+            1
+        );
+
+        // renaming another group to the same display name merges them
+        rename_group(&conn, "Bugbear", "Stone Guardian").unwrap();
+        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        assert_eq!(page.total, 1, "two groups now share one card");
+        assert_eq!(group_members(&conn, "Stone Guardian").unwrap().len(), 2);
+
+        // empty name reverts every override displaying that name
+        rename_group(&conn, "Stone Guardian", "").unwrap();
+        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        assert_eq!(page.total, 2);
+        assert!(page.groups.iter().any(|g| g.group_name == "Giant Newt"));
+
+        assert!(rename_group(&conn, "no such group", "x").is_err());
     }
 
     #[test]

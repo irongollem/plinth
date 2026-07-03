@@ -152,6 +152,7 @@ mod tests {
             scale: None,
             support_status: None,
             release_date: None,
+            group_name: None,
         }];
         db::test_init(&conn);
         db::replace_catalog(&mut conn, &rows, &models, &[]).unwrap();
