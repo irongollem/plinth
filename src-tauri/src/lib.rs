@@ -7,11 +7,11 @@ mod render;
 mod settings;
 
 use catalog::commands::{
-    add_catalog_tag, batch_move_models, cancel_catalog_job, delete_duplicate_files,
-    get_catalog_group_members, get_catalog_model_files, get_catalog_releases, get_catalog_stats,
-    get_catalog_tags, get_duplicate_groups, remove_catalog_tag, rename_catalog_group,
-    search_catalog, search_catalog_groups, set_model_preview, start_catalog_scan,
-    start_duplicate_scan, update_model_metadata,
+    add_catalog_tag, batch_move_models, cancel_catalog_job, combine_catalog_groups,
+    delete_duplicate_files, get_catalog_group_members, get_catalog_model_files,
+    get_catalog_releases, get_catalog_stats, get_catalog_tags, get_duplicate_groups,
+    remove_catalog_tag, rename_catalog_group, search_catalog, search_catalog_groups,
+    set_model_preview, start_catalog_scan, start_duplicate_scan, update_model_metadata,
 };
 use file::commands::{add_model, cancel_compression, create_release, finalize_release};
 use models::events::{CompressionStatus, DuplicateStatus, RenderStatus, ScanStatus};
@@ -71,6 +71,7 @@ fn create_specta_builder() -> Builder {
             search_catalog_groups,
             get_catalog_group_members,
             rename_catalog_group,
+            combine_catalog_groups,
         ])
         .events(collect_events![
             CompressionStatus,

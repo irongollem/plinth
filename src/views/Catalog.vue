@@ -125,16 +125,52 @@
         }}
         selected
       </span>
-      <button type="button" class="btn btn-xs btn-primary" @click="moveChecked">
-        Move to folder…
-      </button>
-      <button
-        type="button"
-        class="btn btn-xs btn-ghost"
-        @click="checkedGroups = []"
+      <template v-if="!combining">
+        <button
+          type="button"
+          class="btn btn-xs btn-primary"
+          @click="moveChecked"
+        >
+          Move to folder…
+        </button>
+        <button
+          v-if="checkedGroups.length >= 2"
+          type="button"
+          class="btn btn-xs"
+          @click="startCombine"
+        >
+          Combine into one…
+        </button>
+        <button
+          type="button"
+          class="btn btn-xs btn-ghost"
+          @click="clearSelection"
+        >
+          clear
+        </button>
+      </template>
+      <form
+        v-else
+        class="flex items-center gap-1.5"
+        @submit.prevent="combineChecked"
       >
-        clear
-      </button>
+        <input
+          v-model="combineName"
+          type="text"
+          class="input input-xs font-mono w-48"
+          placeholder="combined model name"
+        />
+        <button type="submit" class="btn btn-xs btn-primary">
+          combine {{ checkedGroups.length }}
+        </button>
+        <button
+          type="button"
+          class="btn btn-xs btn-ghost"
+          @click="combining = false"
+        >
+          cancel
+        </button>
+      </form>
     </div>
 
     <!-- Content -->
@@ -237,293 +273,312 @@
         </div>
       </section>
 
-      <!-- Detail drawer -->
-      <aside v-if="selected" class="w-[312px] shrink-0 overflow-y-auto">
-        <!-- Picture area: preview image, or the 3D viewport inline when
-             toggled (no more full-screen overlay) -->
+      <!-- Detail drawer: keyed on the GROUP so switching cards swaps the
+           content in place — keying on the loaded entry unmounted the whole
+           drawer during the members fetch and the layout flashed -->
+      <aside v-if="selectedGroup" class="w-[312px] shrink-0 overflow-y-auto">
         <div
-          class="relative aspect-[4/3] rounded-box bg-base-300 border border-base-content/10 flex items-center justify-center text-base-content/30 overflow-hidden"
+          v-if="!selected"
+          class="h-40 flex items-center justify-center opacity-40"
         >
-          <StlViewport
-            v-if="show3d && stlPaths.length"
-            :parts="stlPaths"
-            compact
-          />
-          <img
-            v-else-if="selected.preview_path"
-            :src="convertFileSrc(selected.preview_path)"
-            :alt="selected.name"
-            class="w-full h-full object-cover"
-          />
-          <span v-else class="text-5xl">🗿</span>
-          <button
-            v-if="!show3d"
-            type="button"
-            class="absolute bottom-1.5 right-1.5 btn btn-xs bg-base-100/70"
-            @click="pickPreviewImage"
-          >
-            set image…
-          </button>
+          <span class="loading loading-spinner loading-sm"></span>
         </div>
-        <div class="py-3.5 flex flex-col gap-2.5">
-          <div>
-            <!-- Group title: the logical model; rename applies to the whole
-                 group and survives rescans -->
-            <div class="flex items-start gap-1.5">
-              <h2
-                v-if="!renamingGroup"
-                class="font-bold text-[16px] leading-tight flex-1"
-              >
-                {{ selectedGroup?.group_name ?? selected.name }}
-              </h2>
-              <form
-                v-else
-                class="flex-1 flex gap-1"
-                @submit.prevent="renameGroup"
-              >
-                <input
-                  v-model="groupNameDraft"
-                  type="text"
-                  class="input input-xs font-mono flex-1"
-                  placeholder="empty = folder name"
-                />
-                <button type="submit" class="btn btn-xs btn-primary">
-                  save
-                </button>
-              </form>
-              <button
-                v-if="!renamingGroup"
-                type="button"
-                class="text-xs opacity-40 hover:opacity-100 cursor-pointer"
-                title="Rename this model (all variants move with it; naming it like another model merges them)"
-                @click="startRenameGroup"
-              >
-                ✎
-              </button>
-            </div>
-            <p
-              v-if="selected.designer || selected.release_name"
-              class="font-mono text-[11px] text-base-content/50 mt-0.5"
-            >
-              {{
-                [selected.designer, selected.release_name]
-                  .filter(Boolean)
-                  .join(" · ")
-              }}
-            </p>
-            <button
-              type="button"
-              class="block max-w-full font-mono text-[10px] text-base-content/40 truncate mt-0.5 cursor-pointer hover:text-base-content/70"
-              :title="`${selected.dir_path} — click to reveal`"
-              @click="reveal(selected.dir_path)"
-            >
-              {{ displayPath }}
-            </button>
-          </div>
-
-          <!-- Variant navigation: supported/unsupported tabs, poses within -->
+        <template v-else>
+          <!-- Picture area: preview image, or the 3D viewport inline when
+             toggled (no more full-screen overlay) -->
           <div
-            v-if="supportTabs.length > 1"
-            class="flex bg-base-200 border border-base-content/10 rounded-lg p-0.5"
+            class="relative aspect-[4/3] rounded-box bg-base-300 border border-base-content/10 flex items-center justify-center text-base-content/30 overflow-hidden"
           >
+            <StlViewport
+              v-if="show3d && stlPaths.length"
+              :parts="stlPaths"
+              compact
+            />
+            <img
+              v-else-if="drawerPreview"
+              :src="convertFileSrc(drawerPreview)"
+              :alt="selected.name"
+              class="w-full h-full object-cover"
+            />
+            <span v-else class="text-5xl">🗿</span>
             <button
-              v-for="tab in supportTabs"
-              :key="tab"
+              v-if="!show3d"
               type="button"
-              class="flex-1 font-semibold text-[11px] px-2 py-1 rounded-md cursor-pointer"
-              :class="
-                activeSupport === tab
-                  ? 'bg-primary text-primary-content'
-                  : 'text-base-content/60'
-              "
-              @click="setSupportTab(tab)"
+              class="absolute bottom-1.5 right-1.5 btn btn-xs bg-base-100/70"
+              @click="pickPreviewImage"
             >
-              {{ tabLabel(tab) }}
+              set image…
+            </button>
+            <button
+              v-if="show3d"
+              type="button"
+              class="absolute top-1.5 right-1.5 btn btn-xs bg-base-100/70"
+              title="Open large viewer"
+              @click="show3dModal = true"
+            >
+              ⤢
             </button>
           </div>
-          <div v-if="tabMembers.length > 1" class="flex flex-wrap gap-1.5">
-            <button
-              v-for="member in tabMembers"
-              :key="member.dir_path"
-              type="button"
-              class="font-mono text-[11px] rounded-full px-2.5 py-1 border cursor-pointer"
-              :class="
-                member.dir_path === selected.dir_path
-                  ? 'bg-primary text-primary-content border-primary'
-                  : 'text-base-content/60 border-base-content/15'
-              "
-              @click="selectEntry(member)"
-            >
-              {{ member.pose ?? member.name }}
-            </button>
-          </div>
-
-          <div class="flex flex-wrap gap-1.5">
-            <span
-              v-for="tag in selected.tags"
-              :key="tag"
-              class="font-mono text-[10px] text-base-content/60 border border-base-content/15 rounded-full px-2.5 py-0.5 flex items-center gap-1"
-            >
-              {{ tag }}
+          <div class="py-3.5 flex flex-col gap-2.5">
+            <div>
+              <!-- Group title: the logical model; rename applies to the whole
+                 group and survives rescans -->
+              <div class="flex items-start gap-1.5">
+                <h2
+                  v-if="!renamingGroup"
+                  class="font-bold text-[16px] leading-tight flex-1"
+                >
+                  {{ selectedGroup?.group_name ?? selected.name }}
+                </h2>
+                <form
+                  v-else
+                  class="flex-1 flex gap-1"
+                  @submit.prevent="renameGroup"
+                >
+                  <input
+                    v-model="groupNameDraft"
+                    type="text"
+                    class="input input-xs font-mono flex-1"
+                    placeholder="empty = folder name"
+                  />
+                  <button type="submit" class="btn btn-xs btn-primary">
+                    save
+                  </button>
+                </form>
+                <button
+                  v-if="!renamingGroup"
+                  type="button"
+                  class="text-xs opacity-40 hover:opacity-100 cursor-pointer"
+                  title="Rename this model (all variants move with it; naming it like another model merges them)"
+                  @click="startRenameGroup"
+                >
+                  ✎
+                </button>
+              </div>
+              <p
+                v-if="selected.designer || selected.release_name"
+                class="font-mono text-[11px] text-base-content/50 mt-0.5"
+              >
+                {{
+                  [selected.designer, selected.release_name]
+                    .filter(Boolean)
+                    .join(" · ")
+                }}
+              </p>
               <button
                 type="button"
-                class="opacity-50 hover:opacity-100"
-                @click="removeTag(tag)"
+                class="block max-w-full font-mono text-[10px] text-base-content/40 truncate mt-0.5 cursor-pointer hover:text-base-content/70"
+                :title="`${selected.dir_path} — click to reveal`"
+                @click="reveal(selected.dir_path)"
               >
-                ✕
+                {{ displayPath }}
               </button>
-            </span>
-            <form class="join" @submit.prevent="addTag">
-              <input
-                v-model="newTag"
-                type="text"
-                class="input input-xs join-item w-24"
-                placeholder="+ tag"
-              />
-            </form>
-          </div>
+            </div>
 
-          <!-- Model details (pose/scale/supports/release date) -->
-          <div>
+            <!-- Variant navigation: supported/unsupported tabs, poses within -->
             <div
-              class="font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 mb-1.5"
+              v-if="supportTabs.length > 1"
+              class="flex bg-base-200 border border-base-content/10 rounded-lg p-0.5"
             >
-              DETAILS
+              <button
+                v-for="tab in supportTabs"
+                :key="tab"
+                type="button"
+                class="flex-1 font-semibold text-[11px] px-2 py-1 rounded-md cursor-pointer"
+                :class="
+                  activeSupport === tab
+                    ? 'bg-primary text-primary-content'
+                    : 'text-base-content/60'
+                "
+                @click="setSupportTab(tab)"
+              >
+                {{ tabLabel(tab) }}
+              </button>
             </div>
-            <div class="grid grid-cols-2 gap-1.5">
-              <label class="flex flex-col gap-0.5 col-span-2">
-                <span class="font-mono text-[9px] text-base-content/40"
-                  >NAME</span
-                >
-                <input
-                  v-model="metaDraft.name"
-                  type="text"
-                  class="input input-xs font-mono"
-                  placeholder="model name"
-                />
-              </label>
-              <label class="flex flex-col gap-0.5">
-                <span class="font-mono text-[9px] text-base-content/40"
-                  >POSE / VARIANT</span
-                >
-                <input
-                  v-model="metaDraft.pose"
-                  type="text"
-                  class="input input-xs font-mono"
-                  placeholder="e.g. A"
-                />
-              </label>
-              <label class="flex flex-col gap-0.5">
-                <span class="font-mono text-[9px] text-base-content/40"
-                  >SCALE</span
-                >
-                <input
-                  v-model="metaDraft.scale"
-                  type="text"
-                  class="input input-xs font-mono"
-                  placeholder="e.g. 32mm"
-                />
-              </label>
-              <label class="flex flex-col gap-0.5">
-                <span class="font-mono text-[9px] text-base-content/40"
-                  >SUPPORTS</span
-                >
-                <select
-                  v-model="metaDraft.support_status"
-                  class="select select-xs font-mono"
-                >
-                  <option value="">unknown</option>
-                  <option value="supported">supported</option>
-                  <option value="unsupported">unsupported</option>
-                  <option value="both">both</option>
-                </select>
-              </label>
-              <label class="flex flex-col gap-0.5">
-                <span class="font-mono text-[9px] text-base-content/40"
-                  >RELEASED</span
-                >
-                <input
-                  v-model="metaDraft.release_date"
-                  type="text"
-                  class="input input-xs font-mono"
-                  placeholder="YYYY-MM"
-                />
-              </label>
+            <div v-if="tabMembers.length > 1" class="flex flex-wrap gap-1.5">
+              <button
+                v-for="member in tabMembers"
+                :key="member.dir_path"
+                type="button"
+                class="font-mono text-[11px] rounded-full px-2.5 py-1 border cursor-pointer"
+                :class="
+                  member.dir_path === selected.dir_path
+                    ? 'bg-primary text-primary-content border-primary'
+                    : 'text-base-content/60 border-base-content/15'
+                "
+                @click="selectEntry(member)"
+              >
+                {{ member.pose ?? member.name }}
+              </button>
             </div>
-            <button
-              v-if="metaDirty"
-              type="button"
-              class="btn btn-xs btn-primary w-full mt-1.5"
-              @click="saveMetadata"
-            >
-              Save details
-            </button>
-          </div>
 
-          <div class="flex gap-1.5">
+            <div class="flex flex-wrap gap-1.5">
+              <span
+                v-for="tag in selected.tags"
+                :key="tag"
+                class="font-mono text-[10px] text-base-content/60 border border-base-content/15 rounded-full px-2.5 py-0.5 flex items-center gap-1"
+              >
+                {{ tag }}
+                <button
+                  type="button"
+                  class="opacity-50 hover:opacity-100"
+                  @click="removeTag(tag)"
+                >
+                  ✕
+                </button>
+              </span>
+              <form class="join" @submit.prevent="addTag">
+                <input
+                  v-model="newTag"
+                  type="text"
+                  class="input input-xs join-item w-24"
+                  placeholder="+ tag"
+                />
+              </form>
+            </div>
+
+            <!-- Model details (pose/scale/supports/release date) -->
+            <div>
+              <div
+                class="font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 mb-1.5"
+              >
+                DETAILS
+              </div>
+              <div class="grid grid-cols-2 gap-1.5">
+                <label class="flex flex-col gap-0.5 col-span-2">
+                  <span class="font-mono text-[9px] text-base-content/40"
+                    >NAME</span
+                  >
+                  <input
+                    v-model="metaDraft.name"
+                    type="text"
+                    class="input input-xs font-mono"
+                    placeholder="model name"
+                  />
+                </label>
+                <label class="flex flex-col gap-0.5">
+                  <span class="font-mono text-[9px] text-base-content/40"
+                    >POSE / VARIANT</span
+                  >
+                  <input
+                    v-model="metaDraft.pose"
+                    type="text"
+                    class="input input-xs font-mono"
+                    placeholder="e.g. A"
+                  />
+                </label>
+                <label class="flex flex-col gap-0.5">
+                  <span class="font-mono text-[9px] text-base-content/40"
+                    >SCALE</span
+                  >
+                  <input
+                    v-model="metaDraft.scale"
+                    type="text"
+                    class="input input-xs font-mono"
+                    placeholder="e.g. 32mm"
+                  />
+                </label>
+                <label class="flex flex-col gap-0.5">
+                  <span class="font-mono text-[9px] text-base-content/40"
+                    >SUPPORTS</span
+                  >
+                  <select
+                    v-model="metaDraft.support_status"
+                    class="select select-xs font-mono"
+                  >
+                    <option value="">unknown</option>
+                    <option value="supported">supported</option>
+                    <option value="unsupported">unsupported</option>
+                    <option value="both">both</option>
+                  </select>
+                </label>
+                <label class="flex flex-col gap-0.5">
+                  <span class="font-mono text-[9px] text-base-content/40"
+                    >RELEASED</span
+                  >
+                  <input
+                    v-model="metaDraft.release_date"
+                    type="text"
+                    class="input input-xs font-mono"
+                    placeholder="YYYY-MM"
+                  />
+                </label>
+              </div>
+              <button
+                v-if="metaDirty"
+                type="button"
+                class="btn btn-xs btn-primary w-full mt-1.5"
+                @click="saveMetadata"
+              >
+                Save details
+              </button>
+            </div>
+
+            <div class="flex gap-1.5">
+              <button
+                type="button"
+                class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] bg-primary text-primary-content rounded-md py-2 cursor-pointer"
+                @click="printModel"
+              >
+                PRINT
+              </button>
+              <button
+                type="button"
+                class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] border rounded-md py-2 cursor-pointer disabled:opacity-40"
+                :class="
+                  show3d
+                    ? 'border-primary text-primary'
+                    : 'border-base-content/15'
+                "
+                :disabled="!stlPaths.length"
+                @click="show3d = !show3d"
+              >
+                3D
+              </button>
+              <button
+                type="button"
+                class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] border border-base-content/15 rounded-md py-2 cursor-pointer disabled:opacity-40"
+                :disabled="!stlPaths.length"
+                @click="renderSelected"
+              >
+                RENDER
+              </button>
+            </div>
+
             <button
               type="button"
-              class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] bg-primary text-primary-content rounded-md py-2 cursor-pointer"
-              @click="printModel"
-            >
-              PRINT
-            </button>
-            <button
-              type="button"
-              class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] border rounded-md py-2 cursor-pointer disabled:opacity-40"
+              class="font-semibold text-[11px] tracking-[0.03em] text-center border border-dashed rounded-md py-2 cursor-pointer"
               :class="
-                show3d
-                  ? 'border-primary text-primary'
-                  : 'border-base-content/15'
+                releasesStore.releaseExists
+                  ? 'border-base-content/25 text-primary'
+                  : 'border-base-content/15 text-base-content/40'
               "
-              :disabled="!stlPaths.length"
-              @click="show3d = !show3d"
+              @click="addToDraftRelease"
             >
-              3D
+              + Add to draft release
             </button>
-            <button
-              type="button"
-              class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] border border-base-content/15 rounded-md py-2 cursor-pointer disabled:opacity-40"
-              :disabled="!stlPaths.length"
-              @click="releasesStore.requestRender(stlPaths, selected.dir_path)"
-            >
-              RENDER
-            </button>
-          </div>
 
-          <button
-            type="button"
-            class="font-semibold text-[11px] tracking-[0.03em] text-center border border-dashed rounded-md py-2 cursor-pointer"
-            :class="
-              releasesStore.releaseExists
-                ? 'border-base-content/25 text-primary'
-                : 'border-base-content/15 text-base-content/40'
-            "
-            @click="addToDraftRelease"
-          >
-            + Add to draft release
-          </button>
-
-          <div>
-            <div
-              class="font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 mb-1.5"
-            >
-              FILES · {{ formatFileSize(selected.total_size_bytes) }}
-            </div>
-            <div
-              v-for="file in files"
-              :key="file.path"
-              class="flex justify-between font-mono text-[11px] text-base-content/60 py-0.5"
-            >
-              <span class="truncate" :title="file.path">{{
-                file.file_name
-              }}</span>
-              <span class="opacity-60 shrink-0">{{
-                formatFileSize(file.size_bytes)
-              }}</span>
+            <div>
+              <div
+                class="font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 mb-1.5"
+              >
+                FILES · {{ formatFileSize(selected.total_size_bytes) }}
+              </div>
+              <div
+                v-for="file in files"
+                :key="file.path"
+                class="flex justify-between font-mono text-[11px] text-base-content/60 py-0.5"
+              >
+                <span class="truncate" :title="file.path">{{
+                  file.file_name
+                }}</span>
+                <span class="opacity-60 shrink-0">{{
+                  formatFileSize(file.size_bytes)
+                }}</span>
+              </div>
             </div>
           </div>
-        </div>
+        </template>
       </aside>
     </div>
 
@@ -617,6 +672,13 @@
         </ul>
       </div>
     </div>
+
+    <!-- Large 3D viewer, opened from the drawer's ⤢ button -->
+    <ModalView :is-open="show3dModal" @close="show3dModal = false">
+      <div class="w-[70vw] h-[70vh] bg-base-300 rounded-box">
+        <StlViewport v-if="show3dModal" :parts="stlPaths" />
+      </div>
+    </ModalView>
   </main>
 </template>
 
@@ -635,6 +697,7 @@ import {
   commands,
 } from "../bindings";
 import CatalogCard from "../components/CatalogCard.vue";
+import ModalView from "../components/ModalView.vue";
 import StlViewport from "../components/StlViewport.vue";
 import { useCatalogJobs } from "../composables/useCatalogJobs";
 import { useFileSelect } from "../composables/useFileSelect";
@@ -683,10 +746,13 @@ const show3d = ref(false);
 // per-group hash -> path the user wants to keep (defaults to the first)
 const keepChoice = ref<Record<string, string>>({});
 const reclaimBusy = ref(false);
-// group names ticked for a batch move
+// group names ticked for a batch move or combine
 const checkedGroups = ref<string[]>([]);
+const combining = ref(false);
+const combineName = ref("");
 const renamingGroup = ref(false);
 const groupNameDraft = ref("");
+const show3dModal = ref(false);
 const metaDraft = ref({
   name: "",
   pose: "",
@@ -911,6 +977,13 @@ const refreshSelected = async () => {
   if (updated) selected.value = updated;
 };
 
+// Carries the model's dir_path so the finished render comes back as this
+// pose's catalog preview
+const renderSelected = () => {
+  if (!selected.value) return;
+  releasesStore.requestRender(stlPaths.value, selected.value.dir_path);
+};
+
 const printModel = async () => {
   if (!selected.value) return;
   // Reveal the first model file so the folder opens with it selected,
@@ -969,6 +1042,56 @@ const toggleCheckedGroup = (groupName: string) => {
     ? checkedGroups.value.filter((g) => g !== groupName)
     : [...checkedGroups.value, groupName];
 };
+
+const clearSelection = () => {
+  checkedGroups.value = [];
+  combining.value = false;
+};
+
+const startCombine = () => {
+  combineName.value = checkedGroups.value[0] ?? "";
+  combining.value = true;
+};
+
+// The manual counterpart to folder inference: creators structure their
+// libraries every which way, so combining can never depend on the scanner
+// having guessed right — pick the cards, give them one name.
+const combineChecked = async () => {
+  const names = [...checkedGroups.value];
+  const target = combineName.value.trim();
+  if (!target || names.length < 2) return;
+  const result = await commands.combineCatalogGroups(names, target);
+  combining.value = false;
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to combine models", result.error);
+    return;
+  }
+  toastStore.addToast(
+    `Combined ${names.length} models into "${target}"`,
+    "success",
+  );
+  checkedGroups.value = [];
+  await Promise.all([runSearch(), refreshMeta()]);
+  const merged = groups.value.find(
+    (g) => g.group_name.toLowerCase() === target.toLowerCase(),
+  );
+  if (merged) await selectGroup(merged);
+};
+
+// The selected pose's own image, else the SAME pose from another support
+// variant — nobody renders the supported copy separately, so supported/
+// unsupported share pictures automatically. Sharing stops at the pose
+// boundary: pose B never borrows pose A's picture, they're different minis.
+const drawerPreview = computed(() => {
+  const entry = selected.value;
+  if (!entry) return null;
+  if (entry.preview_path) return entry.preview_path;
+  const poseKey = entry.pose ?? entry.name;
+  return (
+    members.value.find((m) => m.preview_path && (m.pose ?? m.name) === poseKey)
+      ?.preview_path ?? null
+  );
+});
 
 const moveChecked = async () => {
   const dest = await selectDirectory({ title: "Move selected models into…" });

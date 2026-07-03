@@ -574,6 +574,25 @@ pub fn group_members(conn: &Connection, group_name: &str) -> Result<Vec<CatalogE
     Ok(entries)
 }
 
+/// Map every scanner-level source group currently SHOWN as `group_name`
+/// to display as `new_name`. Returns how many mappings were written.
+fn upsert_group_rename(
+    conn: &Connection,
+    group_name: &str,
+    new_name: &str,
+) -> Result<usize, rusqlite::Error> {
+    conn.execute(
+        "INSERT INTO group_renames (source_group, display_name)
+         SELECT DISTINCT COALESCE(m.group_name, m.name), ?2
+         FROM models m
+         LEFT JOIN group_renames r
+             ON r.source_group = COALESCE(m.group_name, m.name)
+         WHERE lower(COALESCE(r.display_name, m.group_name, m.name)) = lower(?1)
+         ON CONFLICT(source_group) DO UPDATE SET display_name = excluded.display_name",
+        params![group_name, new_name],
+    )
+}
+
 /// Rename the group shown as `group_name` to `new_name` — stored against
 /// the scanner-level source groups so it survives rescans. An empty
 /// new_name clears the override(s), reverting to the folder-derived name.
@@ -589,18 +608,7 @@ pub fn rename_group(conn: &Connection, group_name: &str, new_name: &str) -> Resu
         )
         .map_err(map_err)?;
     } else {
-        let changed = conn
-            .execute(
-                "INSERT INTO group_renames (source_group, display_name)
-                 SELECT DISTINCT COALESCE(m.group_name, m.name), ?2
-                 FROM models m
-                 LEFT JOIN group_renames r
-                     ON r.source_group = COALESCE(m.group_name, m.name)
-                 WHERE lower(COALESCE(r.display_name, m.group_name, m.name)) = lower(?1)
-                 ON CONFLICT(source_group) DO UPDATE SET display_name = excluded.display_name",
-                params![group_name, new_name],
-            )
-            .map_err(map_err)?;
+        let changed = upsert_group_rename(conn, group_name, new_name).map_err(map_err)?;
         if changed == 0 {
             return Err(AppError::NotFoundError(format!(
                 "No catalog group named '{}'",
@@ -610,6 +618,39 @@ pub fn rename_group(conn: &Connection, group_name: &str, new_name: &str) -> Resu
     }
     // renamed groups must be findable by their new name
     rebuild_fts(conn).map_err(map_err)?;
+    Ok(())
+}
+
+/// The explicit merge tool: map every listed group onto one display name.
+/// This is rename_group's merge behavior made first-class — folder
+/// inference only groups what a creator's structure happens to encode,
+/// and every creator structures differently, so combining must never
+/// DEPEND on inference. One transaction, one FTS rebuild.
+pub fn combine_groups(
+    conn: &mut Connection,
+    group_names: &[String],
+    target_name: &str,
+) -> Result<(), AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Group combine failed: {}", e));
+    let target_name = target_name.trim();
+    if target_name.is_empty() {
+        return Err(AppError::InvalidInput(
+            "A combined model needs a name".to_string(),
+        ));
+    }
+    let tx = conn.transaction().map_err(map_err)?;
+    let mut changed = 0;
+    for group_name in group_names {
+        changed += upsert_group_rename(&tx, group_name, target_name).map_err(map_err)?;
+    }
+    if changed == 0 {
+        return Err(AppError::NotFoundError(
+            "None of the selected groups exist anymore".to_string(),
+        ));
+    }
+    rebuild_fts(&tx).map_err(map_err)?;
+    tx.commit().map_err(map_err)?;
     Ok(())
 }
 
@@ -1423,6 +1464,33 @@ mod tests {
         assert!(page.groups.iter().any(|g| g.group_name == "Giant Newt"));
 
         assert!(rename_group(&conn, "no such group", "x").is_err());
+    }
+
+    #[test]
+    fn combine_groups_merges_selected_under_one_name() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+
+        combine_groups(
+            &mut conn,
+            &["Giant Newt".to_string(), "Bugbear".to_string()],
+            "Dungeon Denizens",
+        )
+        .unwrap();
+
+        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.groups[0].group_name, "Dungeon Denizens");
+        assert_eq!(group_members(&conn, "Dungeon Denizens").unwrap().len(), 2);
+        // findable by the combined name
+        assert_eq!(
+            search_groups(&conn, "denizens", &[], 10, 0).unwrap().total,
+            1
+        );
+
+        assert!(combine_groups(&mut conn, &["Dungeon Denizens".to_string()], "  ").is_err());
+        assert!(combine_groups(&mut conn, &["ghost".to_string()], "x").is_err());
     }
 
     #[test]

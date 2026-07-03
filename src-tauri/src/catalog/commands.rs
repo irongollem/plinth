@@ -298,6 +298,21 @@ pub async fn rename_catalog_group(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn combine_catalog_groups(
+    app_handle: AppHandle,
+    group_names: Vec<String>,
+    target_name: String,
+) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = open_db(&app_handle)?;
+        db::combine_groups(&mut conn, &group_names, &target_name)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Group combine task failed: {}", e)))?
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn get_catalog_tags(app_handle: AppHandle) -> Result<Vec<TagCount>, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
