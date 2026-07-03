@@ -370,3 +370,44 @@ pub async fn delete_duplicate_files(file_paths: Vec<String>) -> Result<u32, AppE
     .await
     .map_err(|e| AppError::ConfigError(format!("File deletion task failed: {}", e)))?
 }
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub struct MoveOperation {
+    pub from: String,
+    pub to: String,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn batch_move_models(operations: Vec<MoveOperation>) -> Result<(u32, Vec<String>), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut successful = 0u32;
+        let mut errors: Vec<String> = Vec::new();
+
+        for op in operations {
+            let from_path = PathBuf::from(&op.from);
+            let to_path = PathBuf::from(&op.to);
+
+            if !from_path.exists() {
+                errors.push(format!("Source not found: {}", op.from));
+                continue;
+            }
+
+            if let Some(parent) = to_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    errors.push(format!("Failed to create parent dirs for {}: {}", op.to, e));
+                    continue;
+                }
+            }
+
+            match std::fs::rename(&from_path, &to_path) {
+                Ok(_) => successful += 1,
+                Err(e) => errors.push(format!("Failed to move {} to {}: {}", op.from, op.to, e)),
+            }
+        }
+
+        Ok((successful, errors))
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Batch move task failed: {}", e)))?
+}
