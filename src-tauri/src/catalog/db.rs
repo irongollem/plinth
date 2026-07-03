@@ -7,7 +7,7 @@ use super::{
     ReleaseSummary,
 };
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Open (and if needed initialize) the catalog database.
 pub fn open(db_path: &Path) -> Result<Connection, AppError> {
@@ -77,6 +77,21 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        -- User-editable metadata lives OUTSIDE models on purpose: rescans
+        -- rebuild models wholesale (replace_catalog), and anything stored
+        -- there is lost. Keyed by dir_path like model_tags, surviving the
+        -- same way. Scanner-inferred values stay in models; a row here
+        -- overrides them (COALESCE in search).
+        CREATE TABLE IF NOT EXISTS model_user_meta (
+            dir_path       TEXT PRIMARY KEY,
+            custom_name    TEXT,
+            pose           TEXT,
+            scale          TEXT,
+            support_status TEXT,
+            release_date   TEXT,
+            preview_path   TEXT
+        );
         "#,
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to init catalog schema: {}", e)))?;
@@ -100,6 +115,21 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
                 }
             }
         }
+    }
+
+    // v3: rescue metadata that v2 stored in models — those values were
+    // silently wiped by every rescan, so anything a user typed in a v2 build
+    // moves to the rescan-safe table before it can be lost again
+    if version < 3 {
+        conn.execute(
+            "INSERT OR IGNORE INTO model_user_meta
+                 (dir_path, pose, scale, support_status, release_date)
+             SELECT dir_path, pose, scale, support_status, release_date FROM models
+             WHERE pose IS NOT NULL OR scale IS NOT NULL
+                OR support_status IS NOT NULL OR release_date IS NOT NULL",
+            [],
+        )
+        .map_err(|e| AppError::ConfigError(format!("Failed to migrate user metadata: {}", e)))?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -212,9 +242,16 @@ pub fn replace_catalog(
         }
         drop(insert_tag);
 
-        // Drop user tags whose model no longer exists on disk
+        // Drop user tags and user metadata whose model no longer exists on
+        // disk — both tables are keyed by dir_path and survive rescans
         tx.execute(
             "DELETE FROM model_tags
+             WHERE dir_path NOT IN (SELECT dir_path FROM models)",
+            [],
+        )
+        .map_err(map_err)?;
+        tx.execute(
+            "DELETE FROM model_user_meta
              WHERE dir_path NOT IN (SELECT dir_path FROM models)",
             [],
         )
@@ -237,28 +274,29 @@ fn rebuild_fts(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute("DELETE FROM models_fts", [])?;
     conn.execute(
         "INSERT INTO models_fts (name, description, tags, dir_path)
-         SELECT m.name,
+         SELECT COALESCE(u.custom_name, m.name),
                 COALESCE(m.description, ''),
                 COALESCE((SELECT group_concat(t.tag, ' ') FROM model_tags t
                           WHERE t.dir_path = m.dir_path), ''),
                 m.dir_path
-         FROM models m",
+         FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path",
         [],
     )?;
     Ok(())
 }
 
-/// Refresh the FTS row for one model after a tag change.
+/// Refresh the FTS row for one model after a tag or user-meta change.
 fn refresh_fts_row(conn: &Connection, dir_path: &str) -> Result<(), rusqlite::Error> {
     conn.execute("DELETE FROM models_fts WHERE dir_path = ?1", [dir_path])?;
     conn.execute(
         "INSERT INTO models_fts (name, description, tags, dir_path)
-         SELECT m.name,
+         SELECT COALESCE(u.custom_name, m.name),
                 COALESCE(m.description, ''),
                 COALESCE((SELECT group_concat(t.tag, ' ') FROM model_tags t
                           WHERE t.dir_path = m.dir_path), ''),
                 m.dir_path
-         FROM models m WHERE m.dir_path = ?1",
+         FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
+         WHERE m.dir_path = ?1",
         [dir_path],
     )?;
     Ok(())
@@ -320,14 +358,21 @@ pub fn search(
         )
         .map_err(map_err)?;
 
+    // name/preview/details resolve user overrides over scanner values;
+    // custom_name additionally travels raw so the UI can tell an override
+    // apart from an inferred name (and clear it to revert)
     let sql = format!(
-        "SELECT m.dir_path, m.name, m.description, m.designer, m.release_name,
-                m.preview_path, m.file_count, m.total_size_bytes,
+        "SELECT m.dir_path, COALESCE(u.custom_name, m.name), m.description, m.designer,
+                m.release_name, COALESCE(u.preview_path, m.preview_path),
+                m.file_count, m.total_size_bytes,
                 COALESCE((SELECT group_concat(t.tag, char(31)) FROM model_tags t
                           WHERE t.dir_path = m.dir_path), ''),
-                m.pose, m.scale, m.support_status, m.release_date
-         FROM models m {}
-         ORDER BY m.name COLLATE NOCASE
+                COALESCE(u.pose, m.pose), COALESCE(u.scale, m.scale),
+                COALESCE(u.support_status, m.support_status),
+                COALESCE(u.release_date, m.release_date),
+                u.custom_name
+         FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path {}
+         ORDER BY COALESCE(u.custom_name, m.name) COLLATE NOCASE
          LIMIT {} OFFSET {}",
         where_sql, limit, offset
     );
@@ -354,6 +399,7 @@ pub fn search(
                 scale: row.get(10)?,
                 support_status: row.get(11)?,
                 release_date: row.get(12)?,
+                custom_name: row.get(13)?,
             })
         })
         .map_err(map_err)?
@@ -582,27 +628,67 @@ pub fn list_releases(conn: &Connection) -> Result<Vec<ReleaseSummary>, AppError>
     Ok(releases)
 }
 
-pub fn update_model_metadata(
+fn require_model(conn: &Connection, dir_path: &str) -> Result<(), AppError> {
+    conn.query_row(
+        "SELECT 1 FROM models WHERE dir_path = ?1",
+        [dir_path],
+        |_| Ok(()),
+    )
+    .map_err(|_| AppError::NotFoundError(format!("No cataloged model at '{}'", dir_path)))
+}
+
+/// Upsert the user-editable fields (rescan-safe, see model_user_meta).
+/// A None custom_name clears the override, reverting to the scanner name.
+pub fn update_model_user_meta(
     conn: &Connection,
     dir_path: &str,
+    custom_name: Option<String>,
     pose: Option<String>,
     scale: Option<String>,
     support_status: Option<String>,
     release_date: Option<String>,
 ) -> Result<(), AppError> {
-    let changed = conn
-        .execute(
-            "UPDATE models SET pose = ?1, scale = ?2, support_status = ?3, release_date = ?4
-             WHERE dir_path = ?5",
-            params![pose, scale, support_status, release_date, dir_path],
-        )
-        .map_err(|e| AppError::ConfigError(format!("Failed to update metadata: {}", e)))?;
-    if changed == 0 {
-        return Err(AppError::NotFoundError(format!(
-            "No cataloged model at '{}'",
-            dir_path
-        )));
-    }
+    require_model(conn, dir_path)?;
+    conn.execute(
+        "INSERT INTO model_user_meta
+             (dir_path, custom_name, pose, scale, support_status, release_date)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(dir_path) DO UPDATE SET
+             custom_name = excluded.custom_name,
+             pose = excluded.pose,
+             scale = excluded.scale,
+             support_status = excluded.support_status,
+             release_date = excluded.release_date",
+        params![
+            dir_path,
+            custom_name,
+            pose,
+            scale,
+            support_status,
+            release_date
+        ],
+    )
+    .map_err(|e| AppError::ConfigError(format!("Failed to update metadata: {}", e)))?;
+    // custom_name feeds search — keep the FTS row in step
+    refresh_fts_row(conn, dir_path)
+        .map_err(|e| AppError::ConfigError(format!("Failed to update search index: {}", e)))?;
+    Ok(())
+}
+
+/// Point a model at a user-chosen or rendered preview image. Stored in
+/// model_user_meta so it survives rescans and beats the scanner's pick.
+pub fn set_model_preview(
+    conn: &Connection,
+    dir_path: &str,
+    preview_path: &str,
+) -> Result<(), AppError> {
+    require_model(conn, dir_path)?;
+    conn.execute(
+        "INSERT INTO model_user_meta (dir_path, preview_path) VALUES (?1, ?2)
+         ON CONFLICT(dir_path) DO UPDATE SET preview_path = excluded.preview_path",
+        params![dir_path, preview_path],
+    )
+    .map_err(|e| AppError::ConfigError(format!("Failed to set preview: {}", e)))?;
     Ok(())
 }
 
@@ -686,6 +772,13 @@ pub fn move_model(conn: &mut Connection, from: &str, to: &str) -> Result<(), App
         )
         .map_err(map_err)?;
         tx.execute("DELETE FROM model_tags WHERE dir_path = ?1", [from])
+            .map_err(map_err)?;
+        tx.execute(
+            "UPDATE OR IGNORE model_user_meta SET dir_path = ?2 WHERE dir_path = ?1",
+            params![from, to],
+        )
+        .map_err(map_err)?;
+        tx.execute("DELETE FROM model_user_meta WHERE dir_path = ?1", [from])
             .map_err(map_err)?;
 
         tx.execute("DELETE FROM models_fts WHERE dir_path = ?1", [from])
@@ -945,25 +1038,72 @@ mod tests {
     }
 
     #[test]
-    fn update_model_metadata_rejects_unknown_model() {
+    fn user_meta_edits_survive_rescan_and_reject_unknown_models() {
         let mut conn = test_conn();
         let (files, models, tags) = sample_rows();
         replace_catalog(&mut conn, &files, &models, &tags).unwrap();
 
-        update_model_metadata(
+        update_model_user_meta(
             &conn,
             "/lib/newt",
+            Some("Newt, Giant (repose)".into()),
             Some("A".into()),
             Some("32mm".into()),
             Some("supported".into()),
             None,
         )
         .unwrap();
-        let page = search(&conn, "newt", &[], 10, 0).unwrap();
-        assert_eq!(page.entries[0].pose.as_deref(), Some("A"));
-        assert_eq!(page.entries[0].scale.as_deref(), Some("32mm"));
+        set_model_preview(&conn, "/lib/newt", "/appdata/previews/abc.png").unwrap();
 
-        assert!(update_model_metadata(&conn, "/nope", None, None, None, None).is_err());
+        // the whole point of model_user_meta: a full rescan keeps user edits
+        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        let page = search(&conn, "repose", &[], 10, 0).unwrap();
+        assert_eq!(page.total, 1, "custom name is searchable after rescan");
+        let entry = &page.entries[0];
+        assert_eq!(entry.name, "Newt, Giant (repose)");
+        assert_eq!(entry.custom_name.as_deref(), Some("Newt, Giant (repose)"));
+        assert_eq!(entry.pose.as_deref(), Some("A"));
+        assert_eq!(entry.scale.as_deref(), Some("32mm"));
+        assert_eq!(
+            entry.preview_path.as_deref(),
+            Some("/appdata/previews/abc.png")
+        );
+
+        // clearing the override reverts to the scanner name
+        update_model_user_meta(&conn, "/lib/newt", None, None, None, None, None).unwrap();
+        let page = search(&conn, "newt", &[], 10, 0).unwrap();
+        assert_eq!(page.entries[0].name, "Giant Newt");
+        // ...but the preview set separately is untouched by a metadata save
+        assert_eq!(
+            page.entries[0].preview_path.as_deref(),
+            Some("/appdata/previews/abc.png")
+        );
+
+        assert!(update_model_user_meta(&conn, "/nope", None, None, None, None, None).is_err());
+        assert!(set_model_preview(&conn, "/nope", "/x.png").is_err());
+    }
+
+    #[test]
+    fn user_meta_follows_a_model_move() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        update_model_user_meta(
+            &conn,
+            "/lib/newt",
+            Some("Shiny Newt".into()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        move_model(&mut conn, "/lib/newt", "/lib/amphibians/newt").unwrap();
+
+        let page = search(&conn, "shiny", &[], 10, 0).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.entries[0].dir_path, "/lib/amphibians/newt");
     }
 
     #[test]

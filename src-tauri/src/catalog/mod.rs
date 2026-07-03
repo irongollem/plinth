@@ -46,6 +46,9 @@ pub struct ModelRow {
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
 pub struct CatalogEntry {
     pub dir_path: String,
+    /// Effective display name: the user's custom_name when set, else the
+    /// scanner's. custom_name below carries the raw override so the UI can
+    /// distinguish "renamed" from "inferred" (and clear it to revert).
     pub name: String,
     pub description: Option<String>,
     pub designer: Option<String>,
@@ -58,6 +61,7 @@ pub struct CatalogEntry {
     pub scale: Option<String>,
     pub support_status: Option<String>,
     pub release_date: Option<String>,
+    pub custom_name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

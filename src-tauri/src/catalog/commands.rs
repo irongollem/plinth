@@ -342,6 +342,7 @@ pub async fn get_catalog_releases(app_handle: AppHandle) -> Result<Vec<ReleaseSu
 pub async fn update_model_metadata(
     app_handle: AppHandle,
     dir_path: String,
+    custom_name: Option<String>,
     pose: Option<String>,
     scale: Option<String>,
     support_status: Option<String>,
@@ -349,10 +350,80 @@ pub async fn update_model_metadata(
 ) -> Result<(), AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
-        db::update_model_metadata(&conn, &dir_path, pose, scale, support_status, release_date)
+        db::update_model_user_meta(
+            &conn,
+            &dir_path,
+            custom_name,
+            pose,
+            scale,
+            support_status,
+            release_date,
+        )
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Metadata update failed: {}", e)))?
+}
+
+/// Copy an image into the app's previews dir and point the model at it.
+/// The copy (not a reference) is deliberate: render outputs and picked
+/// images live wherever the user left them and may be cleaned up; the
+/// catalog preview must not die with them. The filename is a stable
+/// per-model hash plus a timestamp — a fresh URL each time, because the
+/// webview caches aggressively by URL, with older copies swept first.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_model_preview(
+    app_handle: AppHandle,
+    dir_path: String,
+    image_path: String,
+) -> Result<String, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if !Path::new(&image_path).is_file() {
+            return Err(AppError::NotFoundError(format!(
+                "Image not found: {}",
+                image_path
+            )));
+        }
+        let previews_dir = app_handle
+            .path()
+            .app_data_dir()
+            .map_err(|e| AppError::ConfigError(format!("No app data dir: {}", e)))?
+            .join("previews");
+        std::fs::create_dir_all(&previews_dir)
+            .map_err(|e| AppError::IoError(format!("Failed to create previews dir: {}", e)))?;
+
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        dir_path.hash(&mut hasher);
+        let prefix = format!("{:016x}", hasher.finish());
+
+        if let Ok(entries) = std::fs::read_dir(&previews_dir) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                    std::fs::remove_file(entry.path()).ok();
+                }
+            }
+        }
+
+        let extension = Path::new(&image_path)
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_else(|| "png".to_string());
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let dest = previews_dir.join(format!("{}-{}.{}", prefix, stamp, extension));
+        std::fs::copy(&image_path, &dest)
+            .map_err(|e| AppError::IoError(format!("Failed to copy preview: {}", e)))?;
+
+        let dest_str = dest.to_string_lossy().into_owned();
+        let conn = open_db(&app_handle)?;
+        db::set_model_preview(&conn, &dir_path, &dest_str)?;
+        Ok(dest_str)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Preview task failed: {}", e)))?
 }
 
 #[tauri::command]
