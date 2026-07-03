@@ -222,7 +222,9 @@
             :key="entry.dir_path"
             :entry="entry"
             :selected="entry.dir_path === selected?.dir_path"
+            :checked="checkedDirs.includes(entry.dir_path)"
             @select="selectEntry"
+            @toggle-check="toggleChecked($event.dir_path)"
           />
         </div>
 
@@ -235,16 +237,31 @@
 
       <!-- Detail drawer -->
       <aside v-if="selected" class="w-[312px] shrink-0 overflow-y-auto">
+        <!-- Picture area: preview image, or the 3D viewport inline when
+             toggled (no more full-screen overlay) -->
         <div
-          class="aspect-[4/3] rounded-box bg-base-300 border border-base-content/10 flex items-center justify-center text-base-content/30 overflow-hidden"
+          class="relative aspect-[4/3] rounded-box bg-base-300 border border-base-content/10 flex items-center justify-center text-base-content/30 overflow-hidden"
         >
+          <StlViewport
+            v-if="show3d && stlPaths.length"
+            :parts="stlPaths"
+            compact
+          />
           <img
-            v-if="selected.preview_path"
+            v-else-if="selected.preview_path"
             :src="convertFileSrc(selected.preview_path)"
             :alt="selected.name"
             class="w-full h-full object-cover"
           />
           <span v-else class="text-5xl">🗿</span>
+          <button
+            v-if="!show3d"
+            type="button"
+            class="absolute bottom-1.5 right-1.5 btn btn-xs bg-base-100/70"
+            @click="pickPreviewImage"
+          >
+            set image…
+          </button>
         </div>
         <div class="py-3.5 flex flex-col gap-2.5">
           <div>
@@ -261,6 +278,14 @@
                   .join(" · ")
               }}
             </p>
+            <button
+              type="button"
+              class="block max-w-full font-mono text-[10px] text-base-content/40 truncate mt-0.5 cursor-pointer hover:text-base-content/70"
+              :title="`${selected.dir_path} — click to reveal`"
+              @click="reveal(selected.dir_path)"
+            >
+              {{ displayPath }}
+            </button>
           </div>
 
           <div class="flex flex-wrap gap-1.5">
@@ -296,6 +321,17 @@
               DETAILS
             </div>
             <div class="grid grid-cols-2 gap-1.5">
+              <label class="flex flex-col gap-0.5 col-span-2">
+                <span class="font-mono text-[9px] text-base-content/40"
+                  >NAME</span
+                >
+                <input
+                  v-model="metaDraft.name"
+                  type="text"
+                  class="input input-xs font-mono"
+                  placeholder="model name"
+                />
+              </label>
               <label class="flex flex-col gap-0.5">
                 <span class="font-mono text-[9px] text-base-content/40"
                   >POSE / VARIANT</span
@@ -364,9 +400,14 @@
             </button>
             <button
               type="button"
-              class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] border border-base-content/15 rounded-md py-2 cursor-pointer disabled:opacity-40"
+              class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] border rounded-md py-2 cursor-pointer disabled:opacity-40"
+              :class="
+                show3d
+                  ? 'border-primary text-primary'
+                  : 'border-base-content/15'
+              "
               :disabled="!stlPaths.length"
-              @click="show3d = true"
+              @click="show3d = !show3d"
             >
               3D
             </button>
@@ -374,7 +415,7 @@
               type="button"
               class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] border border-base-content/15 rounded-md py-2 cursor-pointer disabled:opacity-40"
               :disabled="!stlPaths.length"
-              @click="releasesStore.requestRender(stlPaths)"
+              @click="releasesStore.requestRender(stlPaths, selected.dir_path)"
             >
               RENDER
             </button>
@@ -506,13 +547,6 @@
         </ul>
       </div>
     </div>
-
-    <!-- 3D preview modal -->
-    <ModalView :is-open="show3d" @close="show3d = false">
-      <div class="w-[70vw] h-[70vh] bg-base-300 rounded-box">
-        <StlViewport v-if="show3d" :parts="stlPaths" />
-      </div>
-    </ModalView>
   </main>
 </template>
 
@@ -520,7 +554,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onActivated, onMounted, ref, watch } from "vue";
 import {
   type CatalogEntry,
   type CatalogFile,
@@ -530,7 +564,6 @@ import {
   commands,
 } from "../bindings";
 import CatalogCard from "../components/CatalogCard.vue";
-import ModalView from "../components/ModalView.vue";
 import StlViewport from "../components/StlViewport.vue";
 import { useCatalogJobs } from "../composables/useCatalogJobs";
 import { useFileSelect } from "../composables/useFileSelect";
@@ -542,7 +575,7 @@ const PAGE_SIZE = 60;
 
 const toastStore = useToastStore();
 const releasesStore = useReleasesStore();
-const { selectDirectory } = useFileSelect();
+const { selectDirectory, selectFiles } = useFileSelect();
 const {
   isScanning,
   scanProgress,
@@ -577,6 +610,7 @@ const reclaimBusy = ref(false);
 // dir_paths ticked for a batch move
 const checkedDirs = ref<string[]>([]);
 const metaDraft = ref({
+  name: "",
   pose: "",
   scale: "",
   support_status: "",
@@ -800,6 +834,7 @@ const moveChecked = async () => {
 
 watch(selected, (entry) => {
   metaDraft.value = {
+    name: entry?.name ?? "",
     pose: entry?.pose ?? "",
     scale: entry?.scale ?? "",
     support_status: entry?.support_status ?? "",
@@ -812,6 +847,7 @@ const metaDirty = computed(() => {
   if (!entry) return false;
   const draft = metaDraft.value;
   return (
+    draft.name !== entry.name ||
     draft.pose !== (entry.pose ?? "") ||
     draft.scale !== (entry.scale ?? "") ||
     draft.support_status !== (entry.support_status ?? "") ||
@@ -820,11 +856,20 @@ const metaDirty = computed(() => {
 });
 
 const saveMetadata = async () => {
-  if (!selected.value) return;
+  const entry = selected.value;
+  if (!entry) return;
   const orNull = (value: string) => value.trim() || null;
   const draft = metaDraft.value;
+  // An untouched name keeps whatever override exists; an edited one becomes
+  // the override; clearing the field reverts to the scanner's name
+  const trimmedName = draft.name.trim();
+  const customName =
+    trimmedName === entry.name
+      ? (entry.custom_name ?? null)
+      : trimmedName || null;
   const result = await commands.updateModelMetadata(
-    selected.value.dir_path,
+    entry.dir_path,
+    customName,
     orNull(draft.pose),
     orNull(draft.scale),
     orNull(draft.support_status),
@@ -837,6 +882,36 @@ const saveMetadata = async () => {
     toastStore.reportError("Failed to save details", result.error);
   }
 };
+
+const pickPreviewImage = async () => {
+  const entry = selected.value;
+  if (!entry) return;
+  const picked = await selectFiles({
+    accept: "image/*",
+    multiple: false,
+    title: "Choose a preview image",
+  });
+  const image = picked?.[0];
+  if (!image) return;
+  // The backend copies the file into the app's previews dir, so the
+  // catalog doesn't break if the original moves or gets deleted
+  const result = await commands.setModelPreview(entry.dir_path, image.path);
+  if (result.status === "ok") {
+    toastStore.addToast("Preview updated", "success");
+    await refreshSelected();
+  } else {
+    toastStore.reportError("Failed to set preview", result.error);
+  }
+};
+
+const displayPath = computed(() => {
+  const entry = selected.value;
+  if (!entry) return "";
+  const root = catalogRoot.value;
+  return root && entry.dir_path.startsWith(root)
+    ? entry.dir_path.slice(root.length).replace(/^[/\\]/, "")
+    : entry.dir_path;
+});
 
 /**
  * Composes two existing, already-tested commands (getCatalogModelFiles +
@@ -926,6 +1001,13 @@ onMounted(async () => {
   if (settings.status === "ok" && settings.data.catalog_root) {
     catalogRoot.value = settings.data.catalog_root;
   }
+  await Promise.all([runSearch(), refreshMeta()]);
+});
+
+// The tab is kept alive (KeepAlive in App.vue), so onMounted only fires
+// once — refresh on every return so previews set from the Render tab and
+// other cross-tab changes show up without a manual rescan
+onActivated(async () => {
   await Promise.all([runSearch(), refreshMeta()]);
 });
 </script>

@@ -521,10 +521,14 @@ const partPaths = computed(() => parts.value.map((f) => f.path));
 
 // The catalog hands STL parts over via the store ("Render promo" button, or
 // per-model "open studio" links from the release stepper's Render step)
-const { renderParts } = storeToRefs(releasesStore);
+const { renderParts, renderPreviewTarget } = storeToRefs(releasesStore);
+// The exact part set the catalog asked to render; if the user swaps files
+// afterwards, the finished image is NOT that model's preview anymore
+let previewTargetParts = "";
 watch(renderParts, async (paths) => {
   if (!paths.length) return;
   parts.value = await filesFromPaths(paths);
+  previewTargetParts = paths.join("\n");
   renderParts.value = [];
 });
 
@@ -574,7 +578,7 @@ let requestedOutputPath = "";
 // A finished render takes over the viewport + toasts — previously it only
 // appeared as a small thumbnail below the fold and looked like nothing
 // happened
-watch(resultPath, (path) => {
+watch(resultPath, async (path) => {
   if (!path) return;
   showResult.value = true;
   if (requestedOutputPath && path !== requestedOutputPath) {
@@ -586,6 +590,24 @@ watch(resultPath, (path) => {
     );
   } else {
     toastStore.addToast("Render complete", "success");
+  }
+
+  // Close the catalog loop: a render started from a catalog model becomes
+  // that model's preview — as long as these are still the same parts
+  if (
+    renderPreviewTarget.value &&
+    partPaths.value.join("\n") === previewTargetParts
+  ) {
+    const result = await commands.setModelPreview(
+      renderPreviewTarget.value,
+      path,
+    );
+    if (result.status === "ok") {
+      toastStore.addToast("Catalog preview updated", "success");
+    } else {
+      toastStore.reportError("Failed to set catalog preview", result.error);
+    }
+    renderPreviewTarget.value = null;
   }
 });
 

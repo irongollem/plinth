@@ -24,6 +24,9 @@ export const useReleasesStore = defineStore("releases", () => {
   const releaseStep = ref<ReleaseStep>(1);
   // Cross-tab handoff: the catalog can push STL parts into the Render tab
   const renderParts = ref<string[]>([]);
+  // When the handoff came from a catalog model, its dir_path rides along so
+  // the finished render can be written back as that model's preview
+  const renderPreviewTarget = ref<string | null>(null);
   // ...and the Render tab can push finished promo images into Add STL
   const pendingModelImages = ref<string[]>([]);
 
@@ -37,8 +40,9 @@ export const useReleasesStore = defineStore("releases", () => {
     activeTab.value = "releases";
   };
 
-  const requestRender = (paths: string[]) => {
+  const requestRender = (paths: string[], previewTargetDir?: string) => {
     renderParts.value = paths;
+    renderPreviewTarget.value = previewTargetDir ?? null;
     activeTab.value = "render";
   };
 
@@ -135,6 +139,7 @@ export const useReleasesStore = defineStore("releases", () => {
     releaseStep,
     setReleaseStep,
     renderParts,
+    renderPreviewTarget,
     requestRender,
     pendingModelImages,
     queueModelImage,

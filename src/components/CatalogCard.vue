@@ -7,10 +7,12 @@ import { formatFileSize } from "../utils/format";
 const props = defineProps<{
   entry: CatalogEntry;
   selected?: boolean;
+  checked?: boolean;
 }>();
 
 defineEmits<{
   select: [entry: CatalogEntry];
+  toggleCheck: [entry: CatalogEntry];
 }>();
 
 const previewUrl = computed(() =>
@@ -19,13 +21,15 @@ const previewUrl = computed(() =>
 </script>
 
 <template>
-  <button
-    type="button"
-    class="card bg-base-100 border border-base-content/15 text-left hover:border-primary transition-colors overflow-hidden"
+  <!-- div, not button: the card hosts a nested checkbox and interactive
+       elements can't nest -->
+  <div
+    role="button"
+    class="card bg-base-100 border border-base-content/15 text-left hover:border-primary transition-colors overflow-hidden cursor-pointer"
     :class="{ 'border-primary ring-1 ring-primary': selected }"
     @click="$emit('select', entry)"
   >
-    <figure class="aspect-square bg-black/40">
+    <figure class="aspect-square bg-black/40 relative">
       <img
         v-if="previewUrl"
         :src="previewUrl"
@@ -39,6 +43,15 @@ const previewUrl = computed(() =>
       >
         🗿
       </div>
+      <!-- batch-selection for the move tool; quiet until checked or hovered -->
+      <input
+        type="checkbox"
+        class="checkbox checkbox-sm absolute top-1.5 left-1.5 bg-base-100/70"
+        :class="checked ? 'opacity-100' : 'opacity-40 hover:opacity-100'"
+        :checked="checked"
+        @click.stop
+        @change="$emit('toggleCheck', entry)"
+      />
     </figure>
     <div class="card-body p-3 gap-1">
       <h3 class="font-semibold text-sm truncate" :title="entry.name">
@@ -64,5 +77,5 @@ const previewUrl = computed(() =>
         </span>
       </div>
     </div>
-  </button>
+  </div>
 </template>
