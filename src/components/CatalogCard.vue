@@ -1,22 +1,22 @@
 <script setup lang="ts">
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { computed } from "vue";
-import type { CatalogEntry } from "../bindings";
+import type { CatalogGroup } from "../bindings";
 import { formatFileSize } from "../utils/format";
 
 const props = defineProps<{
-  entry: CatalogEntry;
+  group: CatalogGroup;
   selected?: boolean;
   checked?: boolean;
 }>();
 
 defineEmits<{
-  select: [entry: CatalogEntry];
-  toggleCheck: [entry: CatalogEntry];
+  select: [group: CatalogGroup];
+  toggleCheck: [group: CatalogGroup];
 }>();
 
 const previewUrl = computed(() =>
-  props.entry.preview_path ? convertFileSrc(props.entry.preview_path) : null,
+  props.group.preview_path ? convertFileSrc(props.group.preview_path) : null,
 );
 </script>
 
@@ -27,13 +27,13 @@ const previewUrl = computed(() =>
     role="button"
     class="card bg-base-100 border border-base-content/15 text-left hover:border-primary transition-colors overflow-hidden cursor-pointer"
     :class="{ 'border-primary ring-1 ring-primary': selected }"
-    @click="$emit('select', entry)"
+    @click="$emit('select', group)"
   >
     <figure class="aspect-square bg-black/40 relative">
       <img
         v-if="previewUrl"
         :src="previewUrl"
-        :alt="entry.name"
+        :alt="group.group_name"
         loading="lazy"
         class="object-cover w-full h-full"
       />
@@ -50,32 +50,36 @@ const previewUrl = computed(() =>
         :class="checked ? 'opacity-100' : 'opacity-40 hover:opacity-100'"
         :checked="checked"
         @click.stop
-        @change="$emit('toggleCheck', entry)"
+        @change="$emit('toggleCheck', group)"
       />
-    </figure>
-    <div class="card-body p-3 gap-1">
-      <h3 class="font-semibold text-sm truncate" :title="entry.name">
-        {{ entry.name }}
-      </h3>
-      <p v-if="entry.designer" class="text-xs opacity-60 truncate">
-        {{ entry.designer }}
-      </p>
-      <p class="text-xs opacity-40">
-        {{ entry.file_count }} file{{ entry.file_count === 1 ? "" : "s" }} ·
-        {{ formatFileSize(entry.total_size_bytes) }}
-      </p>
-      <div v-if="entry.tags.length" class="flex flex-wrap gap-1 mt-1">
+      <!-- support variants at a glance -->
+      <div
+        v-if="group.support_statuses.length"
+        class="absolute bottom-1.5 right-1.5 flex gap-1"
+      >
         <span
-          v-for="tag in entry.tags.slice(0, 4)"
-          :key="tag"
-          class="badge badge-ghost badge-xs"
+          v-for="status in group.support_statuses"
+          :key="status"
+          class="badge badge-xs font-mono bg-base-100/80"
         >
-          {{ tag }}
-        </span>
-        <span v-if="entry.tags.length > 4" class="badge badge-ghost badge-xs">
-          +{{ entry.tags.length - 4 }}
+          {{ status }}
         </span>
       </div>
+    </figure>
+    <div class="card-body p-3 gap-1">
+      <h3 class="font-semibold text-sm truncate" :title="group.group_name">
+        {{ group.group_name }}
+      </h3>
+      <p v-if="group.designer" class="text-xs opacity-60 truncate">
+        {{ group.designer }}
+      </p>
+      <p class="text-xs opacity-40">
+        <template v-if="group.pose_count > 1"
+          >{{ group.pose_count }} poses ·
+        </template>
+        {{ group.file_count }} file{{ group.file_count === 1 ? "" : "s" }} ·
+        {{ formatFileSize(group.total_size_bytes) }}
+      </p>
     </div>
   </div>
 </template>

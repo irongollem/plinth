@@ -114,13 +114,15 @@
       </button>
     </div>
 
-    <!-- Batch move action bar (rows are checkable in list mode) -->
+    <!-- Batch move action bar (cards and rows are checkable) -->
     <div
-      v-if="checkedDirs.length"
+      v-if="checkedGroups.length"
       class="flex items-center gap-2 bg-base-200 border border-base-content/10 rounded-lg px-3 py-1.5 text-xs"
     >
       <span class="font-mono text-base-content/60">
-        {{ checkedDirs.length }} model{{ checkedDirs.length === 1 ? "" : "s" }}
+        {{ checkedGroups.length }} model{{
+          checkedGroups.length === 1 ? "" : "s"
+        }}
         selected
       </span>
       <button type="button" class="btn btn-xs btn-primary" @click="moveChecked">
@@ -129,7 +131,7 @@
       <button
         type="button"
         class="btn btn-xs btn-ghost"
-        @click="checkedDirs = []"
+        @click="checkedGroups = []"
       >
         clear
       </button>
@@ -139,7 +141,7 @@
     <div class="flex flex-1 gap-3 min-h-0">
       <section class="flex-1 overflow-y-auto min-h-0">
         <div
-          v-if="!entries.length && !isScanning"
+          v-if="!groups.length && !isScanning"
           class="h-full flex items-center justify-center opacity-40 text-sm"
         >
           {{
@@ -149,64 +151,64 @@
           }}
         </div>
 
-        <!-- LIST MODE -->
+        <!-- LIST MODE (one row per logical model) -->
         <template v-if="viewMode === 'list'">
           <div
-            v-if="entries.length"
+            v-if="groups.length"
             class="flex items-center gap-3 font-mono text-[9.5px] tracking-[0.12em] text-base-content/40 border-b border-base-content/10 pb-1.5 pr-3 sticky top-0 bg-base-100"
           >
             <span class="w-4"></span>
             <span class="w-10"></span>
             <span class="flex-1">MODEL</span>
             <span class="w-[140px]">DESIGNER</span>
-            <span class="w-[160px]">TAGS</span>
+            <span class="w-[160px]">VARIANTS</span>
             <span class="w-[60px] text-right">SIZE</span>
           </div>
           <!-- div, not button: the row hosts a nested checkbox and
                interactive elements can't nest -->
           <div
-            v-for="entry in entries"
-            :key="entry.dir_path"
+            v-for="group in groups"
+            :key="group.group_name"
             role="button"
             class="flex items-center gap-3 w-full text-left border-b border-base-content/5 py-1.5 pr-3 pl-2.5 cursor-pointer"
             :class="
-              entry.dir_path === selected?.dir_path
+              group.group_name === selectedGroup?.group_name
                 ? 'bg-primary/10 border-l-2 border-l-primary'
                 : 'border-l-2 border-l-transparent'
             "
-            @click="selectEntry(entry)"
+            @click="selectGroup(group)"
           >
             <input
               type="checkbox"
               class="checkbox checkbox-xs w-4 shrink-0"
-              :checked="checkedDirs.includes(entry.dir_path)"
+              :checked="checkedGroups.includes(group.group_name)"
               @click.stop
-              @change="toggleChecked(entry.dir_path)"
+              @change="toggleCheckedGroup(group.group_name)"
             />
             <div
               class="w-10 h-10 shrink-0 rounded-md bg-base-300 overflow-hidden flex items-center justify-center text-base-content/30"
             >
               <img
-                v-if="entry.preview_path"
-                :src="convertFileSrc(entry.preview_path)"
+                v-if="group.preview_path"
+                :src="convertFileSrc(group.preview_path)"
                 class="w-full h-full object-cover"
                 alt=""
               />
               <span v-else class="text-lg">🗿</span>
             </div>
             <span class="flex-1 font-medium text-[13px] truncate">{{
-              entry.name
+              group.group_name
             }}</span>
             <span class="w-[140px] text-[12px] text-base-content/60 truncate">{{
-              entry.designer
+              group.designer
             }}</span>
             <span
               class="w-[160px] font-mono text-[10.5px] text-base-content/50 truncate"
-              >{{ entry.tags.join(", ") }}</span
+              >{{ groupSummary(group) }}</span
             >
             <span
               class="w-[60px] text-right font-mono text-[11px] text-base-content/50"
-              >{{ formatFileSize(entry.total_size_bytes) }}</span
+              >{{ formatFileSize(group.total_size_bytes) }}</span
             >
           </div>
         </template>
@@ -218,19 +220,19 @@
           style="grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr))"
         >
           <CatalogCard
-            v-for="entry in entries"
-            :key="entry.dir_path"
-            :entry="entry"
-            :selected="entry.dir_path === selected?.dir_path"
-            :checked="checkedDirs.includes(entry.dir_path)"
-            @select="selectEntry"
-            @toggle-check="toggleChecked($event.dir_path)"
+            v-for="group in groups"
+            :key="group.group_name"
+            :group="group"
+            :selected="group.group_name === selectedGroup?.group_name"
+            :checked="checkedGroups.includes(group.group_name)"
+            @select="selectGroup"
+            @toggle-check="toggleCheckedGroup($event.group_name)"
           />
         </div>
 
-        <div v-if="entries.length < total" class="flex justify-center py-4">
+        <div v-if="groups.length < total" class="flex justify-center py-4">
           <button type="button" class="btn btn-sm" @click="loadMore">
-            Load more ({{ entries.length }} / {{ total }})
+            Load more ({{ groups.length }} / {{ total }})
           </button>
         </div>
       </section>
@@ -265,9 +267,40 @@
         </div>
         <div class="py-3.5 flex flex-col gap-2.5">
           <div>
-            <h2 class="font-bold text-[16px] leading-tight">
-              {{ selected.name }}
-            </h2>
+            <!-- Group title: the logical model; rename applies to the whole
+                 group and survives rescans -->
+            <div class="flex items-start gap-1.5">
+              <h2
+                v-if="!renamingGroup"
+                class="font-bold text-[16px] leading-tight flex-1"
+              >
+                {{ selectedGroup?.group_name ?? selected.name }}
+              </h2>
+              <form
+                v-else
+                class="flex-1 flex gap-1"
+                @submit.prevent="renameGroup"
+              >
+                <input
+                  v-model="groupNameDraft"
+                  type="text"
+                  class="input input-xs font-mono flex-1"
+                  placeholder="empty = folder name"
+                />
+                <button type="submit" class="btn btn-xs btn-primary">
+                  save
+                </button>
+              </form>
+              <button
+                v-if="!renamingGroup"
+                type="button"
+                class="text-xs opacity-40 hover:opacity-100 cursor-pointer"
+                title="Rename this model (all variants move with it; naming it like another model merges them)"
+                @click="startRenameGroup"
+              >
+                ✎
+              </button>
+            </div>
             <p
               v-if="selected.designer || selected.release_name"
               class="font-mono text-[11px] text-base-content/50 mt-0.5"
@@ -285,6 +318,43 @@
               @click="reveal(selected.dir_path)"
             >
               {{ displayPath }}
+            </button>
+          </div>
+
+          <!-- Variant navigation: supported/unsupported tabs, poses within -->
+          <div
+            v-if="supportTabs.length > 1"
+            class="flex bg-base-200 border border-base-content/10 rounded-lg p-0.5"
+          >
+            <button
+              v-for="tab in supportTabs"
+              :key="tab"
+              type="button"
+              class="flex-1 font-semibold text-[11px] px-2 py-1 rounded-md cursor-pointer"
+              :class="
+                activeSupport === tab
+                  ? 'bg-primary text-primary-content'
+                  : 'text-base-content/60'
+              "
+              @click="setSupportTab(tab)"
+            >
+              {{ tabLabel(tab) }}
+            </button>
+          </div>
+          <div v-if="tabMembers.length > 1" class="flex flex-wrap gap-1.5">
+            <button
+              v-for="member in tabMembers"
+              :key="member.dir_path"
+              type="button"
+              class="font-mono text-[11px] rounded-full px-2.5 py-1 border cursor-pointer"
+              :class="
+                member.dir_path === selected.dir_path
+                  ? 'bg-primary text-primary-content border-primary'
+                  : 'text-base-content/60 border-base-content/15'
+              "
+              @click="selectEntry(member)"
+            >
+              {{ member.pose ?? member.name }}
             </button>
           </div>
 
@@ -558,6 +628,7 @@ import { computed, onActivated, onMounted, ref, watch } from "vue";
 import {
   type CatalogEntry,
   type CatalogFile,
+  type CatalogGroup,
   type CatalogStats,
   type DuplicateGroup,
   type TagCount,
@@ -595,9 +666,14 @@ const query = ref("");
 const viewMode = ref<"list" | "grid">("grid");
 const selectedTags = ref<string[]>([]);
 const allTags = ref<TagCount[]>([]);
-const entries = ref<CatalogEntry[]>([]);
+// the browsable units: one group per logical model
+const groups = ref<CatalogGroup[]>([]);
 const total = ref(0);
 const stats = ref<CatalogStats | null>(null);
+// drill-down state: group -> its variant entries -> the active one
+const selectedGroup = ref<CatalogGroup | null>(null);
+const members = ref<CatalogEntry[]>([]);
+const activeSupport = ref("");
 const selected = ref<CatalogEntry | null>(null);
 const files = ref<CatalogFile[]>([]);
 const newTag = ref("");
@@ -607,8 +683,10 @@ const show3d = ref(false);
 // per-group hash -> path the user wants to keep (defaults to the first)
 const keepChoice = ref<Record<string, string>>({});
 const reclaimBusy = ref(false);
-// dir_paths ticked for a batch move
-const checkedDirs = ref<string[]>([]);
+// group names ticked for a batch move
+const checkedGroups = ref<string[]>([]);
+const renamingGroup = ref(false);
+const groupNameDraft = ref("");
 const metaDraft = ref({
   name: "",
   pose: "",
@@ -646,18 +724,26 @@ const lastScanLabel = computed(() => {
 });
 
 const runSearch = async (append = false) => {
-  const offset = append ? entries.value.length : 0;
-  const result = await commands.searchCatalog(
+  const offset = append ? groups.value.length : 0;
+  const result = await commands.searchCatalogGroups(
     query.value,
     selectedTags.value,
     PAGE_SIZE,
     offset,
   );
   if (result.status === "ok") {
-    entries.value = append
-      ? [...entries.value, ...result.data.entries]
-      : result.data.entries;
+    groups.value = append
+      ? [...groups.value, ...result.data.groups]
+      : result.data.groups;
     total.value = result.data.total;
+    // keep the drawer header's aggregates fresh (poses/sizes may change)
+    if (selectedGroup.value) {
+      const current = selectedGroup.value.group_name.toLowerCase();
+      const fresh = groups.value.find(
+        (g) => g.group_name.toLowerCase() === current,
+      );
+      if (fresh) selectedGroup.value = fresh;
+    }
   } else {
     toastStore.reportError("Search failed", result.error);
   }
@@ -699,6 +785,91 @@ const selectEntry = async (entry: CatalogEntry) => {
   if (result.status === "ok") files.value = result.data;
 };
 
+// Support statuses present among the members, stable order; "" = untagged
+const supportTabs = computed(() => {
+  const seen = new Set(members.value.map((m) => m.support_status ?? ""));
+  const ordered = ["supported", "unsupported"].filter((s) => seen.has(s));
+  for (const status of seen) {
+    if (!ordered.includes(status)) ordered.push(status);
+  }
+  return ordered;
+});
+
+const tabLabel = (tab: string) => (tab === "" ? "other" : tab);
+
+const tabMembers = computed(() =>
+  members.value.filter((m) => (m.support_status ?? "") === activeSupport.value),
+);
+
+const setSupportTab = (tab: string) => {
+  activeSupport.value = tab;
+  const first = tabMembers.value[0];
+  if (first) selectEntry(first);
+};
+
+const selectGroup = async (group: CatalogGroup) => {
+  selectedGroup.value = group;
+  renamingGroup.value = false;
+  members.value = [];
+  selected.value = null;
+  files.value = [];
+  const result = await commands.getCatalogGroupMembers(group.group_name);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to load model variants", result.error);
+    return;
+  }
+  members.value = result.data;
+  const firstTab = supportTabs.value[0] ?? "";
+  activeSupport.value = firstTab;
+  const first =
+    members.value.find((m) => (m.support_status ?? "") === firstTab) ??
+    members.value[0];
+  if (first) await selectEntry(first);
+};
+
+const groupSummary = (group: CatalogGroup) => {
+  const parts: string[] = [];
+  if (group.pose_count > 1) parts.push(`${group.pose_count} poses`);
+  if (group.support_statuses.length)
+    parts.push(group.support_statuses.join(" / "));
+  return parts.join(" · ");
+};
+
+const startRenameGroup = () => {
+  groupNameDraft.value = selectedGroup.value?.group_name ?? "";
+  renamingGroup.value = true;
+};
+
+const renameGroup = async () => {
+  const group = selectedGroup.value;
+  renamingGroup.value = false;
+  if (!group) return;
+  const newName = groupNameDraft.value.trim();
+  if (newName === group.group_name) return;
+  const result = await commands.renameCatalogGroup(group.group_name, newName);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to rename model", result.error);
+    return;
+  }
+  toastStore.addToast(
+    newName ? `Renamed to "${newName}"` : "Name reset to the folder name",
+    "success",
+  );
+  await Promise.all([runSearch(), refreshMeta()]);
+  const found = newName
+    ? groups.value.find(
+        (g) => g.group_name.toLowerCase() === newName.toLowerCase(),
+      )
+    : undefined;
+  if (found) {
+    await selectGroup(found);
+  } else {
+    selectedGroup.value = null;
+    selected.value = null;
+    members.value = [];
+  }
+};
+
 const addTag = async () => {
   if (!selected.value || !newTag.value.trim()) return;
   const result = await commands.addCatalogTag(
@@ -725,12 +896,18 @@ const removeTag = async (tag: string) => {
   }
 };
 
-/** Re-fetch the selected entry so tag edits show up immediately. */
+/** Re-fetch the group's members so tag/detail edits show up immediately. */
 const refreshSelected = async () => {
-  if (!selected.value) return;
-  const dirPath = selected.value.dir_path;
+  const group = selectedGroup.value;
+  const dirPath = selected.value?.dir_path;
   await runSearch();
-  const updated = entries.value.find((e) => e.dir_path === dirPath);
+  if (!group) return;
+  const result = await commands.getCatalogGroupMembers(group.group_name);
+  if (result.status !== "ok") return;
+  members.value = result.data;
+  const updated = dirPath
+    ? members.value.find((m) => m.dir_path === dirPath)
+    : undefined;
   if (updated) selected.value = updated;
 };
 
@@ -787,17 +964,24 @@ const reclaimGroup = async (group: DuplicateGroup) => {
   }
 };
 
-const toggleChecked = (dirPath: string) => {
-  checkedDirs.value = checkedDirs.value.includes(dirPath)
-    ? checkedDirs.value.filter((d) => d !== dirPath)
-    : [...checkedDirs.value, dirPath];
+const toggleCheckedGroup = (groupName: string) => {
+  checkedGroups.value = checkedGroups.value.includes(groupName)
+    ? checkedGroups.value.filter((g) => g !== groupName)
+    : [...checkedGroups.value, groupName];
 };
 
 const moveChecked = async () => {
   const dest = await selectDirectory({ title: "Move selected models into…" });
   if (!dest) return;
+  // a checked group means ALL of its variant folders move
+  const memberResults = await Promise.all(
+    checkedGroups.value.map((name) => commands.getCatalogGroupMembers(name)),
+  );
+  const dirs = memberResults.flatMap((result) =>
+    result.status === "ok" ? result.data.map((m) => m.dir_path) : [],
+  );
   const sep = dest.includes("\\") ? "\\" : "/";
-  const operations = checkedDirs.value
+  const operations = dirs
     .map((from) => ({
       from,
       to: `${dest}${sep}${from.split(/[\\/]/).pop()}`,
@@ -808,7 +992,7 @@ const moveChecked = async () => {
     return;
   }
   const confirmed = await confirm(
-    `Move ${operations.length} model folder${operations.length === 1 ? "" : "s"} into:\n${dest}`,
+    `Move ${operations.length} folder${operations.length === 1 ? "" : "s"} (${checkedGroups.value.length} model${checkedGroups.value.length === 1 ? "" : "s"}) into:\n${dest}`,
     { title: "Reorganize models", kind: "warning" },
   );
   if (!confirmed) return;
@@ -817,14 +1001,16 @@ const moveChecked = async () => {
     const { succeeded, errors } = result.data;
     if (succeeded) {
       toastStore.addToast(
-        `Moved ${succeeded} model${succeeded === 1 ? "" : "s"}`,
+        `Moved ${succeeded} folder${succeeded === 1 ? "" : "s"}`,
         "success",
       );
     }
     for (const error of errors) toastStore.addToast(error, "error");
-    checkedDirs.value = [];
-    // the selected entry's dir_path may have just changed
+    checkedGroups.value = [];
+    // the selected entries' dir_paths may have just changed
+    selectedGroup.value = null;
     selected.value = null;
+    members.value = [];
     files.value = [];
     await Promise.all([runSearch(), refreshMeta()]);
   } else {
