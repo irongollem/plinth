@@ -1,20 +1,60 @@
 <template>
-  <main
-    class="bg-gray-800 text-gray-100 flex flex-col h-full rounded-b-lg p-4 gap-3"
-  >
+  <main class="bg-base-100 text-base-content flex flex-col h-full p-4 gap-3">
     <!-- Toolbar -->
     <div class="flex flex-wrap items-center gap-2">
-      <input
-        type="search"
-        class="input input-sm flex-1 min-w-48"
-        placeholder="Search models, tags, descriptions..."
-        v-model="query"
-      />
+      <label class="input input-sm flex-1 min-w-48 items-center gap-2">
+        <svg
+          width="13"
+          height="13"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          class="opacity-40"
+        >
+          <circle cx="11" cy="11" r="7"></circle>
+          <path d="M21 21l-4.3-4.3"></path>
+        </svg>
+        <input
+          type="search"
+          class="grow font-mono"
+          placeholder="query models, tags…"
+          v-model="query"
+        />
+      </label>
+      <div
+        class="flex bg-base-200 border border-base-content/10 rounded-lg p-0.5"
+      >
+        <button
+          type="button"
+          class="font-semibold text-[11px] px-2.5 py-1 rounded-md cursor-pointer"
+          :class="
+            viewMode === 'list'
+              ? 'bg-primary text-primary-content'
+              : 'text-base-content/60'
+          "
+          @click="viewMode = 'list'"
+        >
+          List
+        </button>
+        <button
+          type="button"
+          class="font-semibold text-[11px] px-2.5 py-1 rounded-md cursor-pointer"
+          :class="
+            viewMode === 'grid'
+              ? 'bg-primary text-primary-content'
+              : 'text-base-content/60'
+          "
+          @click="viewMode = 'grid'"
+        >
+          Grid
+        </button>
+      </div>
       <div class="join">
         <input
           type="text"
           readonly
-          class="input input-sm join-item w-56"
+          class="input input-sm join-item w-56 font-mono"
           :value="catalogRoot"
           placeholder="Choose a folder to index..."
         />
@@ -39,6 +79,10 @@
           Cancel
         </button>
       </div>
+      <span class="flex-1"></span>
+      <span class="font-mono text-[11px] text-base-content/40">
+        {{ total.toLocaleString() }} result{{ total === 1 ? "" : "s" }}
+      </span>
     </div>
 
     <div v-if="isScanning" class="text-xs opacity-70 flex items-center gap-2">
@@ -53,18 +97,20 @@
     </div>
 
     <!-- Tag filter chips -->
-    <div v-if="visibleTags.length" class="flex flex-wrap gap-1 items-center">
+    <div v-if="visibleTags.length" class="flex flex-wrap gap-1.5 items-center">
       <button
         v-for="tag in visibleTags"
         :key="tag.tag"
         type="button"
-        class="badge cursor-pointer"
+        class="font-mono text-[11px] rounded-full px-2.5 py-1 border cursor-pointer"
         :class="
-          selectedTags.includes(tag.tag) ? 'badge-primary' : 'badge-outline'
+          selectedTags.includes(tag.tag)
+            ? 'bg-primary text-primary-content border-primary'
+            : 'text-base-content/60 border-base-content/15'
         "
         @click="toggleTag(tag.tag)"
       >
-        {{ tag.tag }} <span class="opacity-50 ml-1">{{ tag.count }}</span>
+        {{ tag.tag }} {{ tag.count }}
       </button>
     </div>
 
@@ -81,7 +127,62 @@
               : "No catalog yet — choose a folder and hit Scan"
           }}
         </div>
+
+        <!-- LIST MODE -->
+        <template v-if="viewMode === 'list'">
+          <div
+            v-if="entries.length"
+            class="flex items-center gap-3 font-mono text-[9.5px] tracking-[0.12em] text-base-content/40 border-b border-base-content/10 pb-1.5 pr-3 sticky top-0 bg-base-100"
+          >
+            <span class="w-10"></span>
+            <span class="flex-1">MODEL</span>
+            <span class="w-[140px]">DESIGNER</span>
+            <span class="w-[160px]">TAGS</span>
+            <span class="w-[60px] text-right">SIZE</span>
+          </div>
+          <button
+            v-for="entry in entries"
+            :key="entry.dir_path"
+            type="button"
+            class="flex items-center gap-3 w-full text-left border-b border-base-content/5 py-1.5 pr-3 pl-2.5 cursor-pointer"
+            :class="
+              entry.dir_path === selected?.dir_path
+                ? 'bg-primary/10 border-l-2 border-l-primary'
+                : 'border-l-2 border-l-transparent'
+            "
+            @click="selectEntry(entry)"
+          >
+            <div
+              class="w-10 h-10 shrink-0 rounded-md bg-base-300 overflow-hidden flex items-center justify-center text-base-content/30"
+            >
+              <img
+                v-if="entry.preview_path"
+                :src="convertFileSrc(entry.preview_path)"
+                class="w-full h-full object-cover"
+                alt=""
+              />
+              <span v-else class="text-lg">🗿</span>
+            </div>
+            <span class="flex-1 font-medium text-[13px] truncate">{{
+              entry.name
+            }}</span>
+            <span class="w-[140px] text-[12px] text-base-content/60 truncate">{{
+              entry.designer
+            }}</span>
+            <span
+              class="w-[160px] font-mono text-[10.5px] text-base-content/50 truncate"
+              >{{ entry.tags.join(", ") }}</span
+            >
+            <span
+              class="w-[60px] text-right font-mono text-[11px] text-base-content/50"
+              >{{ formatFileSize(entry.total_size_bytes) }}</span
+            >
+          </button>
+        </template>
+
+        <!-- GRID MODE -->
         <div
+          v-else
           class="grid gap-3"
           style="grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr))"
         >
@@ -93,6 +194,7 @@
             @select="selectEntry"
           />
         </div>
+
         <div v-if="entries.length < total" class="flex justify-center py-4">
           <button type="button" class="btn btn-sm" @click="loadMore">
             Load more ({{ entries.length }} / {{ total }})
@@ -101,16 +203,26 @@
       </section>
 
       <!-- Detail drawer -->
-      <aside
-        v-if="selected"
-        class="w-96 shrink-0 overflow-y-auto bg-base-100 border border-gray-600 rounded-box p-4 space-y-3"
-      >
-        <div class="flex items-start justify-between gap-2">
+      <aside v-if="selected" class="w-[312px] shrink-0 overflow-y-auto">
+        <div
+          class="aspect-[4/3] rounded-box bg-base-300 border border-base-content/10 flex items-center justify-center text-base-content/30 overflow-hidden"
+        >
+          <img
+            v-if="selected.preview_path"
+            :src="convertFileSrc(selected.preview_path)"
+            :alt="selected.name"
+            class="w-full h-full object-cover"
+          />
+          <span v-else class="text-5xl">🗿</span>
+        </div>
+        <div class="py-3.5 flex flex-col gap-2.5">
           <div>
-            <h2 class="font-bold text-lg leading-tight">{{ selected.name }}</h2>
+            <h2 class="font-bold text-[16px] leading-tight">
+              {{ selected.name }}
+            </h2>
             <p
               v-if="selected.designer || selected.release_name"
-              class="text-xs opacity-60"
+              class="font-mono text-[11px] text-base-content/50 mt-0.5"
             >
               {{
                 [selected.designer, selected.release_name]
@@ -119,165 +231,145 @@
               }}
             </p>
           </div>
-          <button
-            type="button"
-            class="btn btn-ghost btn-xs"
-            @click="selected = null"
-          >
-            ✕
-          </button>
-        </div>
 
-        <img
-          v-if="selected.preview_path"
-          :src="convertFileSrc(selected.preview_path)"
-          :alt="selected.name"
-          class="rounded-box w-full"
-        />
-        <p v-if="selected.description" class="text-sm opacity-80">
-          {{ selected.description }}
-        </p>
+          <div class="flex flex-wrap gap-1.5">
+            <span
+              v-for="tag in selected.tags"
+              :key="tag"
+              class="font-mono text-[10px] text-base-content/60 border border-base-content/15 rounded-full px-2.5 py-0.5 flex items-center gap-1"
+            >
+              {{ tag }}
+              <button
+                type="button"
+                class="opacity-50 hover:opacity-100"
+                @click="removeTag(tag)"
+              >
+                ✕
+              </button>
+            </span>
+            <form class="join" @submit.prevent="addTag">
+              <input
+                v-model="newTag"
+                type="text"
+                class="input input-xs join-item w-24"
+                placeholder="+ tag"
+              />
+            </form>
+          </div>
 
-        <div class="flex flex-wrap gap-1">
-          <span
-            v-for="tag in selected.tags"
-            :key="tag"
-            class="badge badge-outline gap-1"
-          >
-            {{ tag }}
+          <div class="flex gap-1.5">
             <button
               type="button"
-              class="opacity-50 hover:opacity-100"
-              @click="removeTag(tag)"
+              class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] bg-primary text-primary-content rounded-md py-2 cursor-pointer"
+              @click="printModel"
             >
-              ✕
+              PRINT
             </button>
-          </span>
-          <form class="join" @submit.prevent="addTag">
-            <input
-              v-model="newTag"
-              type="text"
-              class="input input-xs join-item w-24"
-              placeholder="add tag"
-            />
-            <button type="submit" class="btn btn-xs join-item">+</button>
-          </form>
-        </div>
+            <button
+              type="button"
+              class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] border border-base-content/15 rounded-md py-2 cursor-pointer disabled:opacity-40"
+              :disabled="!stlPaths.length"
+              @click="show3d = true"
+            >
+              3D
+            </button>
+            <button
+              type="button"
+              class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] border border-base-content/15 rounded-md py-2 cursor-pointer disabled:opacity-40"
+              :disabled="!stlPaths.length"
+              @click="releasesStore.requestRender(stlPaths)"
+            >
+              RENDER
+            </button>
+          </div>
 
-        <div class="flex flex-wrap gap-2">
           <button
             type="button"
-            class="btn btn-primary btn-sm"
-            @click="printModel"
+            class="font-semibold text-[11px] tracking-[0.03em] text-center border border-dashed rounded-md py-2 cursor-pointer"
+            :class="
+              releasesStore.releaseExists
+                ? 'border-base-content/25 text-primary'
+                : 'border-base-content/15 text-base-content/40'
+            "
+            @click="addToDraftRelease"
           >
-            🖨️ Print
+            + Add to draft release
           </button>
-          <button
-            type="button"
-            class="btn btn-sm"
-            :disabled="!stlPaths.length"
-            @click="show3d = true"
-          >
-            3D view
-          </button>
-          <button
-            type="button"
-            class="btn btn-sm"
-            :disabled="!stlPaths.length"
-            @click="releasesStore.requestRender(stlPaths)"
-          >
-            Render promo
-          </button>
-        </div>
 
-        <div>
-          <h3 class="font-semibold text-sm mb-1">
-            Files ({{ formatFileSize(selected.total_size_bytes) }})
-          </h3>
-          <ul class="text-xs space-y-1">
-            <li
+          <div>
+            <div
+              class="font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 mb-1.5"
+            >
+              FILES · {{ formatFileSize(selected.total_size_bytes) }}
+            </div>
+            <div
               v-for="file in files"
               :key="file.path"
-              class="flex justify-between gap-2"
+              class="flex justify-between font-mono text-[11px] text-base-content/60 py-0.5"
             >
               <span class="truncate" :title="file.path">{{
                 file.file_name
               }}</span>
-              <span class="opacity-50 shrink-0">{{
+              <span class="opacity-60 shrink-0">{{
                 formatFileSize(file.size_bytes)
               }}</span>
-            </li>
-          </ul>
+            </div>
+          </div>
         </div>
       </aside>
     </div>
 
     <!-- Footer: stats + duplicates -->
     <div
-      class="flex flex-wrap items-center gap-3 text-xs opacity-80 border-t border-gray-700 pt-2"
+      class="flex flex-wrap items-center gap-4 font-mono text-[10.5px] text-base-content/40 border-t border-base-content/10 pt-2"
     >
       <template v-if="stats">
         <span
-          ><b>{{ stats.total_models }}</b> models</span
+          @click="toggleDups"
+          :class="dupGroups.length ? 'text-primary cursor-pointer' : ''"
         >
-        <span
-          ><b>{{ stats.total_files }}</b> files</span
-        >
-        <span
-          ><b>{{ formatFileSize(stats.total_size_bytes) }}</b> on disk</span
-        >
-        <span
-          v-for="ext in stats.extensions.slice(0, 4)"
-          :key="ext.extension"
-          class="opacity-60"
-        >
-          .{{ ext.extension }} {{ formatFileSize(ext.total_size_bytes) }}
+          <template v-if="dupGroups.length"
+            >{{ dupGroups.length }} duplicate groups ·
+            {{ formatFileSize(wastedBytes) }} reclaimable</template
+          >
+          <template v-else
+            >{{ stats.total_models }} models · {{ stats.total_files }} files ·
+            {{ formatFileSize(stats.total_size_bytes) }}</template
+          >
         </span>
-        <span v-if="lastScanLabel" class="opacity-50"
-          >scanned {{ lastScanLabel }}</span
-        >
       </template>
       <span class="flex-1"></span>
+      <span v-if="lastScanLabel">scanned {{ lastScanLabel }}</span>
       <button
         v-if="!isFindingDuplicates"
         type="button"
-        class="btn btn-xs"
+        class="border border-base-content/15 rounded-full px-2.5 py-0.5 text-base-content/60 cursor-pointer disabled:opacity-40"
         :disabled="!stats?.total_files"
         @click="startDuplicateScan"
       >
-        Find duplicates
+        rescan duplicates
       </button>
       <span v-else class="flex items-center gap-2">
         <span class="loading loading-spinner loading-xs"></span>
         hashing {{ dupProgress?.processed ?? 0 }}/{{
           dupProgress?.total ?? "?"
         }}
-        <button
-          type="button"
-          class="btn btn-xs btn-error"
-          @click="cancelDuplicateScan"
-        >
-          ✕
+        <button type="button" class="link" @click="cancelDuplicateScan">
+          cancel
         </button>
       </span>
-      <button
-        v-if="dupGroups.length"
-        type="button"
-        class="btn btn-xs btn-warning"
-        @click="showDups = !showDups"
-      >
-        {{ dupGroups.length }} duplicate groups ({{
-          formatFileSize(wastedBytes)
-        }}
-        wasted)
-      </button>
     </div>
 
     <!-- Duplicates panel -->
     <div
       v-if="showDups && dupGroups.length"
-      class="max-h-48 overflow-y-auto bg-base-100 border border-gray-600 rounded-box p-3 text-xs space-y-2"
+      class="max-h-48 overflow-y-auto bg-base-200 border border-base-content/10 rounded-box p-3 text-xs space-y-2"
     >
+      <div
+        class="font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 pb-1"
+      >
+        DUPLICATE GROUPS — KEEP ONE, RECLAIM THE REST
+      </div>
       <div v-for="group in dupGroups" :key="group.hash">
         <div class="font-semibold">
           {{ group.paths.length }}× {{ formatFileSize(group.size_bytes) }}
@@ -299,7 +391,7 @@
 
     <!-- 3D preview modal -->
     <ModalView :is-open="show3d" @close="show3d = false">
-      <div class="w-[70vw] h-[70vh] bg-gray-900 rounded-box">
+      <div class="w-[70vw] h-[70vh] bg-base-300 rounded-box">
         <StlViewport v-if="show3d" :parts="stlPaths" />
       </div>
     </ModalView>
@@ -348,6 +440,7 @@ const {
 
 const catalogRoot = ref("");
 const query = ref("");
+const viewMode = ref<"list" | "grid">("grid");
 const selectedTags = ref<string[]>([]);
 const allTags = ref<TagCount[]>([]);
 const entries = ref<CatalogEntry[]>([]);
@@ -431,6 +524,10 @@ const toggleTag = (tag: string) => {
     : [...selectedTags.value, tag];
 };
 
+const toggleDups = () => {
+  if (dupGroups.value.length) showDups.value = !showDups.value;
+};
+
 const selectEntry = async (entry: CatalogEntry) => {
   selected.value = entry;
   files.value = [];
@@ -490,6 +587,52 @@ const reveal = async (path: string) => {
     await revealItemInDir(path);
   } catch (error) {
     toastStore.reportError("Failed to reveal file", error);
+  }
+};
+
+/**
+ * Composes two existing, already-tested commands (getCatalogModelFiles +
+ * addModel) — this is exactly the path AddSTL/step 2 uses, so a catalog
+ * model becomes a real release model with no new backend code.
+ */
+const addToDraftRelease = async () => {
+  if (!selected.value) return;
+  if (!releasesStore.releaseExists || !releasesStore.releaseDir) {
+    toastStore.addToast(
+      "Create a release first, then add models to it from the catalog.",
+      "error",
+    );
+    releasesStore.setReleaseStep(1);
+    return;
+  }
+  const entry = selected.value;
+  const fileResult = await commands.getCatalogModelFiles(entry.dir_path);
+  if (fileResult.status !== "ok") {
+    toastStore.reportError("Failed to read model files", fileResult.error);
+    return;
+  }
+  const result = await commands.addModel(
+    {
+      id: null,
+      name: entry.name,
+      description: entry.description,
+      tags: entry.tags,
+      images: [],
+      model_files: [],
+      group: null,
+    },
+    releasesStore.releaseDir,
+    fileResult.data.map((f) => f.path),
+    entry.preview_path ? [entry.preview_path] : [],
+  );
+  if (result.status === "ok") {
+    releasesStore.addModel(...result.data);
+    toastStore.addToast(
+      `Added "${entry.name}" to the draft release`,
+      "success",
+    );
+  } else {
+    toastStore.reportError("Failed to add model to release", result.error);
   }
 };
 
