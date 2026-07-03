@@ -148,6 +148,10 @@ mod tests {
             uuid: None,
             file_count: 3,
             total_size_bytes: 54,
+            pose: None,
+            scale: None,
+            support_status: None,
+            release_date: None,
         }];
         db::test_init(&conn);
         db::replace_catalog(&mut conn, &rows, &models, &[]).unwrap();

@@ -35,6 +35,10 @@ pub struct ModelRow {
     pub uuid: Option<String>,
     pub file_count: u32,
     pub total_size_bytes: i64,
+    pub pose: Option<String>,
+    pub scale: Option<String>,
+    pub support_status: Option<String>,
+    pub release_date: Option<String>,
 }
 
 // ---- frontend-facing types ----
@@ -50,6 +54,10 @@ pub struct CatalogEntry {
     pub tags: Vec<String>,
     pub file_count: u32,
     pub total_size_bytes: f64,
+    pub pose: Option<String>,
+    pub scale: Option<String>,
+    pub support_status: Option<String>,
+    pub release_date: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

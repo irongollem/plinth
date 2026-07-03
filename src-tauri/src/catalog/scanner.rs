@@ -172,6 +172,10 @@ pub fn scan(
             uuid,
             file_count: info.model_files,
             total_size_bytes: info.model_bytes,
+            pose: None,
+            scale: None,
+            support_status: None,
+            release_date: None,
         });
     }
 

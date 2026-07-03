@@ -336,3 +336,21 @@ pub async fn get_catalog_releases(app_handle: AppHandle) -> Result<Vec<ReleaseSu
     .await
     .map_err(|e| AppError::ConfigError(format!("Release listing task failed: {}", e)))?
 }
+
+#[tauri::command]
+#[specta::specta]
+pub async fn update_model_metadata(
+    app_handle: AppHandle,
+    dir_path: String,
+    pose: Option<String>,
+    scale: Option<String>,
+    support_status: Option<String>,
+    release_date: Option<String>,
+) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::update_model_metadata(&conn, &dir_path, pose, scale, support_status, release_date)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Metadata update failed: {}", e)))?
+}

@@ -7,7 +7,7 @@ use super::{
     ReleaseSummary,
 };
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Open (and if needed initialize) the catalog database.
 pub fn open(db_path: &Path) -> Result<Connection, AppError> {
@@ -80,6 +80,19 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
         "#,
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to init catalog schema: {}", e)))?;
+
+    if version < 2 {
+        conn.execute_batch(
+            r#"
+            ALTER TABLE models ADD COLUMN pose TEXT;
+            ALTER TABLE models ADD COLUMN scale TEXT;
+            ALTER TABLE models ADD COLUMN support_status TEXT;
+            ALTER TABLE models ADD COLUMN release_date TEXT;
+            "#,
+        )
+        .ok();
+    }
+
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(|e| AppError::ConfigError(format!("Failed to set schema version: {}", e)))?;
     Ok(())
@@ -149,8 +162,10 @@ pub fn replace_catalog(
             .prepare(
                 "INSERT OR REPLACE INTO models
                  (dir_path, name, description, designer, release_name, preview_path,
-                  source, uuid, file_count, total_size_bytes, indexed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, strftime('%s','now'))",
+                  source, uuid, file_count, total_size_bytes, pose, scale, support_status,
+                  release_date, indexed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                  strftime('%s','now'))",
             )
             .map_err(map_err)?;
         for m in models {
@@ -165,7 +180,11 @@ pub fn replace_catalog(
                     m.source,
                     m.uuid,
                     m.file_count,
-                    m.total_size_bytes
+                    m.total_size_bytes,
+                    m.pose,
+                    m.scale,
+                    m.support_status,
+                    m.release_date
                 ])
                 .map_err(map_err)?;
         }
@@ -296,7 +315,8 @@ pub fn search(
         "SELECT m.dir_path, m.name, m.description, m.designer, m.release_name,
                 m.preview_path, m.file_count, m.total_size_bytes,
                 COALESCE((SELECT group_concat(t.tag, char(31)) FROM model_tags t
-                          WHERE t.dir_path = m.dir_path), '')
+                          WHERE t.dir_path = m.dir_path), ''),
+                m.pose, m.scale, m.support_status, m.release_date
          FROM models m {}
          ORDER BY m.name COLLATE NOCASE
          LIMIT {} OFFSET {}",
@@ -321,6 +341,10 @@ pub fn search(
                 } else {
                     tags_joined.split('\u{1f}').map(String::from).collect()
                 },
+                pose: row.get(9)?,
+                scale: row.get(10)?,
+                support_status: row.get(11)?,
+                release_date: row.get(12)?,
             })
         })
         .map_err(map_err)?
@@ -549,6 +573,23 @@ pub fn list_releases(conn: &Connection) -> Result<Vec<ReleaseSummary>, AppError>
     Ok(releases)
 }
 
+pub fn update_model_metadata(
+    conn: &Connection,
+    dir_path: &str,
+    pose: Option<String>,
+    scale: Option<String>,
+    support_status: Option<String>,
+    release_date: Option<String>,
+) -> Result<(), AppError> {
+    conn.execute(
+        "UPDATE models SET pose = ?1, scale = ?2, support_status = ?3, release_date = ?4
+         WHERE dir_path = ?5",
+        params![pose, scale, support_status, release_date, dir_path],
+    )
+    .map_err(|e| AppError::ConfigError(format!("Failed to update metadata: {}", e)))?;
+    Ok(())
+}
+
 /// Schema init for in-memory test databases in sibling modules.
 #[cfg(test)]
 pub(crate) fn test_init(conn: &Connection) {
@@ -596,6 +637,10 @@ mod tests {
                 uuid: None,
                 file_count: 1,
                 total_size_bytes: 2048,
+                pose: None,
+                scale: None,
+                support_status: None,
+                release_date: None,
             },
             ModelRow {
                 dir_path: "/lib/bugbear".into(),
@@ -608,6 +653,10 @@ mod tests {
                 uuid: None,
                 file_count: 1,
                 total_size_bytes: 4096,
+                pose: None,
+                scale: None,
+                support_status: None,
+                release_date: None,
             },
         ];
         let tags = vec![("/lib/newt".to_string(), "amphibian".to_string())];
