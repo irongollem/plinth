@@ -114,6 +114,27 @@
       </button>
     </div>
 
+    <!-- Batch move action bar (rows are checkable in list mode) -->
+    <div
+      v-if="checkedDirs.length"
+      class="flex items-center gap-2 bg-base-200 border border-base-content/10 rounded-lg px-3 py-1.5 text-xs"
+    >
+      <span class="font-mono text-base-content/60">
+        {{ checkedDirs.length }} model{{ checkedDirs.length === 1 ? "" : "s" }}
+        selected
+      </span>
+      <button type="button" class="btn btn-xs btn-primary" @click="moveChecked">
+        Move to folder…
+      </button>
+      <button
+        type="button"
+        class="btn btn-xs btn-ghost"
+        @click="checkedDirs = []"
+      >
+        clear
+      </button>
+    </div>
+
     <!-- Content -->
     <div class="flex flex-1 gap-3 min-h-0">
       <section class="flex-1 overflow-y-auto min-h-0">
@@ -134,16 +155,19 @@
             v-if="entries.length"
             class="flex items-center gap-3 font-mono text-[9.5px] tracking-[0.12em] text-base-content/40 border-b border-base-content/10 pb-1.5 pr-3 sticky top-0 bg-base-100"
           >
+            <span class="w-4"></span>
             <span class="w-10"></span>
             <span class="flex-1">MODEL</span>
             <span class="w-[140px]">DESIGNER</span>
             <span class="w-[160px]">TAGS</span>
             <span class="w-[60px] text-right">SIZE</span>
           </div>
-          <button
+          <!-- div, not button: the row hosts a nested checkbox and
+               interactive elements can't nest -->
+          <div
             v-for="entry in entries"
             :key="entry.dir_path"
-            type="button"
+            role="button"
             class="flex items-center gap-3 w-full text-left border-b border-base-content/5 py-1.5 pr-3 pl-2.5 cursor-pointer"
             :class="
               entry.dir_path === selected?.dir_path
@@ -152,6 +176,13 @@
             "
             @click="selectEntry(entry)"
           >
+            <input
+              type="checkbox"
+              class="checkbox checkbox-xs w-4 shrink-0"
+              :checked="checkedDirs.includes(entry.dir_path)"
+              @click.stop
+              @change="toggleChecked(entry.dir_path)"
+            />
             <div
               class="w-10 h-10 shrink-0 rounded-md bg-base-300 overflow-hidden flex items-center justify-center text-base-content/30"
             >
@@ -177,7 +208,7 @@
               class="w-[60px] text-right font-mono text-[11px] text-base-content/50"
               >{{ formatFileSize(entry.total_size_bytes) }}</span
             >
-          </button>
+          </div>
         </template>
 
         <!-- GRID MODE -->
@@ -255,6 +286,72 @@
                 placeholder="+ tag"
               />
             </form>
+          </div>
+
+          <!-- Model details (pose/scale/supports/release date) -->
+          <div>
+            <div
+              class="font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 mb-1.5"
+            >
+              DETAILS
+            </div>
+            <div class="grid grid-cols-2 gap-1.5">
+              <label class="flex flex-col gap-0.5">
+                <span class="font-mono text-[9px] text-base-content/40"
+                  >POSE / VARIANT</span
+                >
+                <input
+                  v-model="metaDraft.pose"
+                  type="text"
+                  class="input input-xs font-mono"
+                  placeholder="e.g. A"
+                />
+              </label>
+              <label class="flex flex-col gap-0.5">
+                <span class="font-mono text-[9px] text-base-content/40"
+                  >SCALE</span
+                >
+                <input
+                  v-model="metaDraft.scale"
+                  type="text"
+                  class="input input-xs font-mono"
+                  placeholder="e.g. 32mm"
+                />
+              </label>
+              <label class="flex flex-col gap-0.5">
+                <span class="font-mono text-[9px] text-base-content/40"
+                  >SUPPORTS</span
+                >
+                <select
+                  v-model="metaDraft.support_status"
+                  class="select select-xs font-mono"
+                >
+                  <option value="">unknown</option>
+                  <option value="supported">supported</option>
+                  <option value="unsupported">unsupported</option>
+                  <option value="both">both</option>
+                </select>
+              </label>
+              <label class="flex flex-col gap-0.5">
+                <span class="font-mono text-[9px] text-base-content/40"
+                  >RELEASED</span
+                >
+                <input
+                  v-model="metaDraft.release_date"
+                  type="text"
+                  class="input input-xs font-mono"
+                  placeholder="YYYY-MM"
+                />
+              </label>
+            </div>
+            <button
+              v-if="metaDirty"
+              type="button"
+              class="btn btn-xs btn-primary w-full mt-1.5"
+              @click="saveMetadata"
+            >
+              Save details
+            </button>
           </div>
 
           <div class="flex gap-1.5">
@@ -368,19 +465,40 @@
       <div
         class="font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 pb-1"
       >
-        DUPLICATE GROUPS — KEEP ONE, RECLAIM THE REST
+        DUPLICATE GROUPS — PICK THE COPY TO KEEP, RECLAIM THE REST
       </div>
       <div v-for="group in dupGroups" :key="group.hash">
-        <div class="font-semibold">
-          {{ group.paths.length }}× {{ formatFileSize(group.size_bytes) }}
+        <div class="flex items-center gap-2">
+          <span class="font-semibold">
+            {{ group.paths.length }}× {{ formatFileSize(group.size_bytes) }}
+          </span>
+          <span class="flex-1"></span>
+          <button
+            type="button"
+            class="btn btn-xs btn-outline btn-error"
+            :disabled="reclaimBusy"
+            @click="reclaimGroup(group)"
+          >
+            reclaim
+            {{ formatFileSize(group.size_bytes * (group.paths.length - 1)) }}
+          </button>
         </div>
         <ul class="opacity-70">
           <li
             v-for="path in group.paths"
             :key="path"
-            class="flex justify-between gap-2"
+            class="flex items-center justify-between gap-2"
           >
-            <span class="truncate" :title="path">{{ path }}</span>
+            <label class="flex items-center gap-1.5 truncate cursor-pointer">
+              <input
+                type="radio"
+                class="radio radio-xs"
+                :name="`keep-${group.hash}`"
+                :checked="keepFor(group) === path"
+                @change="keepChoice[group.hash] = path"
+              />
+              <span class="truncate" :title="path">{{ path }}</span>
+            </label>
             <button type="button" class="link shrink-0" @click="reveal(path)">
               reveal
             </button>
@@ -400,6 +518,7 @@
 
 <script setup lang="ts">
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { computed, onMounted, ref, watch } from "vue";
 import {
@@ -452,6 +571,17 @@ const newTag = ref("");
 const dupGroups = ref<DuplicateGroup[]>([]);
 const showDups = ref(false);
 const show3d = ref(false);
+// per-group hash -> path the user wants to keep (defaults to the first)
+const keepChoice = ref<Record<string, string>>({});
+const reclaimBusy = ref(false);
+// dir_paths ticked for a batch move
+const checkedDirs = ref<string[]>([]);
+const metaDraft = ref({
+  pose: "",
+  scale: "",
+  support_status: "",
+  release_date: "",
+});
 
 const visibleTags = computed(() => {
   const top = allTags.value.slice(0, 12);
@@ -587,6 +717,124 @@ const reveal = async (path: string) => {
     await revealItemInDir(path);
   } catch (error) {
     toastStore.reportError("Failed to reveal file", error);
+  }
+};
+
+const keepFor = (group: DuplicateGroup) =>
+  keepChoice.value[group.hash] ?? group.paths[0];
+
+const reclaimGroup = async (group: DuplicateGroup) => {
+  const keep = keepFor(group);
+  const doomed = group.paths.filter((path) => path !== keep);
+  const confirmed = await confirm(
+    `Delete ${doomed.length} duplicate file${doomed.length === 1 ? "" : "s"} and keep:\n${keep}`,
+    { title: "Reclaim duplicates", kind: "warning" },
+  );
+  if (!confirmed) return;
+  reclaimBusy.value = true;
+  try {
+    const result = await commands.deleteDuplicateFiles(doomed);
+    if (result.status === "ok") {
+      const { succeeded, errors } = result.data;
+      if (succeeded) {
+        toastStore.addToast(
+          `Reclaimed ${succeeded} duplicate file${succeeded === 1 ? "" : "s"}`,
+          "success",
+        );
+      }
+      for (const error of errors) toastStore.addToast(error, "error");
+      // the backend pruned the index, so groups/stats/sizes are already fresh
+      await Promise.all([runSearch(), refreshMeta()]);
+    } else {
+      toastStore.reportError("Failed to delete duplicates", result.error);
+    }
+  } finally {
+    reclaimBusy.value = false;
+  }
+};
+
+const toggleChecked = (dirPath: string) => {
+  checkedDirs.value = checkedDirs.value.includes(dirPath)
+    ? checkedDirs.value.filter((d) => d !== dirPath)
+    : [...checkedDirs.value, dirPath];
+};
+
+const moveChecked = async () => {
+  const dest = await selectDirectory({ title: "Move selected models into…" });
+  if (!dest) return;
+  const sep = dest.includes("\\") ? "\\" : "/";
+  const operations = checkedDirs.value
+    .map((from) => ({
+      from,
+      to: `${dest}${sep}${from.split(/[\\/]/).pop()}`,
+    }))
+    .filter((op) => op.from !== op.to);
+  if (!operations.length) {
+    toastStore.addToast("Those models are already in that folder", "warning");
+    return;
+  }
+  const confirmed = await confirm(
+    `Move ${operations.length} model folder${operations.length === 1 ? "" : "s"} into:\n${dest}`,
+    { title: "Reorganize models", kind: "warning" },
+  );
+  if (!confirmed) return;
+  const result = await commands.batchMoveModels(operations);
+  if (result.status === "ok") {
+    const { succeeded, errors } = result.data;
+    if (succeeded) {
+      toastStore.addToast(
+        `Moved ${succeeded} model${succeeded === 1 ? "" : "s"}`,
+        "success",
+      );
+    }
+    for (const error of errors) toastStore.addToast(error, "error");
+    checkedDirs.value = [];
+    // the selected entry's dir_path may have just changed
+    selected.value = null;
+    files.value = [];
+    await Promise.all([runSearch(), refreshMeta()]);
+  } else {
+    toastStore.reportError("Failed to move models", result.error);
+  }
+};
+
+watch(selected, (entry) => {
+  metaDraft.value = {
+    pose: entry?.pose ?? "",
+    scale: entry?.scale ?? "",
+    support_status: entry?.support_status ?? "",
+    release_date: entry?.release_date ?? "",
+  };
+});
+
+const metaDirty = computed(() => {
+  const entry = selected.value;
+  if (!entry) return false;
+  const draft = metaDraft.value;
+  return (
+    draft.pose !== (entry.pose ?? "") ||
+    draft.scale !== (entry.scale ?? "") ||
+    draft.support_status !== (entry.support_status ?? "") ||
+    draft.release_date !== (entry.release_date ?? "")
+  );
+});
+
+const saveMetadata = async () => {
+  if (!selected.value) return;
+  const orNull = (value: string) => value.trim() || null;
+  const draft = metaDraft.value;
+  const result = await commands.updateModelMetadata(
+    selected.value.dir_path,
+    orNull(draft.pose),
+    orNull(draft.scale),
+    orNull(draft.support_status),
+    orNull(draft.release_date),
+  );
+  if (result.status === "ok") {
+    toastStore.addToast("Details saved", "success");
+    await refreshSelected();
+  } else {
+    toastStore.reportError("Failed to save details", result.error);
   }
 };
 
