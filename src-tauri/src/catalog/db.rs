@@ -131,16 +131,22 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
         "group_name",
     ] {
         if !existing_columns.iter().any(|c| c == column) {
-            conn.execute(
+            if let Err(e) = conn.execute(
                 &format!("ALTER TABLE models ADD COLUMN {} TEXT", column),
                 [],
-            )
-            .map_err(|e| {
-                AppError::ConfigError(format!(
-                    "Failed to migrate catalog schema (add {}): {}",
-                    column, e
-                ))
-            })?;
+            ) {
+                // Every command opens its own connection and the UI fires
+                // several in parallel, so two opens can both see the column
+                // missing and race the ALTER. The loser's "duplicate column"
+                // means the winner already added it — that IS the goal state,
+                // not a failure. Anything else must still surface.
+                if !e.to_string().contains("duplicate column name") {
+                    return Err(AppError::ConfigError(format!(
+                        "Failed to migrate catalog schema (add {}): {}",
+                        column, e
+                    )));
+                }
+            }
         }
     }
 
