@@ -131,7 +131,7 @@ pub fn scan(
             continue;
         }
         let release = nearest_release(&releases, dir_path);
-        let (name, description, uuid, source, preview) = match &info.metadata {
+        let (name, description, uuid, source, preview, inferred) = match &info.metadata {
             Some(meta) => {
                 // model.json image paths are relative to the model dir
                 let preview = meta
@@ -150,14 +150,19 @@ pub fn scan(
                     meta.id.map(|id| id.to_string()),
                     "metadata",
                     preview,
+                    None,
                 )
             }
             None => {
-                let name = Path::new(dir_path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| dir_path.clone());
-                (name, None, None, "heuristic", info.first_image.clone())
+                let inferred = infer_model_identity(root, dir_path);
+                (
+                    inferred.name.clone(),
+                    None,
+                    None,
+                    "heuristic",
+                    info.first_image.clone(),
+                    Some(inferred),
+                )
             }
         };
 
@@ -172,10 +177,10 @@ pub fn scan(
             uuid,
             file_count: info.model_files,
             total_size_bytes: info.model_bytes,
-            pose: None,
+            pose: inferred.as_ref().and_then(|i| i.pose.clone()),
             scale: None,
-            support_status: None,
-            release_date: None,
+            support_status: inferred.as_ref().and_then(|i| i.support_status.clone()),
+            release_date: inferred.as_ref().and_then(|i| i.release_date.clone()),
         });
     }
 
@@ -184,6 +189,130 @@ pub fn scan(
         models,
         metadata_tags,
     })
+}
+
+// ---- stacked-folder identity inference (heuristic models only) ----
+
+struct InferredModel {
+    name: String,
+    pose: Option<String>,
+    support_status: Option<String>,
+    release_date: Option<String>,
+}
+
+/// Read identity out of "stacked" library structures like
+/// `<release-05-2026>/<model>/<unsupported>/<A>`. The dirs that directly
+/// hold the files are often packaging variants, and naming models after
+/// them yields a catalog full of "A"s and "supported"s. Climb toward the
+/// root until a segment says something, and keep what the packaging
+/// segments told us as metadata instead of throwing it away.
+fn infer_model_identity(root: &Path, dir_path: &str) -> InferredModel {
+    let mut pose: Option<String> = None;
+    let mut support_status: Option<String> = None;
+    let mut release_date: Option<String> = None;
+    let mut base_name: Option<String> = None;
+
+    let mut current = Some(Path::new(dir_path));
+    while let Some(dir) = current {
+        if dir == root {
+            break;
+        }
+        let Some(segment) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            break;
+        };
+
+        if release_date.is_none() {
+            release_date = date_from_segment(&segment);
+        }
+        if let Some(status) = support_from_segment(&segment) {
+            support_status.get_or_insert_with(|| status.to_string());
+        } else if base_name.is_none() {
+            // Pose markers only count BELOW the name: once a real name is
+            // found, a short ancestor dir is a collection, not a variant
+            if let Some(p) = pose_from_segment(&segment) {
+                pose.get_or_insert(p);
+            } else if !is_generic_segment(&segment) {
+                base_name = Some(segment);
+            }
+        }
+        current = dir.parent();
+    }
+
+    let name = match (&base_name, &pose) {
+        (Some(base), Some(p)) => format!("{} {}", base, p),
+        (Some(base), None) => base.clone(),
+        // nothing but packaging all the way up: keep the old leaf-dir name
+        (None, _) => Path::new(dir_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dir_path.to_string()),
+    };
+
+    InferredModel {
+        name,
+        pose,
+        support_status,
+        release_date,
+    }
+}
+
+fn support_from_segment(segment: &str) -> Option<&'static str> {
+    // presupported means supports are present — same answer as supported
+    match segment
+        .trim()
+        .to_lowercase()
+        .replace(['-', '_'], "")
+        .as_str()
+    {
+        "supported" | "presupported" => Some("supported"),
+        "unsupported" => Some("unsupported"),
+        _ => None,
+    }
+}
+
+/// "A", "B2", "01", "pose 3" — variant markers, not names.
+fn pose_from_segment(segment: &str) -> Option<String> {
+    let lower = segment.trim().to_lowercase();
+    let candidate = lower
+        .strip_prefix("pose")
+        .map(|rest| rest.trim_start_matches([' ', '-', '_']))
+        .unwrap_or(&lower);
+    (!candidate.is_empty()
+        && candidate.len() <= 2
+        && candidate.chars().all(|c| c.is_ascii_alphanumeric()))
+    .then(|| candidate.to_uppercase())
+}
+
+/// Container words that describe packaging, not the model.
+fn is_generic_segment(segment: &str) -> bool {
+    let normalized = segment.trim().to_lowercase();
+    matches!(
+        normalized.as_str(),
+        "stl" | "stls" | "obj" | "files" | "parts" | "lys" | "chitubox"
+    ) || support_from_segment(&normalized).is_some()
+        || pose_from_segment(&normalized).is_some()
+}
+
+/// A MM-YYYY or YYYY-MM digit pair anywhere in the segment, e.g.
+/// "dungeon_classics-05-2026" -> "2026-05".
+fn date_from_segment(segment: &str) -> Option<String> {
+    let tokens: Vec<&str> = segment
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|t| !t.is_empty())
+        .collect();
+    for pair in tokens.windows(2).rev() {
+        let (month_token, year_token) = match (pair[0].len(), pair[1].len()) {
+            (2, 4) => (pair[0], pair[1]),
+            (4, 2) => (pair[1], pair[0]),
+            _ => continue,
+        };
+        if let (Ok(month), Ok(year)) = (month_token.parse::<u32>(), year_token.parse::<u32>()) {
+            if (1..=12).contains(&month) && (1900..=2200).contains(&year) {
+                return Some(format!("{:04}-{:02}", year, month));
+            }
+        }
+    }
+    None
 }
 
 fn is_hidden(path: &Path) -> bool {
@@ -273,5 +402,57 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn infers_identity_from_stacked_folders() {
+        let root = Path::new("/lib");
+
+        // the minihoard shape that motivated this:
+        // release-with-date / model / support / pose
+        let inferred = infer_model_identity(
+            root,
+            "/lib/dungeon_classics-05-2026/galeb duhr/unsupported/A",
+        );
+        assert_eq!(inferred.name, "galeb duhr A");
+        assert_eq!(inferred.pose.as_deref(), Some("A"));
+        assert_eq!(inferred.support_status.as_deref(), Some("unsupported"));
+        assert_eq!(inferred.release_date.as_deref(), Some("2026-05"));
+
+        // presupported counts as supported; "pose 2" is a variant marker
+        let inferred = infer_model_identity(root, "/lib/rats/pre-supported/pose 2");
+        assert_eq!(inferred.name, "rats 2");
+        assert_eq!(inferred.pose.as_deref(), Some("2"));
+        assert_eq!(inferred.support_status.as_deref(), Some("supported"));
+
+        // a plain named dir stays exactly what it was
+        let inferred = infer_model_identity(root, "/lib/loose");
+        assert_eq!(inferred.name, "loose");
+        assert!(inferred.pose.is_none());
+        assert!(inferred.support_status.is_none());
+
+        // packaging all the way to the root: fall back to the leaf name
+        let inferred = infer_model_identity(root, "/lib/supported");
+        assert_eq!(inferred.name, "supported");
+
+        // a short ancestor above the name is a collection, not a pose
+        let inferred = infer_model_identity(root, "/lib/xx/minotaur/stls");
+        assert_eq!(inferred.name, "minotaur");
+        assert!(inferred.pose.is_none());
+    }
+
+    #[test]
+    fn date_from_segment_handles_both_orders_and_junk() {
+        assert_eq!(
+            date_from_segment("dungeon_classics-05-2026").as_deref(),
+            Some("2026-05")
+        );
+        assert_eq!(
+            date_from_segment("2025-11 heroes").as_deref(),
+            Some("2025-11")
+        );
+        assert_eq!(date_from_segment("warhammer 40k"), None);
+        assert_eq!(date_from_segment("release-13-2026"), None, "month 13");
+        assert_eq!(date_from_segment("plain name"), None);
     }
 }
