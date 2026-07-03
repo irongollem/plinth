@@ -1,2 +1,102 @@
 @import "tailwindcss";
-@plugin "daisyui";
+@plugin "daisyui" {
+  themes: false;
+}
+
+/* Plinth type system: Archivo for UI text, IBM Plex Mono for labels/data —
+   swapping Tailwind's default font stacks means every existing font-sans /
+   font-mono usage across the app picks these up for free. */
+@theme {
+  --font-sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --font-display: "Bebas Neue", "Archivo", sans-serif;
+  --font-serif-display: "Cormorant Garamond", serif;
+}
+
+/* Dark theme — the primary/default look, matched hex-for-hex to the Plinth
+   design mockup (warm charcoal, no blue/purple anywhere). base-100 is the
+   main content surface; base-200/300 step DARKER (sidebar panels), which is
+   inverted from a typical light-first daisyUI theme but matches the mock. */
+@plugin "daisyui/theme" {
+  name: "plinth";
+  default: true;
+  prefersdark: true;
+  color-scheme: dark;
+
+  --color-base-100: #232120;
+  --color-base-200: #211e1b;
+  --color-base-300: #1b1917;
+  --color-base-content: #eae6de;
+
+  --color-primary: #b0876f;
+  --color-primary-content: #232120;
+  --color-secondary: #8fa3b0;
+  --color-secondary-content: #131a1d;
+  --color-accent: #b0876f;
+  --color-accent-content: #232120;
+  --color-neutral: #2c2925;
+  --color-neutral-content: #eae6de;
+
+  --color-info: #8fa3b0;
+  --color-info-content: #131a1d;
+  --color-success: #7d9a80;
+  --color-success-content: #0f1710;
+  --color-warning: #c99a4b;
+  --color-warning-content: #211705;
+  --color-error: #b45f56;
+  --color-error-content: #200807;
+
+  --radius-selector: 0.5rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.625rem;
+  --border: 1px;
+}
+
+/* Light theme — the Settings "Light" toggle target, same role mapping */
+@plugin "daisyui/theme" {
+  name: "plinth-light";
+  color-scheme: light;
+
+  --color-base-100: #edeae4;
+  --color-base-200: #e9e5de;
+  --color-base-300: #e3dfd8;
+  --color-base-content: #262320;
+
+  --color-primary: #a0782d;
+  --color-primary-content: #fbf6ec;
+  --color-secondary: #5c7686;
+  --color-secondary-content: #f2f6f8;
+  --color-accent: #a0782d;
+  --color-accent-content: #fbf6ec;
+  --color-neutral: #d3cec4;
+  --color-neutral-content: #262320;
+
+  --color-info: #5c7686;
+  --color-info-content: #f2f6f8;
+  --color-success: #4f6b52;
+  --color-success-content: #eef3ee;
+  --color-warning: #8a5d1f;
+  --color-warning-content: #fbf1e2;
+  --color-error: #8f3a32;
+  --color-error-content: #fbeceb;
+
+  --radius-selector: 0.5rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.625rem;
+  --border: 1px;
+}
+
+body {
+  margin: 0;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 120, 105, 0.35);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
