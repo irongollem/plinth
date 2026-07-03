@@ -48,7 +48,7 @@ pub fn get_target_path(app_handle: &AppHandle) -> Result<PathBuf, AppError> {
         Ok(app_handle
             .path()
             .document_dir()?
-            .join("STL-Pack")
+            .join("Plinth")
             .join("exports"))
     }
 }

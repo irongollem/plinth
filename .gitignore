@@ -28,3 +28,6 @@ dist-ssr
 src/bindings.ts
 
 src-tauri/target/
+
+# Design export drops (temporary, extracted into scratch space)
+raw/

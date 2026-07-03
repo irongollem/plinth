@@ -1,4 +1,6 @@
-# stl-pack
+# Plinth
+
+_(repo name `stl-pack` for historical reasons; the product is Plinth)_
 
 [![GitHub Release](https://img.shields.io/github/v/release/irongollem/stl-pack?include_prereleases&style=flat-square)](https://github.com/irongollem/stl-pack/releases)
 [![GitHub Issues](https://img.shields.io/github/issues/irongollem/stl-pack?style=flat-square)](https://github.com/irongollem/stl-pack/issues)
@@ -7,7 +9,7 @@
 [![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg?style=flat-square)](CONTRIBUTING.md)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri-purple?style=flat-square)](https://tauri.app/)
 
-stl-pack is an opinionated desktop tool for compressing and bundling STL files "the right way". It provides an easy-to-use interface for optimizing your 3D models, ensuring they are efficiently packed and ready for use.
+Plinth is an opinionated desktop tool for cataloging, rendering, compressing, and bundling STL files "the right way". It provides an easy-to-use interface for organizing a disk-scale 3D model library and packing releases so they're efficient and ready to share.
 
 ## Features
 
@@ -19,11 +21,11 @@ stl-pack is an opinionated desktop tool for compressing and bundling STL files "
 
 ## Installation
 
-To install stl-pack, download the latest release from the [releases page](https://github.com/irongollem/stl-pack/releases) and follow the installation instructions for your operating system.
+To install Plinth, download the latest release from the [releases page](https://github.com/irongollem/stl-pack/releases) and follow the installation instructions for your operating system.
 
 ## Usage
 
-1. Open stl-pack.
+1. Open Plinth.
 2. Add STL files you want to compress or bundle.
 3. Choose your desired compression settings.
 4. Click the "Compress" or "Bundle" button.
@@ -31,13 +33,13 @@ To install stl-pack, download the latest release from the [releases page](https:
 
 ## Our Philosophy
 
-stl-pack is an opinionated tool, and we believe in "the right way" to manage and distribute 3D printable files. This means:
+Plinth is an opinionated tool, and we believe in "the right way" to manage and distribute 3D printable files. This means:
 
 - **Efficiency:** Optimizing file sizes without compromising detail, making sharing and storage easier.
 - **Organization:** Bundling models, metadata, and previews into a clear, structured format (`.3pk`).
 - **Reproducibility:** Ensuring that users have all the information needed to understand and use the models.
 
-(Project maintainers: Please expand this section with more specific details about the design choices and goals of stl-pack!)
+(Project maintainers: Please expand this section with more specific details about the design choices and goals of Plinth!)
 
 ## Recommended IDE Setup for Development
 
@@ -58,7 +60,7 @@ Contributions are welcome! Please read the [contributing guidelines](CONTRIBUTIN
 
 ## Development Status & Roadmap
 
-stl-pack is under active development! We are constantly working on new features and improvements.
+Plinth is under active development! We are constantly working on new features and improvements.
 You can follow our progress and see planned features in our [To-Do List](todolist.md).
 
 ## License
@@ -77,4 +79,4 @@ See [`LICENSE.md`](LICENSE.md) for the complete license terms and [`THIRD_PARTY_
 
 ## 3pk
 
-STL-Pack generates and in the future consumes an original 3pk file which is a compressed archive containing metadata, licence data and images representing a full release or bundle in a structured format.
+Plinth generates and in the future consumes an original 3pk file which is a compressed archive containing metadata, licence data and images representing a full release or bundle in a structured format.

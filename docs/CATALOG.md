@@ -1,6 +1,6 @@
-# STL-Pack Cataloger — Feature Spec & Architecture
+# Plinth Cataloger — Feature Spec & Architecture
 
-STL-Pack grows from a release bundler into a disk-scale 3D model manager.
+Plinth grows from a release bundler into a disk-scale 3D model manager.
 The cataloger indexes terabytes of STLs, makes them searchable in
 milliseconds, and becomes the hub the other features (render, bundle,
 unbundle) hang off.

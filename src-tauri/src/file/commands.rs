@@ -130,7 +130,7 @@ pub async fn create_release(
 
     if let Some(window) = app_handle.get_webview_window("main") {
         window.set_title(&format!(
-            "STL-Pack - Creating release: {}",
+            "Plinth - Creating release: {}",
             release_with_paths.name
         ))?;
     }
