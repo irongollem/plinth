@@ -211,6 +211,18 @@
         </div>
       </div>
 
+      <label
+        class="label cursor-pointer gap-2 text-sm"
+        title="For parts exported around different origins: seats the mini on the part named *base*. Leave off when parts already fit together."
+      >
+        <input
+          type="checkbox"
+          class="checkbox checkbox-sm"
+          v-model="alignParts"
+        />
+        Align parts on base
+      </label>
+
       <div class="flex items-center gap-2">
         <label class="label cursor-pointer gap-2 text-sm flex-1">
           <input
@@ -427,6 +439,7 @@
         ref="viewport"
         :parts="partPaths"
         :color="colorLinear"
+        :align-parts="alignParts"
         @rotation="onRotation"
         @view="onView"
         @loaded="onLoaded"
@@ -523,6 +536,7 @@ const {
   errorMessage,
   start,
   cancel,
+  reset,
 } = useRenderStatus();
 
 const viewport = ref<InstanceType<typeof StlViewport> | null>(null);
@@ -552,6 +566,10 @@ watch(
 const rotation = ref<[number, number, number]>([90, 0, 0]);
 const view = ref({ azimuth: -15, elevation: 0.22, zoom: 1.15 });
 const matchCamera = ref(true);
+// Re-seat parts exported around different origins (see StlViewport's
+// stackOnBase). Off by default: on correctly-exported multi-part minis
+// the re-seat would WRONGLY collapse well-placed parts onto the base.
+const alignParts = ref(false);
 const resolution = ref(1600);
 const samples = ref(96);
 // "flat" (the handover's locked look) won the three-way comparison against
@@ -591,6 +609,15 @@ const setViewField = (
 const showResult = ref(false);
 // What the user asked the render to be called, to detect auto-renames
 let requestedOutputPath = "";
+
+// A new subject on the stage clears the previous model's finished shot —
+// this view is kept alive across tab switches, so without this the last
+// mini's render greeted whoever came next from the catalog
+watch(partPaths, (next, prev) => {
+  if (next.join("\n") === prev.join("\n")) return;
+  showResult.value = false;
+  if (!isRendering.value) reset();
+});
 
 // A finished render takes over the viewport + toasts — previously it only
 // appeared as a small thumbnail below the fold and looked like nothing
@@ -676,6 +703,7 @@ const persistRenderSettings = () => {
     JSON.stringify({
       view: view.value,
       matchCamera: matchCamera.value,
+      alignParts: alignParts.value,
       resolution: resolution.value,
       samples: samples.value,
       look: look.value,
@@ -693,6 +721,8 @@ const loadRenderSettings = () => {
     const saved = JSON.parse(raw);
     if (typeof saved.matchCamera === "boolean")
       matchCamera.value = saved.matchCamera;
+    if (typeof saved.alignParts === "boolean")
+      alignParts.value = saved.alignParts;
     if ([512, 1024, 1600, 2048].includes(saved.resolution))
       resolution.value = saved.resolution;
     if ([32, 96, 256].includes(saved.samples)) samples.value = saved.samples;
@@ -728,6 +758,7 @@ const resetRenderSettings = () => {
   view.value = { ...VIEW_DEFAULTS };
   viewport.value?.setView(VIEW_DEFAULTS);
   matchCamera.value = true;
+  alignParts.value = false;
   resolution.value = 1600;
   samples.value = 96;
   look.value = "flat";
@@ -738,7 +769,16 @@ const resetRenderSettings = () => {
 };
 
 watch(
-  [view, matchCamera, resolution, samples, look, colorHex, branding],
+  [
+    view,
+    matchCamera,
+    alignParts,
+    resolution,
+    samples,
+    look,
+    colorHex,
+    branding,
+  ],
   persistRenderSettings,
   { deep: true },
 );
@@ -850,6 +890,7 @@ const render = async () => {
     // The OS save dialog already asked about replacing an explicit choice;
     // default outputs never overwrite — the backend uniquifies with -N
     overwrite: !!outputPath.value,
+    align_parts: alignParts.value,
   });
 
   if (result.status === "error") {

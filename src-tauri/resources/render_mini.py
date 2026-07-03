@@ -62,7 +62,8 @@ def parse():
     argv = sys.argv[sys.argv.index("--")+1:] if "--" in sys.argv else []
     cfg = dict(paths=[], out=None, rotate=(90,0,0), color=LOOK["base_color"],
                azimuth=-15.0, elev=0.22, zoom=1.15, res=LOOK["res"], samples=LOOK["samples"],
-               look="flat", contact=False, sheet_cols=3, sheet_res=420, sheet_samples=24)
+               look="flat", contact=False, sheet_cols=3, sheet_res=420, sheet_samples=24,
+               align=False)
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -76,6 +77,7 @@ def parse():
         elif a == "--samples":       i+=1; cfg["samples"]=int(argv[i])
         elif a == "--look":          i+=1; cfg["look"]=argv[i]
         elif a == "--contact-sheet": cfg["contact"]=True
+        elif a == "--align-parts":   cfg["align"]=True
         elif a == "--sheet-cols":    i+=1; cfg["sheet_cols"]=int(argv[i])
         elif a == "--sheet-res":     i+=1; cfg["sheet_res"]=int(argv[i])
         else:                        cfg["paths"].append(a)
@@ -92,15 +94,52 @@ def clear():
         for b in list(c):
             if b.users == 0: c.remove(b)
 
-def import_join(paths):
-    before = set(bpy.data.objects)
+def stack_on_base(groups):
+    """Re-seat parts exported around different origins (--align-parts).
+
+    STL carries no shared origin, so when a creator re-exports one part the
+    files drift apart and the join floats the mini through its base. The
+    part named *base* is the ground truth: its THINNEST bbox axis is the
+    model's up axis whatever orientation it was exported in (bases are
+    flat), every other part gets centered over it and seated on its top.
+    Must mirror stackOnBase in StlViewport.vue so preview == render.
+    """
+    base = next((g for g in groups if "base" in os.path.basename(g[0]).lower()), None)
+    if base is None or len(groups) < 2: return
+    def bounds(objs):
+        pts = [o.matrix_world @ Vector(c) for o in objs for c in o.bound_box]
+        return ([min(p[i] for p in pts) for i in range(3)],
+                [max(p[i] for p in pts) for i in range(3)])
+    bmin, bmax = bounds(base[1])
+    extents = [bmax[i]-bmin[i] for i in range(3)]
+    up = extents.index(min(extents))
+    across = [i for i in range(3) if i != up]
+    base_center = [(bmin[i]+bmax[i])/2 for i in range(3)]
+    base_top = bmax[up]
+    for path, objs in groups:
+        if path == base[0]: continue
+        omin, omax = bounds(objs)
+        ocenter = [(omin[i]+omax[i])/2 for i in range(3)]
+        delta = [0.0, 0.0, 0.0]
+        for i in across: delta[i] = base_center[i] - ocenter[i]
+        delta[up] = base_top - omin[up]
+        for o in objs:
+            o.location = (o.location[0]+delta[0], o.location[1]+delta[1], o.location[2]+delta[2])
+    bpy.context.view_layer.update()
+
+def import_join(paths, align=False):
+    groups = []
     for p in paths:
         p = os.path.normpath(p)
         if not os.path.isfile(p): raise SystemExit(f"File not found: {p}")
+        before = set(bpy.data.objects)
         if hasattr(bpy.ops.wm, "stl_import"): bpy.ops.wm.stl_import(filepath=p)
         else: bpy.ops.import_mesh.stl(filepath=p)
-    new = [o for o in bpy.data.objects if o not in before and o.type=="MESH"]
+        added = [o for o in bpy.data.objects if o not in before and o.type=="MESH"]
+        groups.append((p, added))
+    new = [o for _, objs in groups for o in objs]
     if not new: raise SystemExit("STL import produced no mesh.")
+    if align: stack_on_base(groups)
     bpy.ops.object.select_all(action="DESELECT")
     for o in new: o.select_set(True)
     bpy.context.view_layer.objects.active = new[0]
@@ -270,7 +309,7 @@ def setup_render(res, samples, look="flat"):
 def build_and_render(cfg, rotate, out, res, samples):
     """Full pipeline for one image at a given rotation."""
     clear()
-    obj = import_join(cfg["paths"])
+    obj = import_join(cfg["paths"], cfg["align"])
     normalize(obj, rotate)
     resin_material(obj, cfg["color"], cfg["look"])
     lights(cfg["look"]); black_world(cfg["look"])

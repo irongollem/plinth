@@ -22,6 +22,8 @@ const props = defineProps<{
   color?: [number, number, number];
   /** Small-embed mode (catalog drawer): hides the help text and crop guide */
   compact?: boolean;
+  /** Re-seat parts on the part named *base* (mirrors --align-parts) */
+  alignParts?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -536,6 +538,45 @@ const disposeModel = () => {
   meshGroup = null;
 };
 
+/**
+ * Re-seat parts exported around different origins ("stack on base").
+ *
+ * STL carries no shared origin, so when a creator re-exports one part the
+ * files drift apart and the join floats the mini through its base. The
+ * part named *base* is the ground truth: its THINNEST bbox axis is the
+ * model's up axis whatever orientation it was exported in (bases are
+ * flat), every other part gets centered over it and seated on its top.
+ * Must mirror stack_on_base in render_mini.py so preview == render.
+ */
+const stackOnBase = (geometries: THREE.BufferGeometry[], paths: string[]) => {
+  if (geometries.length < 2) return;
+  const baseIndex = paths.findIndex((p) =>
+    /base/i.test(p.split(/[\\/]/).pop() ?? ""),
+  );
+  if (baseIndex === -1) return;
+  const boxes = geometries.map((g) => {
+    g.computeBoundingBox();
+    return g.boundingBox as THREE.Box3;
+  });
+  const base = boxes[baseIndex];
+  const size = base.getSize(new THREE.Vector3());
+  const dims: Array<"x" | "y" | "z"> = ["x", "y", "z"];
+  const up =
+    dims[[size.x, size.y, size.z].indexOf(Math.min(size.x, size.y, size.z))];
+  const across = dims.filter((d) => d !== up);
+  const baseCenter = base.getCenter(new THREE.Vector3());
+  const baseTop = base.max[up];
+  geometries.forEach((g, i) => {
+    if (i === baseIndex) return;
+    const box = boxes[i];
+    const center = box.getCenter(new THREE.Vector3());
+    const offset = new THREE.Vector3();
+    for (const d of across) offset[d] = baseCenter[d] - center[d];
+    offset[up] = baseTop - box.min[up];
+    g.translate(offset.x, offset.y, offset.z);
+  });
+};
+
 const loadParts = async () => {
   if (!pivot || !material) return;
   const token = ++loadToken;
@@ -583,6 +624,7 @@ const loadParts = async () => {
 
     // Join parts in their native coordinates (same as the Blender join),
     // then center and normalize the whole to 2 units like normalize() does.
+    if (props.alignParts) stackOnBase(geometries, props.parts);
     const group = new THREE.Group();
     for (const geometry of geometries) {
       group.add(new THREE.Mesh(geometry, material));
@@ -606,6 +648,7 @@ const loadParts = async () => {
 };
 
 watch(() => props.parts, loadParts, { deep: true });
+watch(() => props.alignParts, loadParts);
 watch(
   () => props.color,
   (color) => {

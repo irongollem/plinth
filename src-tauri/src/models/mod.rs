@@ -40,6 +40,10 @@ pub struct RenderOptions {
     /// a unique -N suffix instead of being clobbered
     #[serde(default)]
     pub overwrite: bool,
+    /// Re-seat parts exported around different origins by stacking them on
+    /// the part named *base* (render_mini.py --align-parts)
+    #[serde(default)]
+    pub align_parts: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

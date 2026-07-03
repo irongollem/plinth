@@ -238,6 +238,9 @@ pub fn build_render_command(
     if let Some(look) = &options.look {
         cmd.arg("--look").arg(look);
     }
+    if options.align_parts {
+        cmd.arg("--align-parts");
+    }
     cmd.arg("--out").arg(output_path);
     cmd
 }
@@ -314,6 +317,7 @@ mod tests {
             look: Some("rich".to_string()),
             output_path: None,
             overwrite: true,
+            align_parts: false,
         };
         let mut cmd = build_render_command(
             &blender,
