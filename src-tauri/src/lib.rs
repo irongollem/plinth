@@ -7,9 +7,10 @@ mod render;
 mod settings;
 
 use catalog::commands::{
-    add_catalog_tag, cancel_catalog_job, get_catalog_model_files, get_catalog_releases,
-    get_catalog_stats, get_catalog_tags, get_duplicate_groups, remove_catalog_tag, search_catalog,
-    start_catalog_scan, start_duplicate_scan,
+    add_catalog_tag, batch_move_models, cancel_catalog_job, delete_duplicate_files,
+    get_catalog_model_files, get_catalog_releases, get_catalog_stats, get_catalog_tags,
+    get_duplicate_groups, remove_catalog_tag, search_catalog, start_catalog_scan,
+    start_duplicate_scan, update_model_metadata,
 };
 use file::commands::{add_model, cancel_compression, create_release, finalize_release};
 use models::events::{CompressionStatus, DuplicateStatus, RenderStatus, ScanStatus};
@@ -62,6 +63,9 @@ fn create_specta_builder() -> Builder {
             get_catalog_stats,
             get_duplicate_groups,
             get_catalog_releases,
+            update_model_metadata,
+            delete_duplicate_files,
+            batch_move_models,
         ])
         .events(collect_events![
             CompressionStatus,
@@ -69,6 +73,21 @@ fn create_specta_builder() -> Builder {
             ScanStatus,
             DuplicateStatus,
         ])
+}
+
+/// Shared by the debug-run export and the `bindings_are_current` test, so
+/// `cargo test` regenerates src/bindings.ts without launching the app —
+/// registering a command in create_specta_builder is all it takes.
+#[cfg(debug_assertions)]
+fn export_typescript_bindings(builder: &Builder) {
+    builder
+        .export(
+            Typescript::default()
+                .formatter(specta_typescript::formatter::biome)
+                .header("// @ts-nocheck\n// eslint-disable\n// biome-ignore lint/*: auto-generated file\n"),
+            "../src/bindings.ts",
+        )
+        .expect("Failed to export typescript bindings");
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -88,14 +107,7 @@ pub fn run() {
     let builder = create_specta_builder();
 
     #[cfg(debug_assertions)]
-    builder
-        .export(
-            Typescript::default()
-                .formatter(specta_typescript::formatter::biome)
-                .header("// @ts-nocheck\n// eslint-disable\n// biome-ignore lint/*: auto-generated file\n"),
-            "../src/bindings.ts",
-        )
-        .expect("Failed to export typescript bindings");
+    export_typescript_bindings(&builder);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_os::init())
@@ -136,4 +148,15 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    /// Rewrites src/bindings.ts from the current command list. Tests build
+    /// with debug_assertions, so this reuses the exact export the dev app
+    /// performs at startup.
+    #[test]
+    fn bindings_are_current() {
+        super::export_typescript_bindings(&super::create_specta_builder());
+    }
 }
