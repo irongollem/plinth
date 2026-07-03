@@ -8,19 +8,20 @@ import type {
 } from "../bindings";
 import { useToastStore } from "./toastStore.ts";
 
-export type Tab =
-  | "settings"
-  | "catalog"
-  | "release"
-  | "addStl"
-  | "render"
-  | "finalize";
+// Top-level sidebar sections. The old flat release/addStl/finalize tabs are
+// gone — those now live as steps INSIDE "releases" (see releaseStep below).
+export type Tab = "catalog" | "releases" | "render" | "settings";
+
+/** The 4 steps of the release-builder stepper (Info -> Models -> Render -> Finalize). */
+export type ReleaseStep = 1 | 2 | 3 | 4;
+
 export const useReleasesStore = defineStore("releases", () => {
   const toastStore = useToastStore();
   const release = ref<Release | undefined>();
   const models = ref<StlModel[]>([]);
   const releaseDir = ref<string | undefined>();
-  const activeTab = ref<Tab>("release");
+  const activeTab = ref<Tab>("catalog");
+  const releaseStep = ref<ReleaseStep>(1);
   // Cross-tab handoff: the catalog can push STL parts into the Render tab
   const renderParts = ref<string[]>([]);
   // ...and the Render tab can push finished promo images into Add STL
@@ -28,6 +29,12 @@ export const useReleasesStore = defineStore("releases", () => {
 
   const setActiveTab = (tab: Tab) => {
     activeTab.value = tab;
+  };
+
+  /** Jump straight to a release step (used by the stepper header/sidebar). */
+  const setReleaseStep = (step: ReleaseStep) => {
+    releaseStep.value = step;
+    activeTab.value = "releases";
   };
 
   const requestRender = (paths: string[]) => {
@@ -111,6 +118,7 @@ export const useReleasesStore = defineStore("releases", () => {
   const clearRelease = () => {
     clearModels();
     release.value = undefined;
+    releaseStep.value = 1;
   };
 
   const groups = computed(() =>
@@ -124,6 +132,8 @@ export const useReleasesStore = defineStore("releases", () => {
   return {
     activeTab,
     setActiveTab,
+    releaseStep,
+    setReleaseStep,
     renderParts,
     requestRender,
     pendingModelImages,
