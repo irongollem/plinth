@@ -525,12 +525,19 @@ const { renderParts, renderPreviewTarget } = storeToRefs(releasesStore);
 // The exact part set the catalog asked to render; if the user swaps files
 // afterwards, the finished image is NOT that model's preview anymore
 let previewTargetParts = "";
-watch(renderParts, async (paths) => {
-  if (!paths.length) return;
-  parts.value = await filesFromPaths(paths);
-  previewTargetParts = paths.join("\n");
-  renderParts.value = [];
-});
+watch(
+  renderParts,
+  async (paths) => {
+    if (!paths.length) return;
+    parts.value = await filesFromPaths(paths);
+    previewTargetParts = paths.join("\n");
+    renderParts.value = [];
+  },
+  // immediate: this view mounts lazily on first visit, AFTER the catalog
+  // has already written the handoff into the store — a mount-time watcher
+  // alone would miss it and the studio would open with an empty part list
+  { immediate: true },
+);
 
 const rotation = ref<[number, number, number]>([90, 0, 0]);
 const view = ref({ azimuth: -15, elevation: 0.22, zoom: 1.15 });

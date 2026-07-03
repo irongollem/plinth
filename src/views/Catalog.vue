@@ -868,9 +868,15 @@ const tabMembers = computed(() =>
 );
 
 const setSupportTab = (tab: string) => {
+  // keep the pose when hopping between supported/unsupported — you're
+  // looking at the same mini, just the other build of it
+  const currentPose = selected.value?.pose ?? null;
   activeSupport.value = tab;
-  const first = tabMembers.value[0];
-  if (first) selectEntry(first);
+  const next =
+    (currentPose
+      ? tabMembers.value.find((m) => m.pose === currentPose)
+      : undefined) ?? tabMembers.value[0];
+  if (next) selectEntry(next);
 };
 
 const selectGroup = async (group: CatalogGroup) => {
