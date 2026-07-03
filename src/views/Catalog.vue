@@ -1335,8 +1335,13 @@ onMounted(async () => {
 
 // The tab is kept alive (KeepAlive in App.vue), so onMounted only fires
 // once — refresh on every return so previews set from the Render tab and
-// other cross-tab changes show up without a manual rescan
+// other cross-tab changes show up without a manual rescan. When a group is
+// open, refreshSelected re-fetches its members too, so a render promoted to
+// this pose's preview shows up in the drawer without reselecting the card.
 onActivated(async () => {
-  await Promise.all([runSearch(), refreshMeta()]);
+  await Promise.all([
+    selectedGroup.value ? refreshSelected() : runSearch(),
+    refreshMeta(),
+  ]);
 });
 </script>
