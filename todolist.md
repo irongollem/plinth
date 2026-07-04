@@ -2,8 +2,6 @@
 
 ## Doing
 
-- [ ] Design `.3pk` file format specification (JSON structure with version, checksums, components)
-
 ## To Do
 
 ### Render engine (Blender promo renders)
