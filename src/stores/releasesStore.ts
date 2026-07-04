@@ -35,6 +35,9 @@ export const useReleasesStore = defineStore("releases", () => {
   // When the handoff came from a catalog model, its dir_path rides along so
   // the finished render can be written back as that model's preview
   const renderPreviewTarget = ref<string | null>(null);
+  // ...and its variant_key too, when the target is one pose/variant of a
+  // dump folder, so the render lands on that member and not the whole folder
+  const renderPreviewVariantKey = ref<string | null>(null);
   // A render launched from the builder is attached directly to this staged
   // model. This lets rendering happen before a release directory exists.
   const renderDraftTarget = ref<string | null>(null);
@@ -55,9 +58,11 @@ export const useReleasesStore = defineStore("releases", () => {
     paths: string[],
     previewTargetDir?: string,
     draftTargetId?: string,
+    previewVariantKey?: string | null,
   ) => {
     renderParts.value = paths;
     renderPreviewTarget.value = previewTargetDir ?? null;
+    renderPreviewVariantKey.value = previewVariantKey ?? null;
     renderDraftTarget.value = draftTargetId ?? null;
     activeTab.value = "render";
   };
@@ -164,6 +169,7 @@ export const useReleasesStore = defineStore("releases", () => {
     setReleaseStep,
     renderParts,
     renderPreviewTarget,
+    renderPreviewVariantKey,
     renderDraftTarget,
     requestRender,
     pendingModelImages,

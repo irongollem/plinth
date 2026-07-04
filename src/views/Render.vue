@@ -545,7 +545,8 @@ const partPaths = computed(() => parts.value.map((f) => f.path));
 
 // The catalog hands STL parts over via the store ("Render promo" button, or
 // per-model "open studio" links from the release stepper's Render step)
-const { renderParts, renderPreviewTarget } = storeToRefs(releasesStore);
+const { renderParts, renderPreviewTarget, renderPreviewVariantKey } =
+  storeToRefs(releasesStore);
 // The exact part set the catalog asked to render; if the user swaps files
 // afterwards, the finished image is NOT that model's preview anymore
 let previewTargetParts = "";
@@ -645,6 +646,7 @@ watch(resultPath, async (path) => {
     const result = await commands.setModelPreview(
       renderPreviewTarget.value,
       path,
+      renderPreviewVariantKey.value,
     );
     if (result.status === "ok") {
       toastStore.addToast("Catalog preview updated", "success");
@@ -652,6 +654,7 @@ watch(resultPath, async (path) => {
       toastStore.reportError("Failed to set catalog preview", result.error);
     }
     renderPreviewTarget.value = null;
+    renderPreviewVariantKey.value = null;
   }
 });
 
