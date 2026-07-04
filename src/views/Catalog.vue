@@ -736,9 +736,12 @@
           @click="toggleDups"
           :class="dupGroups.length ? 'text-primary cursor-pointer' : ''"
         >
-          <template v-if="dupGroups.length"
-            >{{ dupGroups.length }} duplicate groups ·
+          <template v-if="reclaimableGroups.length"
+            >{{ reclaimableGroups.length }} duplicate groups ·
             {{ formatFileSize(wastedBytes) }} reclaimable</template
+          >
+          <template v-else-if="dupGroups.length"
+            >{{ dupGroups.length }} groups shared · stored once</template
           >
           <template v-else
             >{{ stats.total_models }} models · {{ stats.total_files }} files ·
@@ -784,14 +787,22 @@
             {{ group.paths.length }}× {{ formatFileSize(group.size_bytes) }}
           </span>
           <span class="flex-1"></span>
+          <span
+            v-if="group.distinct_copies === 1"
+            class="badge badge-ghost badge-sm font-mono"
+            title="These entries are one file on disk — every variant keeps working, no space wasted"
+          >
+            shared · stored once
+          </span>
           <button
+            v-else
             type="button"
             class="btn btn-xs btn-outline btn-error"
             :disabled="reclaimBusy"
             @click="reclaimGroup(group)"
           >
             reclaim
-            {{ formatFileSize(group.size_bytes * (group.paths.length - 1)) }}
+            {{ formatFileSize(reclaimableBytes(group)) }}
           </button>
         </div>
         <ul class="opacity-70">
@@ -979,11 +990,19 @@ const stlPaths = computed(() =>
   files.value.filter((f) => f.extension === "stl").map((f) => f.path),
 );
 
+// Merged (hardlinked) copies cost the disk nothing, so reclaimable space
+// counts distinct physical copies — a fully shared group contributes 0
+const reclaimableBytes = (g: DuplicateGroup) =>
+  g.size_bytes * (g.distinct_copies - 1);
+
 const wastedBytes = computed(() =>
-  dupGroups.value.reduce(
-    (sum, g) => sum + g.size_bytes * (g.paths.length - 1),
-    0,
-  ),
+  dupGroups.value.reduce((sum, g) => sum + reclaimableBytes(g), 0),
+);
+
+// Groups whose names still occupy more than one copy; fully shared groups
+// stay visible in the panel (as "shared") but out of the headline count
+const reclaimableGroups = computed(() =>
+  dupGroups.value.filter((g) => g.distinct_copies > 1),
 );
 
 const lastScanLabel = computed(() => {
@@ -1188,7 +1207,9 @@ const tabMembers = computed(() =>
 
 // pick a variant present in the active support build, preferring `prefer`
 const resolveVariant = (prefer: string) =>
-  variantsInTab.value.includes(prefer) ? prefer : (variantsInTab.value[0] ?? "");
+  variantsInTab.value.includes(prefer)
+    ? prefer
+    : (variantsInTab.value[0] ?? "");
 
 const setSupportTab = (tab: string) => {
   // keep the pose/variant when hopping between builds — you're looking at the
