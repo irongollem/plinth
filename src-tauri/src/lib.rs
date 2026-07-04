@@ -2,6 +2,7 @@ mod catalog;
 mod error;
 mod file;
 mod image;
+mod manifest;
 mod models;
 mod render;
 mod settings;
