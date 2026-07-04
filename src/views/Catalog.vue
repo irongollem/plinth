@@ -562,22 +562,76 @@
 
             <div>
               <div
-                class="font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 mb-1.5"
+                class="flex items-center gap-2 font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 mb-1.5"
               >
-                FILES · {{ formatFileSize(selected.total_size_bytes) }}
+                <span>FILES · {{ formatFileSize(selected.total_size_bytes) }}</span>
+                <span class="flex-1"></span>
+                <span class="normal-case tracking-normal font-normal opacity-70">
+                  tick files to file them under a pose
+                </span>
               </div>
+
+              <!-- Assignment bar: appears once files are ticked. Splits a
+                   dump folder into pose members without moving anything. -->
               <div
+                v-if="checkedFiles.length"
+                class="flex items-center gap-1.5 bg-base-200 border border-base-content/10 rounded-lg px-2 py-1.5 mb-1.5"
+              >
+                <span class="font-mono text-[10px] text-base-content/60 shrink-0">
+                  {{ checkedFiles.length }} sel
+                </span>
+                <form
+                  class="flex items-center gap-1.5 flex-1 min-w-0"
+                  @submit.prevent="assignChecked"
+                >
+                  <input
+                    v-model="poseAssignDraft"
+                    type="text"
+                    class="input input-xs font-mono flex-1 min-w-0"
+                    placeholder="pose e.g. A"
+                  />
+                  <button
+                    type="submit"
+                    class="btn btn-xs btn-primary"
+                    :disabled="!poseAssignDraft.trim()"
+                  >
+                    assign
+                  </button>
+                </form>
+                <button
+                  type="button"
+                  class="btn btn-xs btn-ghost"
+                  @click="clearChecked"
+                >
+                  unfile
+                </button>
+              </div>
+
+              <label
                 v-for="file in files"
                 :key="file.path"
-                class="flex justify-between font-mono text-[11px] text-base-content/60 py-0.5"
+                class="flex items-center gap-2 font-mono text-[11px] text-base-content/60 py-0.5 cursor-pointer"
               >
-                <span class="truncate" :title="file.path">{{
+                <input
+                  type="checkbox"
+                  class="checkbox checkbox-xs shrink-0"
+                  :checked="checkedFiles.includes(file.path)"
+                  @change="toggleCheckedFile(file.path)"
+                />
+                <span class="truncate flex-1" :title="file.path">{{
                   file.file_name
                 }}</span>
+                <span
+                  v-if="fileVariantMap[file.path]"
+                  class="shrink-0 text-primary"
+                  title="assigned pose"
+                >
+                  ▸ {{ fileVariantMap[file.path] }}
+                </span>
                 <span class="opacity-60 shrink-0">{{
                   formatFileSize(file.size_bytes)
                 }}</span>
-              </div>
+              </label>
             </div>
           </div>
         </template>
@@ -868,11 +922,83 @@ const selectEntry = async (entry: CatalogEntry) => {
   files.value = [];
   // A synthesized pose member carries a variant_key; pass it so we list
   // only that pose's files. Whole-folder members send null (all files).
-  const result = await commands.getCatalogModelFiles(
-    entry.dir_path,
-    entry.variant_key,
+  const [fileResult, variantResult] = await Promise.all([
+    commands.getCatalogModelFiles(entry.dir_path, entry.variant_key),
+    commands.getFileVariants(entry.dir_path),
+  ]);
+  if (fileResult.status === "ok") files.value = fileResult.data;
+  if (variantResult.status === "ok") {
+    const map: Record<string, string> = {};
+    for (const v of variantResult.data) if (v.pose) map[v.path] = v.pose;
+    fileVariantMap.value = map;
+  }
+};
+
+/* ---- deliverable 3: assign files in a dump folder to poses ---- */
+// checked file paths in the drawer's file list, and the pose to file them under
+const checkedFiles = ref<string[]>([]);
+const poseAssignDraft = ref("");
+// path -> assigned pose, so already-sorted files show a badge
+const fileVariantMap = ref<Record<string, string>>({});
+
+const toggleCheckedFile = (path: string) => {
+  checkedFiles.value = checkedFiles.value.includes(path)
+    ? checkedFiles.value.filter((p) => p !== path)
+    : [...checkedFiles.value, path];
+};
+
+/** Reload the open group's members and select a sensible one — used after a
+ *  split changes the member set. Prefers `preferKey` when it still exists. */
+const reloadMembers = async (preferKey?: string) => {
+  const group = selectedGroup.value;
+  if (!group) return;
+  const result = await commands.getCatalogGroupMembers(group.group_name);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to reload variants", result.error);
+    return;
+  }
+  members.value = result.data;
+  const firstTab = supportTabs.value[0] ?? "";
+  activeSupport.value = firstTab;
+  const next =
+    (preferKey
+      ? members.value.find((m) => memberKey(m) === preferKey)
+      : undefined) ??
+    members.value.find((m) => (m.support_status ?? "") === firstTab) ??
+    members.value[0];
+  if (next) await selectEntry(next);
+};
+
+const assignChecked = async () => {
+  const dir = selected.value?.dir_path;
+  const pose = poseAssignDraft.value.trim();
+  if (!dir || !pose || !checkedFiles.value.length) return;
+  const count = checkedFiles.value.length;
+  const result = await commands.assignFilesToPose(checkedFiles.value, pose, null);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to assign files", result.error);
+    return;
+  }
+  toastStore.addToast(
+    `Filed ${count} file${count === 1 ? "" : "s"} under pose “${pose}”`,
+    "success",
   );
-  if (result.status === "ok") files.value = result.data;
+  checkedFiles.value = [];
+  poseAssignDraft.value = "";
+  // land on the pose we just created so the split is immediately visible
+  await Promise.all([runSearch(), reloadMembers(`${dir}\u{1f}${pose}`)]);
+};
+
+const clearChecked = async () => {
+  if (!checkedFiles.value.length) return;
+  const result = await commands.clearFilePose(checkedFiles.value);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to clear assignment", result.error);
+    return;
+  }
+  toastStore.addToast("Unfiled the selected files", "success");
+  checkedFiles.value = [];
+  await Promise.all([runSearch(), reloadMembers()]);
 };
 
 // Support statuses present among the members, stable order; "" = untagged
@@ -1179,6 +1305,10 @@ watch(selected, (entry) => {
     support_status: entry?.support_status ?? "",
     release_date: entry?.release_date ?? "",
   };
+  // fresh member: drop any ticks, and seed the assign box with the scanner's
+  // pose guess (the "pre-estimate") so filing more files under it is one tap
+  checkedFiles.value = [];
+  poseAssignDraft.value = entry?.pose ?? "";
 });
 
 const metaDirty = computed(() => {
