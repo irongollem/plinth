@@ -1434,15 +1434,41 @@ const saveMetadata = async () => {
   const group = selectedGroup.value;
   if (!entry || !group) return;
   const draft = metaDraft.value;
+  // A file-split pose member's pose + support live in file_variants, not
+  // model_user_meta — writing them there would silently revert on reload.
+  const isVariant = !!entry.variant_key;
+  const newPose = draft.pose.trim();
+  const bucketChanged =
+    isVariant &&
+    (newPose !== (entry.pose ?? "") ||
+      orNull(draft.support_status) !== (entry.support_status ?? null));
 
-  // Per-variant metadata. custom_name is preserved untouched — the NAME
-  // field drives the group name below, not a per-variant override.
+  if (bucketChanged) {
+    // re-file this member's files under the edited pose/support (or unfile
+    // them back to the pool when the pose is cleared)
+    const paths = files.value.map((file) => file.path);
+    const refiled = newPose
+      ? await commands.assignFilesToPose(
+          paths,
+          newPose,
+          orNull(draft.support_status),
+        )
+      : await commands.clearFilePose(paths);
+    if (refiled.status !== "ok") {
+      toastStore.reportError("Failed to rename pose", refiled.error);
+      return;
+    }
+  }
+
+  // Model-level metadata (shared by every pose member of the folder).
+  // custom_name is preserved — NAME drives the group name below. For a
+  // variant member pose/support are null here; they went to file_variants.
   const result = await commands.updateModelMetadata(
     entry.dir_path,
     entry.custom_name ?? null,
-    orNull(draft.pose),
+    isVariant ? null : orNull(draft.pose),
     orNull(draft.scale),
-    orNull(draft.support_status),
+    isVariant ? null : orNull(draft.support_status),
     orNull(draft.release_date),
     orNull(draft.designer),
     orNull(draft.sculptor),
@@ -1473,7 +1499,15 @@ const saveMetadata = async () => {
   }
 
   toastStore.addToast("Details saved", "success");
-  await refreshSelected();
+  // land on the renamed bucket (or the pool, if the pose was cleared)
+  if (bucketChanged) {
+    await Promise.all([
+      runSearch(),
+      reloadMembers(`${entry.dir_path}\u{1f}${newPose}`),
+    ]);
+  } else {
+    await refreshSelected();
+  }
 };
 
 const pickPreviewImage = async () => {
