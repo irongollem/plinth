@@ -410,6 +410,24 @@
                 {{ tabLabel(tab) }}
               </button>
             </div>
+            <!-- variant tier: shown only when a build has more than one -->
+            <div v-if="variantsInTab.length > 1" class="flex flex-wrap gap-1.5">
+              <button
+                v-for="variant in variantsInTab"
+                :key="variant"
+                type="button"
+                class="font-mono text-[11px] rounded-md px-2.5 py-1 border cursor-pointer"
+                :class="
+                  activeVariant === variant
+                    ? 'bg-primary text-primary-content border-primary'
+                    : 'text-base-content/60 border-base-content/15'
+                "
+                @click="setVariant(variant)"
+              >
+                {{ variantLabel(variant) }}
+              </button>
+            </div>
+            <!-- pose tier: the members within the active (support, variant) -->
             <div v-if="tabMembers.length > 1" class="flex flex-wrap gap-1.5">
               <button
                 v-for="member in tabMembers"
@@ -423,7 +441,7 @@
                 "
                 @click="selectEntry(member)"
               >
-                {{ memberLabel(member) }}
+                {{ member.pose || member.name }}
               </button>
             </div>
 
@@ -662,7 +680,9 @@
                   <button
                     type="submit"
                     class="btn btn-xs btn-primary"
-                    :disabled="!variantAssignDraft.trim() && !poseAssignDraft.trim()"
+                    :disabled="
+                      !variantAssignDraft.trim() && !poseAssignDraft.trim()
+                    "
                   >
                     file
                   </button>
@@ -874,6 +894,8 @@ const stats = ref<CatalogStats | null>(null);
 const selectedGroup = ref<CatalogGroup | null>(null);
 const members = ref<CatalogEntry[]>([]);
 const activeSupport = ref("");
+// second navigation tier: within a support build, which variant is shown
+const activeVariant = ref("");
 const selected = ref<CatalogEntry | null>(null);
 const files = ref<CatalogFile[]>([]);
 const newTag = ref("");
@@ -1029,12 +1051,6 @@ const toggleDups = () => {
 // members (variant_key null).
 const memberKey = (entry: CatalogEntry) => entry.variant_key ?? entry.dir_path;
 
-// Chip label: "sword · 2" from the facets, else the pose, else the name.
-const memberLabel = (entry: CatalogEntry) =>
-  [entry.variant, entry.pose].filter(Boolean).join(" · ") ||
-  entry.pose ||
-  entry.name;
-
 const selectEntry = async (entry: CatalogEntry) => {
   selected.value = entry;
   files.value = [];
@@ -1087,8 +1103,9 @@ const reloadMembers = async (preferKey?: string) => {
       : undefined) ??
     members.value.find((m) => (m.support_status ?? "") === firstTab) ??
     members.value[0];
-  // move the support tab to wherever we landed, so the chosen member shows
+  // move the support + variant tiers to wherever we landed, so it's visible
   activeSupport.value = next?.support_status ?? firstTab;
+  activeVariant.value = next?.variant ?? "";
   if (next) await selectEntry(next);
 };
 
@@ -1147,15 +1164,49 @@ const supportTabs = computed(() => {
 
 const tabLabel = (tab: string) => (tab === "" ? "other" : tab);
 
-const tabMembers = computed(() =>
+// members in the active support build (used to derive the variant tier)
+const supportMembers = computed(() =>
   members.value.filter((m) => (m.support_status ?? "") === activeSupport.value),
 );
 
+// distinct variants within the active support build, in the backend's bucket
+// order; "" = no variant. Only shown when there's more than one.
+const variantsInTab = computed(() => {
+  const seen: string[] = [];
+  for (const member of supportMembers.value) {
+    const variant = member.variant ?? "";
+    if (!seen.includes(variant)) seen.push(variant);
+  }
+  return seen;
+});
+const variantLabel = (variant: string) => variant || "base";
+
+// the pose members within the active (support, variant) bucket
+const tabMembers = computed(() =>
+  supportMembers.value.filter((m) => (m.variant ?? "") === activeVariant.value),
+);
+
+// pick a variant present in the active support build, preferring `prefer`
+const resolveVariant = (prefer: string) =>
+  variantsInTab.value.includes(prefer) ? prefer : (variantsInTab.value[0] ?? "");
+
 const setSupportTab = (tab: string) => {
-  // keep the pose when hopping between supported/unsupported — you're
-  // looking at the same mini, just the other build of it
+  // keep the pose/variant when hopping between builds — you're looking at the
+  // same mini, just the other build of it
   const currentPose = selected.value?.pose ?? null;
+  const currentVariant = selected.value?.variant ?? "";
   activeSupport.value = tab;
+  activeVariant.value = resolveVariant(currentVariant);
+  const next =
+    (currentPose
+      ? tabMembers.value.find((m) => m.pose === currentPose)
+      : undefined) ?? tabMembers.value[0];
+  if (next) selectEntry(next);
+};
+
+const setVariant = (variant: string) => {
+  const currentPose = selected.value?.pose ?? null;
+  activeVariant.value = variant;
   const next =
     (currentPose
       ? tabMembers.value.find((m) => m.pose === currentPose)
@@ -1180,6 +1231,7 @@ const selectGroup = async (group: CatalogGroup) => {
   const first =
     members.value.find((m) => (m.support_status ?? "") === firstTab) ??
     members.value[0];
+  activeVariant.value = first?.variant ?? "";
   if (first) await selectEntry(first);
 };
 
@@ -1267,11 +1319,17 @@ const refreshSelected = async () => {
   if (updated) selected.value = updated;
 };
 
-// Carries the model's dir_path so the finished render comes back as this
-// pose's catalog preview
+// Carries the model's dir_path AND variant_key so the finished render comes
+// back as THIS pose's preview, not the whole folder's (poses in one dump
+// folder share a dir_path — only the variant_key tells them apart)
 const renderSelected = () => {
   if (!selected.value) return;
-  releasesStore.requestRender(stlPaths.value, selected.value.dir_path);
+  releasesStore.requestRender(
+    stlPaths.value,
+    selected.value.dir_path,
+    undefined,
+    selected.value.variant_key,
+  );
 };
 
 const printModel = async () => {
@@ -1527,7 +1585,10 @@ const saveMetadata = async () => {
   // NAME edits the group/card name (the sort key) for every model.
   const newName = draft.name.trim();
   if (newName && newName !== group.group_name) {
-    const renamed = await commands.renameCatalogGroup(group.group_name, newName);
+    const renamed = await commands.renameCatalogGroup(
+      group.group_name,
+      newName,
+    );
     if (renamed.status !== "ok") {
       toastStore.reportError("Saved details, but rename failed", renamed.error);
       await refreshSelected();
@@ -1566,8 +1627,13 @@ const pickPreviewImage = async () => {
   const image = picked?.[0];
   if (!image) return;
   // The backend copies the file into the app's previews dir, so the
-  // catalog doesn't break if the original moves or gets deleted
-  const result = await commands.setModelPreview(entry.dir_path, image.path);
+  // catalog doesn't break if the original moves or gets deleted. variant_key
+  // keeps the pick on this pose alone when the folder holds several.
+  const result = await commands.setModelPreview(
+    entry.dir_path,
+    image.path,
+    entry.variant_key,
+  );
   if (result.status === "ok") {
     toastStore.addToast("Preview updated", "success");
     await refreshSelected();
