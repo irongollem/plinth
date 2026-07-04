@@ -7,7 +7,7 @@ use super::{
     FileRow, FileVariant, ModelRow, ReleaseSummary,
 };
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Open (and if needed initialize) the catalog database.
 pub fn open(db_path: &Path) -> Result<Connection, AppError> {
@@ -75,8 +75,13 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             PRIMARY KEY (dir_path, tag)
         );
 
+        -- trigram tokenizer: substring + fuzzy-ish matching ("ermaid" finds
+        -- "Mermaid"), not just whole-token prefix. Punctuation is folded out
+        -- on the way in (see fts_insert_select) so a query typed without an
+        -- apostrophe still hits a possessive designer name.
         CREATE VIRTUAL TABLE IF NOT EXISTS models_fts USING fts5(
-            name, description, tags, dir_path
+            name, description, tags, dir_path,
+            tokenize = 'trigram'
         );
 
         CREATE TABLE IF NOT EXISTS meta (
@@ -187,6 +192,22 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             [],
         )
         .map_err(|e| AppError::ConfigError(format!("Failed to migrate user metadata: {}", e)))?;
+    }
+
+    // v5: the FTS index is derived, so switching it to the trigram tokenizer
+    // is just a drop-and-rebuild. Existing dbs kept the old default-tokenizer
+    // table via IF NOT EXISTS; replace it and repopulate from current models.
+    if version < 5 {
+        conn.execute("DROP TABLE IF EXISTS models_fts", [])
+            .map_err(|e| AppError::ConfigError(format!("Failed to drop old FTS: {}", e)))?;
+        conn.execute(
+            "CREATE VIRTUAL TABLE models_fts USING fts5(
+                 name, description, tags, dir_path, tokenize = 'trigram')",
+            [],
+        )
+        .map_err(|e| AppError::ConfigError(format!("Failed to create trigram FTS: {}", e)))?;
+        rebuild_fts(conn)
+            .map_err(|e| AppError::ConfigError(format!("Failed to rebuild FTS: {}", e)))?;
     }
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -346,25 +367,41 @@ pub fn replace_catalog(
 // The group's display name is folded into the tags text so a search for a
 // RENAMED group ("Stone Guardian") still finds its member rows, whose own
 // names may say something else entirely ("galeb duhr A").
-// designer and sculptor ride in the free-text (tags) column rather than
-// their own FTS columns — that keeps the virtual table shape stable while
-// making both queryable, case-insensitively, via the same prefix search.
-const FTS_INSERT_SELECT: &str = "INSERT INTO models_fts (name, description, tags, dir_path)
-         SELECT COALESCE(u.custom_name, m.name),
-                COALESCE(m.description, ''),
-                COALESCE((SELECT group_concat(t.tag, ' ') FROM model_tags t
-                          WHERE t.dir_path = m.dir_path), '')
-                    || ' ' || COALESCE(r.display_name, '')
-                    || ' ' || COALESCE(u.designer, m.designer, '')
-                    || ' ' || COALESCE(u.sculptor, m.sculptor, ''),
-                m.dir_path
+/// Fold apostrophes and hyphens out of a SQL text expression so a query
+/// typed without them ("trappers", "presupported") still matches the
+/// indexed value ("Trapper's", "pre-supported"). Must mirror the query-side
+/// stripping in `fts_query`. char(8217)/char(8216) are the curly quotes.
+fn fts_norm(expr: &str) -> String {
+    format!(
+        "REPLACE(REPLACE(REPLACE(REPLACE({e}, '''', ''), '-', ''), char(8217), ''), char(8216), '')",
+        e = expr
+    )
+}
+
+/// The INSERT that (re)builds an FTS row. designer + sculptor ride in the
+/// free-text `tags` column rather than their own FTS columns, keeping the
+/// virtual table shape stable while making both searchable.
+fn fts_insert_select() -> String {
+    format!(
+        "INSERT INTO models_fts (name, description, tags, dir_path)
+         SELECT {name}, COALESCE(m.description, ''), {tags}, m.dir_path
          FROM models m
          LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
-         LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)";
+         LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)",
+        name = fts_norm("COALESCE(u.custom_name, m.name)"),
+        tags = fts_norm(
+            "COALESCE((SELECT group_concat(t.tag, ' ') FROM model_tags t
+                       WHERE t.dir_path = m.dir_path), '')
+                 || ' ' || COALESCE(r.display_name, '')
+                 || ' ' || COALESCE(u.designer, m.designer, '')
+                 || ' ' || COALESCE(u.sculptor, m.sculptor, '')"
+        ),
+    )
+}
 
 fn rebuild_fts(conn: &Connection) -> Result<(), rusqlite::Error> {
     conn.execute("DELETE FROM models_fts", [])?;
-    conn.execute(FTS_INSERT_SELECT, [])?;
+    conn.execute(&fts_insert_select(), [])?;
     Ok(())
 }
 
@@ -372,18 +409,24 @@ fn rebuild_fts(conn: &Connection) -> Result<(), rusqlite::Error> {
 fn refresh_fts_row(conn: &Connection, dir_path: &str) -> Result<(), rusqlite::Error> {
     conn.execute("DELETE FROM models_fts WHERE dir_path = ?1", [dir_path])?;
     conn.execute(
-        &format!("{} WHERE m.dir_path = ?1", FTS_INSERT_SELECT),
+        &format!("{} WHERE m.dir_path = ?1", fts_insert_select()),
         [dir_path],
     )?;
     Ok(())
 }
 
-/// Build an FTS5 prefix query from free text: each token becomes "tok"*.
+/// Build a trigram FTS query: each word becomes a quoted substring match,
+/// ANDed. Punctuation is stripped to mirror the indexed normalization, and
+/// sub-trigram (<3 char) words are dropped — trigram can't match them, so
+/// keeping them would return nothing. An all-short query yields "" and the
+/// caller skips the FTS filter entirely.
 fn fts_query(text: &str) -> String {
     text.split_whitespace()
-        .map(|token| format!("\"{}\"*", token.replace('"', "")))
+        .map(|word| word.chars().filter(|c| c.is_alphanumeric()).collect::<String>())
+        .filter(|word| word.chars().count() >= 3)
+        .map(|word| format!("\"{}\"", word))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" AND ")
 }
 
 pub struct SearchPage {
@@ -402,10 +445,16 @@ fn build_search_filter(
 
     let trimmed = query.trim();
     if !trimmed.is_empty() {
-        where_clauses.push(
-            "m.dir_path IN (SELECT dir_path FROM models_fts WHERE models_fts MATCH ?)".to_string(),
-        );
-        bound.push(Box::new(fts_query(trimmed)));
+        // May be empty if every word was sub-trigram (<3 chars); then we
+        // skip the FTS filter rather than MATCH "" (which errors).
+        let fts = fts_query(trimmed);
+        if !fts.is_empty() {
+            where_clauses.push(
+                "m.dir_path IN (SELECT dir_path FROM models_fts WHERE models_fts MATCH ?)"
+                    .to_string(),
+            );
+            bound.push(Box::new(fts));
+        }
     }
     for tag in tags {
         where_clauses.push(
@@ -1667,9 +1716,13 @@ mod tests {
         // designer overrides the release's, sculptor is user-only
         assert_eq!(entry.designer.as_deref(), Some("Dragon Trapper's Lodge"));
         assert_eq!(entry.sculptor.as_deref(), Some("A. Sculptor"));
-        // both are searchable, case-insensitively, after the rescan
-        assert_eq!(search(&conn, "trapper", &[], 10, 0).unwrap().total, 1);
-        assert_eq!(search(&conn, "sculptor", &[], 10, 0).unwrap().total, 1);
+        // fuzzy/trigram search: possessive apostrophe is folded out, so the
+        // designer matches when typed as "trappers"; and a mid-word chunk of
+        // sculptor matches by substring — neither worked with prefix-only FTS
+        assert_eq!(search(&conn, "trappers", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(search(&conn, "ulpto", &[], 10, 0).unwrap().total, 1);
+        // a multi-field query still ANDs: designer word + the model name
+        assert_eq!(search(&conn, "trappers repose", &[], 10, 0).unwrap().total, 1);
         assert_eq!(
             entry.preview_path.as_deref(),
             Some("/appdata/previews/abc.png")
