@@ -190,7 +190,10 @@ pub fn scan(
             dir_path: dir_path.clone(),
             name,
             description,
-            designer: release.as_ref().and_then(|r| r.designer.clone()),
+            designer: release
+                .as_ref()
+                .and_then(|r| r.designer.clone())
+                .or_else(|| infer_designer(root, dir_path)),
             release_name: release.map(|r| r.name.clone()),
             preview_path: preview,
             source: source.to_string(),
@@ -338,6 +341,61 @@ fn infer_model_identity(root: &Path, dir_path: &str) -> InferredModel {
         release_date,
         base_dir,
     }
+}
+
+/// A starter lexicon of common STL-mini studios. Trees rarely spell the
+/// designer as a field, but very often name a folder after the studio.
+/// Matching is on alphanumerics only, so "dragon_trappers_lodge", "Dragon
+/// Trapper's Lodge" and "DragonTrappersLodge" all hit. Extend freely — it's
+/// a recognition aid, always overridable in the UI.
+const DESIGNERS: &[&str] = &[
+    "Dragon Trapper's Lodge",
+    "Artisan Guild",
+    "Titan Forge",
+    "Lost Kingdom Miniatures",
+    "Cast n Play",
+    "Epic Miniatures",
+    "Great Grimoire",
+    "Archvillain Games",
+    "Loot Studios",
+    "DM Stash",
+    "Bite the Bullet",
+    "Clay Cyanide",
+    "Ghamak",
+    "Punga Miniatures",
+    "Rescale Miniatures",
+    "Papsikels",
+    "Printed Obsession",
+    "Twin Goddess Miniatures",
+    "Fantasy Cult",
+];
+
+/// Lowercased alphanumerics only, so punctuation/spacing/underscores don't
+/// block a lexicon match.
+fn alnum_key(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// The first known studio named by any ancestor segment of `dir_path` — a
+/// fallback designer for trees with no release.json to state it outright.
+fn infer_designer(root: &Path, dir_path: &str) -> Option<String> {
+    let mut current = Some(Path::new(dir_path));
+    while let Some(dir) = current {
+        if let Some(segment) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) {
+            let key = alnum_key(&segment);
+            if let Some(hit) = DESIGNERS.iter().find(|d| key.contains(&alnum_key(d))) {
+                return Some((*hit).to_string());
+            }
+        }
+        if dir == root {
+            break;
+        }
+        current = dir.parent();
+    }
+    None
 }
 
 /// "galeb_duhr" reads like a filename; "galeb duhr" reads like a name.
@@ -659,6 +717,28 @@ mod tests {
                 model.preview_path
             );
         }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn infers_designer_from_a_studio_folder() {
+        let root =
+            std::env::temp_dir().join(format!("stlpack_designer_{}", std::process::id()));
+        // a studio folder, spelled with underscores and no apostrophe
+        let dir = root.join("dragon_trappers_lodge").join("goblin");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("gob.stl"), b"solid").unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let outcome = scan(&root, &cancel, |_, _| {}).unwrap();
+
+        let goblin = outcome
+            .models
+            .iter()
+            .find(|m| m.name.to_lowercase().contains("goblin"))
+            .expect("goblin model");
+        assert_eq!(goblin.designer.as_deref(), Some("Dragon Trapper's Lodge"));
 
         fs::remove_dir_all(&root).ok();
     }
