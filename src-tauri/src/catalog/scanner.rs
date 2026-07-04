@@ -20,6 +20,12 @@ struct DirInfo {
     model_bytes: i64,
     first_image: Option<String>,
     metadata: Option<StlModel>,
+    /// A .lys/.chitu file was seen here — those formats only ship
+    /// presupported, so the dir is "supported" even if nothing says so.
+    has_presupported_format: bool,
+    /// Support status read from a file NAME (the .stl case: the only
+    /// ambiguous format, where creators often bake "supported" into the name).
+    filename_support: Option<&'static str>,
 }
 
 /// Info from a release.json, applied to model dirs beneath it.
@@ -84,6 +90,10 @@ pub fn scan(
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
 
+            // Read support signals off the file before it's moved into the row
+            let is_presupported_format = matches!(extension.as_str(), "lys" | "chitu" | "chitubox");
+            let name_support = support_from_filename(&file_name);
+
             files.push(FileRow {
                 path: path.to_string_lossy().into_owned(),
                 dir_path: dir_path.clone(),
@@ -96,6 +106,12 @@ pub fn scan(
             let info = dirs.entry(dir_path.clone()).or_default();
             info.model_files += 1;
             info.model_bytes += size_bytes;
+            if is_presupported_format {
+                info.has_presupported_format = true;
+            }
+            if let Some(status) = name_support {
+                info.filename_support.get_or_insert(status);
+            }
 
             seen += 1;
             if seen.is_multiple_of(250) {
@@ -203,7 +219,13 @@ pub fn scan(
             total_size_bytes: info.model_bytes,
             pose: inferred.as_ref().and_then(|i| i.pose.clone()),
             scale: None,
-            support_status: inferred.as_ref().and_then(|i| i.support_status.clone()),
+            // folder label wins; else a presupported-only format (.lys/.chitu)
+            // makes it supported; else a hint baked into an .stl file name
+            support_status: inferred
+                .as_ref()
+                .and_then(|i| i.support_status.clone())
+                .or_else(|| info.has_presupported_format.then(|| "supported".to_string()))
+                .or_else(|| info.filename_support.map(String::from)),
             release_date: inferred.as_ref().and_then(|i| i.release_date.clone()),
             group_name: Some(group_name),
         });
@@ -412,17 +434,39 @@ fn prettify_segment(segment: &str) -> String {
         .join(" ")
 }
 
+/// Slicer file formats a presupported model ships in. The format is the file
+/// type, NOT a variant, so a "stl supported" folder is the same supported
+/// model as "lys supported" — these are dropped before reading support.
+const SLICER_FORMATS: &[&str] = &["stl", "stls", "lys", "chitu", "chitubox", "obj", "3mf"];
+
 fn support_from_segment(segment: &str) -> Option<&'static str> {
-    // presupported means supports are present — same answer as supported
-    match segment
-        .trim()
+    // Drop any slicer-format words so "stl supported", "lys presupported"
+    // and "unsupported chitu" all read as their support status. presupported
+    // means supports are present — same answer as supported.
+    let core: String = segment
         .to_lowercase()
-        .replace(['-', '_'], "")
-        .as_str()
-    {
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && !SLICER_FORMATS.iter().any(|f| f == w))
+        .collect::<Vec<_>>()
+        .join("");
+    match core.as_str() {
         "supported" | "presupported" => Some("supported"),
         "unsupported" => Some("unsupported"),
         _ => None,
+    }
+}
+
+/// Support status hinted by a file NAME (not a whole segment): creators
+/// often tag an .stl "..._Supported.stl". A substring check, so it fires
+/// mid-name — "unsupported" is tested first since it contains "supported".
+fn support_from_filename(name: &str) -> Option<&'static str> {
+    let lower = name.to_lowercase();
+    if lower.contains("unsupported") {
+        Some("unsupported")
+    } else if lower.contains("presupported") || lower.contains("supported") {
+        Some("supported")
+    } else {
+        None
     }
 }
 
@@ -688,6 +732,45 @@ mod tests {
         let inferred = infer_model_identity(root, "/lib/misc/st b");
         assert_eq!(inferred.name, "st b", "base too short to split");
         assert!(inferred.pose.is_none());
+
+        // a slicer-format prefix on a support folder is still that support
+        // status, and the model name comes from the parent, so "stl
+        // supported" and "lys supported" collapse onto one "dryad dragon"
+        let inferred = infer_model_identity(root, "/lib/dryad dragon/stl supported");
+        assert_eq!(inferred.name, "dryad dragon");
+        assert_eq!(inferred.support_status.as_deref(), Some("supported"));
+        let inferred = infer_model_identity(root, "/lib/dryad dragon/lys presupported");
+        assert_eq!(inferred.name, "dryad dragon");
+        assert_eq!(inferred.support_status.as_deref(), Some("supported"));
+        let inferred = infer_model_identity(root, "/lib/dryad dragon/unsupported chitu");
+        assert_eq!(inferred.support_status.as_deref(), Some("unsupported"));
+    }
+
+    #[test]
+    fn support_reads_through_slicer_format_labels() {
+        assert_eq!(support_from_segment("supported"), Some("supported"));
+        assert_eq!(support_from_segment("pre-supported"), Some("supported"));
+        assert_eq!(support_from_segment("stl supported"), Some("supported"));
+        assert_eq!(support_from_segment("lys_presupported"), Some("supported"));
+        assert_eq!(support_from_segment("unsupported stl"), Some("unsupported"));
+        // a bare format or a real name is not a support folder
+        assert_eq!(support_from_segment("stl"), None);
+        assert_eq!(support_from_segment("supported dragon"), None);
+    }
+
+    #[test]
+    fn support_read_from_stl_file_names() {
+        assert_eq!(
+            support_from_filename("CopperDragon_Body_Supported.stl"),
+            Some("supported")
+        );
+        assert_eq!(
+            support_from_filename("gob_a_UNSUPPORTED.stl"),
+            Some("unsupported"),
+            "unsupported wins even though it contains 'supported'"
+        );
+        assert_eq!(support_from_filename("presupported-torso.stl"), Some("supported"));
+        assert_eq!(support_from_filename("dryad_dragon_head.stl"), None);
     }
 
     #[test]

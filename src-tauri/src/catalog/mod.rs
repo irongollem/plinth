@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 
 /// Extensions treated as printable model files during scans.
-pub const MODEL_EXTENSIONS: &[&str] = &["stl", "obj", "3mf", "lys", "chitubox", "blend", "gcode"];
+pub const MODEL_EXTENSIONS: &[&str] =
+    &["stl", "obj", "3mf", "lys", "chitu", "chitubox", "blend", "gcode"];
 /// Extensions usable as a model preview image.
 pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif"];
 
