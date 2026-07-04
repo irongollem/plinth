@@ -1,11 +1,47 @@
 use crate::error::AppError;
-use crate::models::{Release, StlModel};
+use crate::models::Release;
+use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use uuid::Uuid;
 use walkdir::WalkDir;
 
 use super::{FileRow, ModelRow, IMAGE_EXTENSIONS, MODEL_EXTENSIONS};
+
+/// A `model.json` sidecar as the scanner reads it: the classic StlModel
+/// fields plus the rich 3pk metadata (all optional, so a plain sidecar still
+/// parses — serde ignores fields we don't list, like model_files). This is
+/// the read side of metadata portability: whatever a release was packed with
+/// is restored on scan. See docs/3PK.md.
+#[derive(Deserialize)]
+struct ModelJson {
+    #[serde(default)]
+    id: Option<Uuid>,
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    images: Vec<String>,
+    #[serde(default)]
+    variant: Option<String>,
+    #[serde(default)]
+    pose: Option<String>,
+    #[serde(default)]
+    scale: Option<String>,
+    #[serde(default)]
+    support_status: Option<String>,
+    #[serde(default)]
+    release_date: Option<String>,
+    #[serde(default)]
+    designer: Option<String>,
+    #[serde(default)]
+    sculptor: Option<String>,
+    #[serde(default)]
+    release_name: Option<String>,
+}
 
 pub struct ScanOutcome {
     pub files: Vec<FileRow>,
@@ -19,7 +55,7 @@ struct DirInfo {
     model_files: u32,
     model_bytes: i64,
     first_image: Option<String>,
-    metadata: Option<StlModel>,
+    metadata: Option<ModelJson>,
     /// A .lys/.chitu file was seen here — those formats only ship
     /// presupported, so the dir is "supported" even if nothing says so.
     has_presupported_format: bool,
@@ -123,7 +159,7 @@ pub fn scan(
                 info.first_image = Some(path.to_string_lossy().into_owned());
             }
         } else if file_name == "model.json" {
-            if let Ok(parsed) = read_json::<StlModel>(path) {
+            if let Ok(parsed) = read_json::<ModelJson>(path) {
                 dirs.entry(dir_path).or_default().metadata = Some(parsed);
             }
         } else if file_name == "release.json" {
@@ -203,33 +239,41 @@ pub fn scan(
             .map(|i| i.group_name.clone())
             .unwrap_or_else(|| name.clone());
 
+        // An enriched model.json is the authority — it carries the curation a
+        // release was packed with — so its fields win over folder inference.
+        let meta = info.metadata.as_ref();
+        let meta_field = |get: fn(&ModelJson) -> Option<String>| meta.and_then(get);
+
         models.push(ModelRow {
             dir_path: dir_path.clone(),
             name,
             description,
-            designer: release
-                .as_ref()
-                .and_then(|r| r.designer.clone())
+            designer: meta_field(|m| m.designer.clone())
+                .or_else(|| release.as_ref().and_then(|r| r.designer.clone()))
                 .or_else(|| infer_designer(root, dir_path, designers)),
-            release_name: release.map(|r| r.name.clone()),
+            release_name: meta_field(|m| m.release_name.clone())
+                .or_else(|| release.map(|r| r.name.clone())),
             preview_path: preview,
             source: source.to_string(),
             uuid,
             file_count: info.model_files,
             total_size_bytes: info.model_bytes,
-            pose: inferred.as_ref().and_then(|i| i.pose.clone()),
-            scale: None,
-            // folder label wins; else a presupported-only format (.lys/.chitu)
-            // makes it supported; else a hint baked into an .stl file name
-            support_status: inferred
-                .as_ref()
-                .and_then(|i| i.support_status.clone())
+            variant: meta_field(|m| m.variant.clone()),
+            pose: meta_field(|m| m.pose.clone())
+                .or_else(|| inferred.as_ref().and_then(|i| i.pose.clone())),
+            scale: meta_field(|m| m.scale.clone()),
+            // model.json wins; else the folder label; else a presupported-only
+            // format (.lys/.chitu); else a hint baked into an .stl file name
+            support_status: meta_field(|m| m.support_status.clone())
+                .or_else(|| inferred.as_ref().and_then(|i| i.support_status.clone()))
                 .or_else(|| {
                     info.has_presupported_format
                         .then(|| "supported".to_string())
                 })
                 .or_else(|| info.filename_support.map(String::from)),
-            release_date: inferred.as_ref().and_then(|i| i.release_date.clone()),
+            release_date: meta_field(|m| m.release_date.clone())
+                .or_else(|| inferred.as_ref().and_then(|i| i.release_date.clone())),
+            sculptor: meta_field(|m| m.sculptor.clone()),
             group_name: Some(group_name),
         });
     }
@@ -664,6 +708,45 @@ mod tests {
                 "amphibian".to_string()
             )]
         );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn imports_rich_metadata_from_model_json() {
+        // the 3pk read side: an enriched model.json restores the curation a
+        // release was packed with, winning over folder inference
+        let root = std::env::temp_dir().join(format!("stlpack_richmeta_{}", std::process::id()));
+        let dir = root.join("knight");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("knight.stl"), b"solid").unwrap();
+        fs::write(
+            dir.join("model.json"),
+            r#"{"id":null,"name":"Knight","description":"a knight","tags":["hero"],
+                "images":[],"model_files":["knight.stl"],"group":"Knights",
+                "variant":"sword","pose":"charging","scale":"32mm",
+                "support_status":"unsupported","release_date":"2026-05",
+                "designer":"Dragon Trapper's Lodge","sculptor":"A. Artist",
+                "release_name":"Order of the Unicorn"}"#,
+        )
+        .unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let outcome = scan(&root, &cancel, &[], |_, _| {}).unwrap();
+        let m = outcome
+            .models
+            .iter()
+            .find(|m| m.name == "Knight")
+            .expect("metadata model");
+        assert_eq!(m.source, "metadata");
+        assert_eq!(m.variant.as_deref(), Some("sword"));
+        assert_eq!(m.pose.as_deref(), Some("charging"));
+        assert_eq!(m.scale.as_deref(), Some("32mm"));
+        assert_eq!(m.support_status.as_deref(), Some("unsupported"));
+        assert_eq!(m.designer.as_deref(), Some("Dragon Trapper's Lodge"));
+        assert_eq!(m.sculptor.as_deref(), Some("A. Artist"));
+        assert_eq!(m.release_name.as_deref(), Some("Order of the Unicorn"));
+        assert_eq!(m.release_date.as_deref(), Some("2026-05"));
 
         fs::remove_dir_all(&root).ok();
     }

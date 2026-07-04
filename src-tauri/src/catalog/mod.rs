@@ -37,10 +37,12 @@ pub struct ModelRow {
     pub uuid: Option<String>,
     pub file_count: u32,
     pub total_size_bytes: i64,
+    pub variant: Option<String>,
     pub pose: Option<String>,
     pub scale: Option<String>,
     pub support_status: Option<String>,
     pub release_date: Option<String>,
+    pub sculptor: Option<String>,
     /// The logical model this row is a variant of; rows sharing it collapse
     /// into one catalog group (see db::search_groups).
     pub group_name: Option<String>,

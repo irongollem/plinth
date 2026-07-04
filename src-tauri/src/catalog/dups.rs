@@ -148,10 +148,12 @@ mod tests {
             uuid: None,
             file_count: 3,
             total_size_bytes: 54,
+            variant: None,
             pose: None,
             scale: None,
             support_status: None,
             release_date: None,
+            sculptor: None,
             group_name: None,
         }];
         db::test_init(&conn);

@@ -196,6 +196,7 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             "release_date",
             "group_name",
             "sculptor",
+            "variant",
         ],
     )?;
     // designer already exists on models (from the release); these are the
@@ -311,9 +312,9 @@ pub fn replace_catalog(
                 "INSERT OR REPLACE INTO models
                  (dir_path, name, description, designer, release_name, preview_path,
                   source, uuid, file_count, total_size_bytes, pose, scale, support_status,
-                  release_date, group_name, indexed_at)
+                  release_date, group_name, sculptor, variant, indexed_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                  strftime('%s','now'))",
+                  ?16, ?17, strftime('%s','now'))",
             )
             .map_err(map_err)?;
         for m in models {
@@ -333,7 +334,9 @@ pub fn replace_catalog(
                     m.scale,
                     m.support_status,
                     m.release_date,
-                    m.group_name
+                    m.group_name,
+                    m.sculptor,
+                    m.variant
                 ])
                 .map_err(map_err)?;
         }
@@ -427,7 +430,7 @@ fn fts_insert_select() -> String {
                  || ' ' || COALESCE(u.designer, m.designer, '')
                  || ' ' || COALESCE(u.sculptor, m.sculptor, '')
                  || ' ' || COALESCE(u.release_name, m.release_name, '')
-                 || ' ' || COALESCE(u.variant, '')"
+                 || ' ' || COALESCE(u.variant, m.variant, '')"
         ),
     )
 }
@@ -524,7 +527,8 @@ fn entry_select_sql(where_sql: &str, tail_sql: &str) -> String {
                 COALESCE(u.pose, m.pose), COALESCE(u.scale, m.scale),
                 COALESCE(u.support_status, m.support_status),
                 COALESCE(u.release_date, m.release_date),
-                u.custom_name, COALESCE(u.sculptor, m.sculptor), u.variant
+                u.custom_name, COALESCE(u.sculptor, m.sculptor),
+                COALESCE(u.variant, m.variant)
          FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path {} {}",
         where_sql, tail_sql
     )
@@ -1531,6 +1535,8 @@ mod tests {
                 scale: None,
                 support_status: None,
                 release_date: None,
+                variant: None,
+                sculptor: None,
                 group_name: Some("Giant Newt".into()),
             },
             ModelRow {
@@ -1548,6 +1554,8 @@ mod tests {
                 scale: None,
                 support_status: None,
                 release_date: None,
+                variant: None,
+                sculptor: None,
                 group_name: Some("Bugbear".into()),
             },
         ];
@@ -1822,6 +1830,8 @@ mod tests {
             scale: None,
             support_status: None,
             release_date: None,
+            variant: None,
+            sculptor: None,
             group_name: Some("mob".into()),
         }];
         replace_catalog(&mut conn, &files, &models, &[]).unwrap();
@@ -1919,6 +1929,8 @@ mod tests {
             scale: None,
             support_status: None,
             release_date: None,
+            variant: None,
+            sculptor: None,
             group_name: Some("mob".into()),
         }];
         replace_catalog(&mut conn, &files, &models, &[]).unwrap();
@@ -2146,6 +2158,8 @@ mod tests {
             scale: None,
             support_status: Some(support.into()),
             release_date: None,
+            variant: None,
+            sculptor: None,
             group_name: Some("galeb duhr".into()),
         };
         let models = vec![
