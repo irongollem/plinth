@@ -163,12 +163,17 @@ pub fn scan(
             }
             None => {
                 let inferred = infer_model_identity(root, dir_path);
+                // Files often sit in supported/unsupported subdirs with the
+                // render one level up at the model root; borrow it when the
+                // dir and its descendants have none.
+                let preview = own_image
+                    .or_else(|| ancestor_image(&dirs, dir_path, inferred.base_dir.as_deref()));
                 (
                     inferred.name.clone(),
                     None,
                     None,
                     "heuristic",
-                    own_image,
+                    preview,
                     Some(inferred),
                 )
             }
@@ -217,6 +222,36 @@ fn descendant_image(dirs: &BTreeMap<String, DirInfo>, dir_path: &str) -> Option<
         .find_map(|(_, info)| info.first_image.clone())
 }
 
+/// First image on the path from `dir_path`'s parent up to (and including)
+/// `base_dir`. This is the common "model / {supported, unsupported} / files"
+/// layout where the render lives at the model root beside the build folders,
+/// not inside them. Bounded by base_dir — the model's identity root — so we
+/// never borrow a release-level cover shared by unrelated models.
+fn ancestor_image(
+    dirs: &BTreeMap<String, DirInfo>,
+    dir_path: &str,
+    base_dir: Option<&str>,
+) -> Option<String> {
+    let base = base_dir?;
+    // base == dir_path means the files sit at the identity root itself, so
+    // its own image was already considered — nothing to borrow upward.
+    if base == dir_path {
+        return None;
+    }
+    let mut current = Path::new(dir_path).parent();
+    while let Some(dir) = current {
+        let key = dir.to_string_lossy();
+        if let Some(image) = dirs.get(key.as_ref()).and_then(|info| info.first_image.clone()) {
+            return Some(image);
+        }
+        if key.as_ref() == base {
+            break;
+        }
+        current = dir.parent();
+    }
+    None
+}
+
 // ---- stacked-folder identity inference (heuristic models only) ----
 
 struct InferredModel {
@@ -227,6 +262,10 @@ struct InferredModel {
     pose: Option<String>,
     support_status: Option<String>,
     release_date: Option<String>,
+    /// The ancestor dir that gave the base name — the model's identity root.
+    /// Images live there when the files sit in supported/unsupported subdirs,
+    /// so it bounds how far up we borrow a preview from.
+    base_dir: Option<String>,
 }
 
 /// Read identity out of "stacked" library structures like
@@ -240,6 +279,7 @@ fn infer_model_identity(root: &Path, dir_path: &str) -> InferredModel {
     let mut support_status: Option<String> = None;
     let mut release_date: Option<String> = None;
     let mut base_name: Option<String> = None;
+    let mut base_dir: Option<String> = None;
 
     let mut current = Some(Path::new(dir_path));
     while let Some(dir) = current {
@@ -270,6 +310,7 @@ fn infer_model_identity(root: &Path, dir_path: &str) -> InferredModel {
                     pose.get_or_insert(p);
                 }
                 base_name = Some(base);
+                base_dir = Some(dir.to_string_lossy().into_owned());
             }
         }
         current = dir.parent();
@@ -295,6 +336,7 @@ fn infer_model_identity(root: &Path, dir_path: &str) -> InferredModel {
         pose,
         support_status,
         release_date,
+        base_dir,
     }
 }
 
@@ -585,6 +627,40 @@ mod tests {
         let inferred = infer_model_identity(root, "/lib/misc/st b");
         assert_eq!(inferred.name, "st b", "base too short to split");
         assert!(inferred.pose.is_none());
+    }
+
+    #[test]
+    fn heuristic_variants_borrow_the_render_at_their_model_root() {
+        // model / {supported, unsupported} / files, with the render sitting
+        // at the model root beside the build folders — the layout whose
+        // images the scanner used to drop on the floor.
+        let root =
+            std::env::temp_dir().join(format!("stlpack_ancestor_img_{}", std::process::id()));
+        let model_root = root.join("goblin");
+        fs::create_dir_all(model_root.join("supported")).unwrap();
+        fs::create_dir_all(model_root.join("unsupported")).unwrap();
+        fs::write(model_root.join("supported/gob_a.stl"), b"solid").unwrap();
+        fs::write(model_root.join("unsupported/gob_a.stl"), b"solid").unwrap();
+        fs::write(model_root.join("goblin-render.png"), b"png").unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let outcome = scan(&root, &cancel, |_, _| {}).unwrap();
+
+        assert!(!outcome.models.is_empty());
+        for model in &outcome.models {
+            assert!(
+                model
+                    .preview_path
+                    .as_deref()
+                    .unwrap_or_default()
+                    .ends_with("goblin-render.png"),
+                "variant {} should borrow the root render, got {:?}",
+                model.dir_path,
+                model.preview_path
+            );
+        }
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
