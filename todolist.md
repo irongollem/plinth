@@ -21,6 +21,17 @@
 - [ ] default releasedate current?
 - [ ] recover/continue mode (quick so testing becomes less tedious!)
 
+### Duplicate handling — share, don't delete (hardlink dedup)
+
+Duplicates across variants (e.g. one base STL repeated in 5 weapon variants) should be stored once but stay present in every variant. Mechanism: hardlinks (one inode/file-ID, a real directory entry per variant) so print, render, packing, and Finder all keep working with no resolution layer. UI never says hardlink/inode/hash — the user sees "Merge — free X MB" and "shared by N variants".
+
+- [ ] Phase 1 — inode-aware catalog: add `device`+`inode` columns to `files` (cross-platform identity via `same-file` crate); `duplicate_groups()` treats same-inode groups as already shared (reclaimable 0, mixed groups = size × (distinct inodes − 1)); `stats()` sums distinct inodes
+- [ ] Phase 2 — "Merge" action in duplicates UI beside Reclaim: verify keeper hash, hardlink keeper → temp name in dup's dir, atomic rename over dup; refresh inode in catalog. Per-volume capability probe (create a test hardlink at scan time — ground truth for NAS/SMB/exFAT); volumes without support get delete-only + plain-language hint. Optional one-click "Optimize library" that merges all groups
+- [ ] Phase 3 — print-to-slicer: `printAction` setting `open-in-slicer` (opener plugin `openPath` per file → OS-default slicer) vs `reveal-folder` (current). Mind the plugin-opener version pin
+- [ ] Phase 4 — 3pk checksum dedup: component archives store each unique blake3 blob once; manifest lists all names against the same checksum (fold into v1 spec + docs/3PK.md while there are no external readers); import materializes first name, hardlinks the rest where the destination volume supports it, else copies
+- [ ] Phase 5 (only if real users are stuck on link-less volumes) — virtual sharing tier: catalog-pointer fallback, viable once print resolves paths in-app; Finder browsing is the only remaining gap
+- [ ] Cleanup-tooling contract: same-volume `rename()` preserves links; deleting a variant folder only drops one name; cross-volume moves split shared inodes — cleaner must re-merge on the destination side
+
 ### Modular Package Strategy Implementation
 
 - [ ] Create a modular compression system that packages each group separately
