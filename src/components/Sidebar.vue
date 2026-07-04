@@ -47,11 +47,17 @@ const stepState = (step: ReleaseStep) => {
 
 <template>
   <div
+    data-tauri-drag-region
     class="w-[220px] shrink-0 bg-base-300 flex flex-col py-4 border-r border-base-content/10"
   >
+    <!-- The frameless window (titleBarStyle: Overlay) has no OS titlebar to
+         grab, so the sidebar IS the drag handle: this root and the header
+         carry data-tauri-drag-region, and their non-interactive children get
+         pointer-events-none so a press lands on the draggable ancestor.
+         Buttons keep their own pointer events, so nav still clicks. -->
     <div
       data-tauri-drag-region
-      class="flex items-center gap-[7px] px-[18px] mb-[22px]"
+      class="flex items-center gap-[7px] px-[18px] mb-[22px] [&>span]:pointer-events-none"
       :class="isMac ? 'pt-[22px]' : ''"
     >
       <span class="font-display text-[15px] tracking-[0.06em]">PLINTH</span>
