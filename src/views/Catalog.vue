@@ -1047,13 +1047,14 @@ const reloadMembers = async (preferKey?: string) => {
   }
   members.value = result.data;
   const firstTab = supportTabs.value[0] ?? "";
-  activeSupport.value = firstTab;
   const next =
     (preferKey
       ? members.value.find((m) => memberKey(m) === preferKey)
       : undefined) ??
     members.value.find((m) => (m.support_status ?? "") === firstTab) ??
     members.value[0];
+  // move the support tab to wherever we landed, so the chosen member shows
+  activeSupport.value = next?.support_status ?? firstTab;
   if (next) await selectEntry(next);
 };
 
@@ -1077,8 +1078,11 @@ const assignChecked = async () => {
   );
   checkedFiles.value = [];
   poseAssignDraft.value = "";
-  // land on the pose we just created so the split is immediately visible
-  await Promise.all([runSearch(), reloadMembers(`${dir}\u{1f}${pose}`)]);
+  // Stay on the unassigned pool (the residual member, key "<dir>\u{1f}") so
+  // the remaining files are still in front of you to keep filing poses. When
+  // the last file is assigned the residual is gone and reloadMembers falls
+  // back to a real member.
+  await Promise.all([runSearch(), reloadMembers(`${dir}\u{1f}`)]);
 };
 
 const clearChecked = async () => {
