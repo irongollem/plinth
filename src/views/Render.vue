@@ -2,7 +2,7 @@
   <main class="flex h-full min-w-0">
     <!-- Controls -->
     <section
-      class="w-[330px] shrink-0 border-r border-base-content/10 overflow-y-auto p-4 flex flex-col gap-3.5"
+      class="w-82.5 shrink-0 border-r border-base-content/10 overflow-y-auto p-4 flex flex-col gap-3.5"
     >
       <div class="flex items-baseline justify-between">
         <span class="font-bold text-[17px]">Render studio</span>
@@ -39,7 +39,7 @@
 
       <div class="flex flex-col gap-1">
         <span
-          class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
           >MODEL PARTS — JOINED INTO ONE MINI</span
         >
         <FileSelect
@@ -53,7 +53,7 @@
 
       <div class="flex flex-col gap-1.5">
         <span
-          class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
           >ORIENTATION — DRAG, GIZMO RING, OR TYPE EXACT ANGLES</span
         >
         <div class="grid grid-cols-3 gap-2">
@@ -246,7 +246,7 @@
       <div class="flex flex-col gap-2 border-t border-base-content/10 pt-3">
         <div class="flex items-center gap-1.5">
           <span
-            class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
+            class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
             >BRANDING — OVERLAY PREVIEW ONLY (NOT YET BAKED INTO RENDERS)</span
           >
         </div>
@@ -368,7 +368,7 @@
 
       <div class="flex items-center gap-3">
         <button
-          class="btn btn-primary flex-grow"
+          class="btn btn-primary grow"
           :disabled="
             !parts.length || isRendering || blenderStatus === 'missing'
           "
@@ -448,7 +448,7 @@
       <!-- Branding overlay preview (position-only — not composited into the file) -->
       <div
         v-if="branding.logoOn && parts.length"
-        class="absolute w-[52px] h-[52px] rounded-lg border-2 border-dashed border-base-content/40 flex items-center justify-center font-mono text-[8px] tracking-[0.08em] text-base-content/40 pointer-events-none"
+        class="absolute w-13 h-13 rounded-lg border-2 border-dashed border-base-content/40 flex items-center justify-center font-mono text-[8px] tracking-[0.08em] text-base-content/40 pointer-events-none"
         :style="logoPosStyle"
       >
         LOGO

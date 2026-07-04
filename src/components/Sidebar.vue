@@ -48,7 +48,7 @@ const stepState = (step: ReleaseStep) => {
 <template>
   <div
     data-tauri-drag-region
-    class="w-[220px] shrink-0 bg-base-300 flex flex-col py-4 border-r border-base-content/10"
+    class="w-55 shrink-0 bg-base-300 flex flex-col py-4 border-r border-base-content/10"
   >
     <!-- The frameless window (titleBarStyle: Overlay) has no OS titlebar to
          grab, so the sidebar IS the drag handle: this root and the header
@@ -57,8 +57,8 @@ const stepState = (step: ReleaseStep) => {
          Buttons keep their own pointer events, so nav still clicks. -->
     <div
       data-tauri-drag-region
-      class="flex items-center gap-[7px] px-[18px] mb-[22px] [&>span]:pointer-events-none"
-      :class="isMac ? 'pt-[22px]' : ''"
+      class="flex items-center gap-1.75 px-4.5 mb-5.5 [&>span]:pointer-events-none"
+      :class="isMac ? 'pt-5.5' : ''"
     >
       <span class="font-display text-[15px] tracking-[0.06em]">PLINTH</span>
       <span class="w-1.5 h-1.5 bg-primary"></span>
@@ -68,7 +68,7 @@ const stepState = (step: ReleaseStep) => {
 
     <button
       type="button"
-      class="flex items-center gap-[10px] px-[18px] py-[9px] font-semibold text-[13px] cursor-pointer border-l-2 text-left"
+      class="flex items-center gap-2.5 px-4.5 py-2.25 font-semibold text-[13px] cursor-pointer border-l-2 text-left"
       :class="
         releasesStore.activeTab === 'catalog'
           ? 'bg-base-content/5 border-primary'
@@ -94,7 +94,7 @@ const stepState = (step: ReleaseStep) => {
 
     <button
       type="button"
-      class="flex items-center gap-[10px] px-[18px] py-[9px] font-semibold text-[13px] cursor-pointer border-l-2 text-left"
+      class="flex items-center gap-2.5 px-4.5 py-2.25 font-semibold text-[13px] cursor-pointer border-l-2 text-left"
       :class="
         releasesStore.activeTab === 'releases'
           ? 'bg-base-content/5 border-primary'
@@ -118,9 +118,9 @@ const stepState = (step: ReleaseStep) => {
     <!-- draft stepper -->
     <div
       v-if="releasesStore.modelCount"
-      class="mx-[14px] mt-2 bg-base-200 border border-base-content/10 rounded-box px-3 pt-3 pb-[9px]"
+      class="mx-3.5 mt-2 bg-base-200 border border-base-content/10 rounded-box px-3 pt-3 pb-2.25"
     >
-      <div class="flex items-center gap-[6px] mb-2">
+      <div class="flex items-center gap-1.5 mb-2">
         <span
           class="font-mono font-semibold text-[9.5px] tracking-[0.12em] text-primary"
           >DRAFT</span
@@ -142,7 +142,7 @@ const stepState = (step: ReleaseStep) => {
         @click="releasesStore.setReleaseStep(s.step)"
       >
         <span
-          class="w-[15px] h-[15px] shrink-0 rounded-full font-bold text-[9px] flex items-center justify-center border box-border"
+          class="w-3.75 h-3.75 shrink-0 rounded-full font-bold text-[9px] flex items-center justify-center border box-border"
           :class="
             stepState(s.step).done
               ? 'bg-success border-success text-success-content'
@@ -164,7 +164,7 @@ const stepState = (step: ReleaseStep) => {
 
     <button
       type="button"
-      class="flex items-center gap-[10px] px-[18px] py-[9px] mt-2 font-semibold text-[13px] cursor-pointer border-l-2 text-left"
+      class="flex items-center gap-2.5 px-4.5 py-2.25 mt-2 font-semibold text-[13px] cursor-pointer border-l-2 text-left"
       :class="
         releasesStore.activeTab === 'render'
           ? 'bg-base-content/5 border-primary'
@@ -192,7 +192,7 @@ const stepState = (step: ReleaseStep) => {
 
     <div
       v-if="catalogRoot"
-      class="px-[18px] pb-[10px] font-mono text-[10.5px] text-base-content/40 leading-[1.7] truncate"
+      class="px-4.5 pb-2.5 font-mono text-[10.5px] text-base-content/40 leading-[1.7] truncate"
       :title="catalogRoot"
     >
       {{ catalogRoot }}<br />
@@ -200,7 +200,7 @@ const stepState = (step: ReleaseStep) => {
     </div>
 
     <div
-      class="flex gap-1 mx-4 mb-2 bg-base-200 border border-base-content/10 rounded-full p-[3px]"
+      class="flex gap-1 mx-4 mb-2 bg-base-200 border border-base-content/10 rounded-full p-0.75"
     >
       <button
         type="button"
@@ -230,7 +230,7 @@ const stepState = (step: ReleaseStep) => {
 
     <button
       type="button"
-      class="flex items-center gap-[10px] px-[18px] py-[9px] font-semibold text-[13px] cursor-pointer border-l-2 text-left"
+      class="flex items-center gap-2.5 px-4.5 py-2.25 font-semibold text-[13px] cursor-pointer border-l-2 text-left"
       :class="
         releasesStore.activeTab === 'settings'
           ? 'bg-base-content/5 border-primary'

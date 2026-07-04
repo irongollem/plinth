@@ -1,6 +1,6 @@
 <template>
   <main class="h-full overflow-y-auto p-7">
-    <div class="max-w-[600px] flex flex-col gap-4">
+    <div class="max-w-150 flex flex-col gap-4">
       <div class="font-bold text-[17px]">Settings</div>
 
       <div class="flex flex-col gap-1.5">
@@ -38,7 +38,7 @@
 
       <div class="flex flex-col gap-1.5">
         <span
-          class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
           >BLENDER LOCATION</span
         >
         <div
@@ -70,7 +70,7 @@
 
       <div class="flex flex-col gap-1.5">
         <span
-          class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
           >MAX COMPRESSION THREADS — {{ availableCores }} CORES DETECTED</span
         >
         <div class="flex items-center gap-3">
@@ -94,7 +94,7 @@
 
       <div class="flex flex-col gap-1.5">
         <span
-          class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
           >KNOWN DESIGNERS — RECOGNIZED IN FOLDER NAMES WHEN SCANNING</span
         >
         <div
@@ -124,19 +124,19 @@
           </form>
         </div>
         <p class="text-[10.5px] text-base-content/40">
-          Infers a model's designer from its folder path when there's no
-          release metadata. Matching ignores case, spaces and punctuation.
-          Applies on the next scan.
+          Infers a model's designer from its folder path when there's no release
+          metadata. Matching ignores case, spaces and punctuation. Applies on
+          the next scan.
         </p>
       </div>
 
       <div class="flex flex-col gap-1.5">
         <span
-          class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
           >APPEARANCE</span
         >
         <div
-          class="flex gap-1 bg-base-200 border border-base-content/10 rounded-full p-[3px] w-[220px]"
+          class="flex gap-1 bg-base-200 border border-base-content/10 rounded-full p-0.75 w-55"
         >
           <button
             type="button"
@@ -204,9 +204,9 @@ const addDesigner = () => {
   }
 };
 const removeDesigner = (name: string) => {
-  settings.value.known_designers = (settings.value.known_designers ?? []).filter(
-    (d) => d !== name,
-  );
+  settings.value.known_designers = (
+    settings.value.known_designers ?? []
+  ).filter((d) => d !== name);
 };
 
 const blenderStatus = ref("");

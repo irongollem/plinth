@@ -199,6 +199,10 @@ const finalizeRelease = async () => {
       releasesStore.setReleaseDir(created.data);
       releasesStore.clearModels();
       for (const staged of stagedModels) {
+        // Sequential on purpose: addModel does a read-modify-write on
+        // release.json with no locking, so parallel calls would race and
+        // drop entries.
+        // oxlint-disable-next-line no-await-in-loop
         const added = await commands.addModel(
           { ...staged, id: null, images: [], model_files: [] },
           created.data,
@@ -240,7 +244,7 @@ const cancelCompression = async () => {
   <main class="flex h-full min-w-0">
     <!-- release list rail -->
     <div
-      class="w-[264px] shrink-0 border-r border-base-content/10 p-3.5 flex flex-col gap-2 overflow-y-auto"
+      class="w-66 shrink-0 border-r border-base-content/10 p-3.5 flex flex-col gap-2 overflow-y-auto"
     >
       <div class="flex items-baseline justify-between px-1 pb-1.5">
         <span class="font-bold text-[15px]">Release builder</span>
@@ -320,7 +324,7 @@ const cancelCompression = async () => {
             @click="releasesStore.setReleaseStep(s.step)"
           >
             <span
-              class="w-[18px] h-[18px] shrink-0 rounded-full font-bold text-[10px] flex items-center justify-center border box-border"
+              class="w-4.5 h-4.5 shrink-0 rounded-full font-bold text-[10px] flex items-center justify-center border box-border"
               :class="
                 stepState(s.step).done
                   ? 'bg-success border-success text-success-content'
@@ -343,7 +347,7 @@ const cancelCompression = async () => {
           </button>
           <span
             v-if="i < stepDefs.length - 1"
-            class="w-[26px] h-px bg-base-content/10 mx-0.5"
+            class="w-6.5 h-px bg-base-content/10 mx-0.5"
           ></span>
         </template>
         <span class="flex-1"></span>
@@ -355,7 +359,7 @@ const cancelCompression = async () => {
         class="flex-1 overflow-y-auto px-6 py-5"
       >
         <form
-          class="max-w-[560px] flex flex-col gap-3.5"
+          class="max-w-140 flex flex-col gap-3.5"
           @submit.prevent="saveReleaseInfo"
           @keydown.enter.prevent
         >
@@ -438,7 +442,7 @@ const cancelCompression = async () => {
 
         <div
           v-if="draftGroups.length"
-          class="grid grid-cols-[minmax(360px,1fr)_320px] gap-5 mt-5 max-w-[980px]"
+          class="grid grid-cols-[minmax(360px,1fr)_320px] gap-5 mt-5 max-w-245"
         >
           <div class="flex flex-col gap-3">
             <section
@@ -517,12 +521,12 @@ const cancelCompression = async () => {
             <img
               v-if="selectedDraft.images[0]"
               :src="convertFileSrc(selectedDraft.images[0])"
-              class="w-full aspect-[4/3] object-cover rounded-box"
+              class="w-full aspect-4/3 object-cover rounded-box"
               alt=""
             />
             <div
               v-else
-              class="w-full aspect-[4/3] rounded-box bg-base-200 flex items-center justify-center text-sm text-base-content/40"
+              class="w-full aspect-4/3 rounded-box bg-base-200 flex items-center justify-center text-sm text-base-content/40"
             >
               No render for this pose
             </div>
@@ -537,7 +541,9 @@ const cancelCompression = async () => {
               v-model="selectedDraft.description"
             />
             <div class="flex flex-col gap-1">
-              <span class="font-mono text-[9px] text-base-content/40">TAGS</span>
+              <span class="font-mono text-[9px] text-base-content/40"
+                >TAGS</span
+              >
               <div class="flex flex-wrap gap-1.5 items-center">
                 <span
                   v-for="tag in selectedDraft.tags"
@@ -592,7 +598,7 @@ const cancelCompression = async () => {
         </div>
         <div
           v-else
-          class="mt-6 max-w-[640px] border border-dashed border-base-content/15 rounded-box p-8 text-center text-sm text-base-content/45"
+          class="mt-6 max-w-160 border border-dashed border-base-content/15 rounded-box p-8 text-center text-sm text-base-content/45"
         >
           No models selected. Add them from the catalog to begin.
         </div>
@@ -614,7 +620,7 @@ const cancelCompression = async () => {
         v-if="releasesStore.releaseStep === 3"
         class="flex-1 overflow-y-auto px-6 py-5"
       >
-        <div class="max-w-[640px] flex flex-col gap-3.5">
+        <div class="max-w-160 flex flex-col gap-3.5">
           <div class="font-bold text-[17px]">Pack release</div>
           <div class="grid grid-cols-3 gap-2.5">
             <div

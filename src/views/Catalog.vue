@@ -825,6 +825,7 @@ import { useToastStore } from "../stores/toastStore";
 import { formatFileSize } from "../utils/format";
 
 const PAGE_SIZE = 60;
+const orNull = (value: string) => value.trim() || null;
 
 const toastStore = useToastStore();
 const releasesStore = useReleasesStore();
@@ -1428,7 +1429,6 @@ const saveMetadata = async () => {
   const entry = selected.value;
   const group = selectedGroup.value;
   if (!entry || !group) return;
-  const orNull = (value: string) => value.trim() || null;
   const draft = metaDraft.value;
 
   // Per-variant metadata. custom_name is preserved untouched — the NAME
