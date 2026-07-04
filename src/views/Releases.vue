@@ -1,50 +1,42 @@
 <script setup lang="ts">
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { storeToRefs } from "pinia";
 import { computed, onMounted, ref, watch } from "vue";
-import type { Ref } from "vue";
-import {
-  type Release,
-  type ReleaseSummary,
-  type StlModel,
-  commands,
-} from "../bindings.ts";
+import { type Release, type ReleaseSummary, commands } from "../bindings.ts";
 import CompressionStatus from "../components/CompressionStatus.vue";
 import FileSelect from "../components/FileSelect.vue";
-import ImageSelect from "../components/ImageSelect.vue";
 import Switch from "../components/Switch.vue";
-import TagInput from "../components/TagInput.vue";
 import TextArea from "../components/TextArea.vue";
 import TextInput from "../components/TextInput.vue";
 import MonthYearInput from "../components/MonthYearInput.vue";
 import { useCompressionStatus } from "../composables/useCompressionStatus";
-import { filesFromPaths } from "../composables/useFileSelect";
 import type { SelectedFile } from "../composables/useFileSelect";
 import { useOS } from "../composables/useOS";
-import { type ReleaseStep, useReleasesStore } from "../stores/releasesStore.ts";
+import {
+  type DraftReleaseModel,
+  type ReleaseStep,
+  useReleasesStore,
+} from "../stores/releasesStore.ts";
 import { useToastStore } from "../stores/toastStore.ts";
 import { logoForFileName } from "../types.ts";
 import { formatFileSize } from "../utils/format";
 
 const toastStore = useToastStore();
 const releasesStore = useReleasesStore();
-const { release, releaseDir, modelCount, pendingModelImages } =
-  storeToRefs(releasesStore);
+const { release, releaseDir, modelCount } = storeToRefs(releasesStore);
 const { fileExplorerName } = useOS();
 const { activeJobId, isCompressing, resetStatus } = useCompressionStatus();
 
 const stepDefs: { step: ReleaseStep; label: string }[] = [
-  { step: 1, label: "Release info" },
-  { step: 2, label: "Models" },
-  { step: 3, label: "Render" },
-  { step: 4, label: "Finalize" },
+  { step: 1, label: "Models" },
+  { step: 2, label: "Release details" },
+  { step: 3, label: "Pack" },
 ];
 const stepState = (step: ReleaseStep) => {
   const active = releasesStore.releaseStep === step;
-  const done =
-    step < releasesStore.releaseStep ||
-    (step === 1 && releasesStore.releaseExists);
-  const reachable = step === 1 || releasesStore.releaseExists;
+  const done = step < releasesStore.releaseStep;
+  const reachable = step === 1 || modelCount.value > 0;
   return { active, done, reachable };
 };
 
@@ -109,106 +101,66 @@ const saveReleaseInfo = async () => {
   }
   isSavingInfo.value = true;
   try {
-    const result = await commands.createRelease(
-      releaseForm.value,
-      releaseImages.value.map((image) => image.path),
-      extraFiles.value.map((file) => file.path),
-    );
-    if (result.status === "ok") {
-      // The backend computes the real directory name; mirror it locally
-      releaseForm.value.release_dir =
-        result.data.split(/[/\\]/).pop() ?? result.data;
-      releasesStore.updateRelease(releaseForm.value);
-      releasesStore.setReleaseDir(result.data);
-      releasesStore.setReleaseStep(2);
-      if (openOnSave.value) await openPath(result.data);
-    } else {
-      toastStore.reportError("Failed to create release", result.error);
-    }
+    releasesStore.updateRelease(releaseForm.value);
+    releasesStore.setReleaseStep(3);
   } catch (error) {
-    toastStore.reportError("Failed to create release", error);
+    toastStore.reportError("Failed to save release details", error);
   } finally {
     isSavingInfo.value = false;
   }
 };
 
-/* ------------------------------- step 2: models -------------------------------- */
-const model: Ref<StlModel> = ref({
-  id: null,
-  name: "",
-  description: null,
-  tags: [],
-  images: [],
-  model_files: [],
-  group: null,
-});
-const modelImages = ref<SelectedFile[]>([]);
-const modelFiles = ref<SelectedFile[]>([]);
-const isStoringModel = ref(false);
-
-watch(pendingModelImages, async (paths) => {
-  if (!paths.length) return;
-  const rendered = await filesFromPaths(paths);
-  const known = new Set(modelImages.value.map((image) => image.path));
-  modelImages.value = [
-    ...modelImages.value,
-    ...rendered.filter((image) => !known.has(image.path)),
-  ];
-  pendingModelImages.value = [];
-});
-
-const modelFormComplete = computed(
-  () =>
-    model.value.name &&
-    modelFiles.value.length > 0 &&
-    modelImages.value.length > 0,
+/* ---------------------- step 1: selected catalog models ----------------------- */
+const selectedDraftId = ref<string | null>(null);
+const selectedDraft = computed(() =>
+  releasesStore.models.find((model) => model.id === selectedDraftId.value),
 );
-
-const saveModel = async () => {
-  if (!modelFormComplete.value) {
-    toastStore.addToast("Please make sure the form is complete", "error", 0);
-    return;
+const draftGroups = computed(() => {
+  const grouped = new Map<string, DraftReleaseModel[]>();
+  for (const model of releasesStore.models) {
+    const key = model.source_group ?? model.group ?? model.name;
+    grouped.set(key, [...(grouped.get(key) ?? []), model]);
   }
-  isStoringModel.value = true;
-  try {
-    if (!releaseDir.value) throw new Error("Release directory name is missing");
-    const result = await commands.addModel(
-      model.value,
-      releaseDir.value,
-      modelFiles.value.map((f) => f.path),
-      modelImages.value.map((f) => f.path),
-    );
-    if (result.status === "ok") {
-      toastStore.addToast("Model saved successfully", "success");
-      releasesStore.addModel(...result.data);
-      model.value = {
-        id: null,
-        name: "",
-        description: null,
-        tags: [],
-        images: [],
-        model_files: [],
-        group: null,
-      };
-      modelImages.value = [];
-      modelFiles.value = [];
-    } else {
-      toastStore.reportError("Failed to save model", result.error);
-    }
-  } catch (error) {
-    toastStore.reportError("Failed to save model", error);
-  } finally {
-    isStoringModel.value = false;
-  }
+  return [...grouped.entries()].map(([name, variants]) => ({ name, variants }));
+});
+const removeDraftGroup = (name: string) => {
+  releasesStore.models = releasesStore.models.filter(
+    (model) => (model.source_group ?? model.group ?? model.name) !== name,
+  );
 };
 
+/* Release-only tags: same chip UI as the catalog, but edits live in the
+   staged draft and never touch the catalog's model_tags. */
+const newDraftTag = ref("");
+const addDraftTag = () => {
+  const draft = selectedDraft.value;
+  const tag = newDraftTag.value.trim().toLowerCase().replace(/\s+/g, "_");
+  newDraftTag.value = "";
+  if (draft && tag && !draft.tags.includes(tag)) draft.tags.push(tag);
+};
+const removeDraftTag = (tag: string) => {
+  const draft = selectedDraft.value;
+  if (draft) draft.tags = draft.tags.filter((t) => t !== tag);
+};
+
+watch(
+  () => releasesStore.models,
+  (models) => {
+    if (!models.some((model) => model.id === selectedDraftId.value)) {
+      selectedDraftId.value = models[0]?.id ?? null;
+    }
+  },
+  { deep: true, immediate: true },
+);
+
 /* ---------------------------- step 3: render summary ---------------------------- */
-const openRenderStudio = (paths?: string[]) => {
+const openRenderStudio = (draft?: DraftReleaseModel) => {
   // model_files can carry slicer scenes (.lys) and other sidecars; the
   // render engine imports STL only, so hand over just those
+  const paths = draft?.model_files;
   const stls = paths?.filter((p) => p.toLowerCase().endsWith(".stl")) ?? [];
   if (stls.length) {
-    releasesStore.requestRender(stls);
+    releasesStore.requestRender(stls, undefined, draft?.id?.toString());
   } else {
     if (paths?.length) {
       toastStore.addToast("This model has no .stl parts to render", "warning");
@@ -227,17 +179,39 @@ const totalImageCount = computed(() =>
 );
 
 const finalizeRelease = async () => {
-  if (!releaseDir.value) {
-    toastStore.addToast(
-      "No release directory yet — create a release first.",
-      "error",
-    );
+  if (!release.value) {
+    toastStore.addToast("Add the release details before packing.", "error");
     return;
   }
   isStartingExport.value = true;
   try {
+    // Disk is the export boundary: no release directory or copied model files
+    // are created until the user explicitly chooses to pack.
+    if (!releaseDir.value) {
+      const stagedModels = [...releasesStore.models];
+      const created = await commands.createRelease(
+        release.value,
+        releaseImages.value.map((image) => image.path),
+        extraFiles.value.map((file) => file.path),
+      );
+      if (created.status !== "ok") throw created.error;
+
+      releasesStore.setReleaseDir(created.data);
+      releasesStore.clearModels();
+      for (const staged of stagedModels) {
+        const added = await commands.addModel(
+          { ...staged, id: null, images: [], model_files: [] },
+          created.data,
+          staged.model_files,
+          staged.images,
+        );
+        if (added.status !== "ok") throw added.error;
+        releasesStore.addModel(...added.data);
+      }
+      if (openOnSave.value) await openPath(created.data);
+    }
     resetStatus();
-    const result = await commands.finalizeRelease(releaseDir.value);
+    const result = await commands.finalizeRelease(releasesStore.releaseDir!);
     if (result.status === "ok") {
       activeJobId.value = result.data;
       toastStore.addToast("Compression started", "info");
@@ -275,12 +249,12 @@ const cancelCompression = async () => {
           class="font-semibold text-[11px] text-primary cursor-pointer"
           @click="startNewDraft"
         >
-          + New
+          Reset draft
         </button>
       </div>
 
       <button
-        v-if="release"
+        v-if="modelCount"
         type="button"
         class="text-left bg-base-200 border border-primary rounded-box px-3 py-2.5 cursor-pointer"
         @click="releasesStore.setReleaseStep(releasesStore.releaseStep)"
@@ -291,21 +265,21 @@ const cancelCompression = async () => {
             >DRAFT</span
           >
           <span class="font-mono text-[10px] text-base-content/40 ml-auto"
-            >step {{ releasesStore.releaseStep }} of 4</span
+            >step {{ releasesStore.releaseStep }} of 3</span
           >
         </div>
         <div class="font-semibold text-[13px] mt-1">
-          {{ release.name || "Untitled release" }}
+          {{ release?.name || "Untitled release" }}
         </div>
         <div class="font-mono text-[10.5px] text-base-content/60 mt-0.5">
-          {{ release.designer || "—" }} · {{ modelCount }} models
+          {{ release?.designer || "—" }} · {{ modelCount }} models
         </div>
       </button>
       <div
         v-else
         class="text-center text-xs text-base-content/40 border border-dashed border-base-content/15 rounded-box px-3 py-6"
       >
-        No draft yet — fill in Release info to start one.
+        No models yet — choose some from the catalog or add them here.
       </div>
 
       <div v-if="pastReleases.length" class="mt-2 flex flex-col gap-2">
@@ -375,9 +349,9 @@ const cancelCompression = async () => {
         <span class="flex-1"></span>
       </div>
 
-      <!-- STEP 1: INFO -->
+      <!-- STEP 2: RELEASE DETAILS -->
       <div
-        v-if="releasesStore.releaseStep === 1"
+        v-if="releasesStore.releaseStep === 2"
         class="flex-1 overflow-y-auto px-6 py-5"
       >
         <form
@@ -385,7 +359,10 @@ const cancelCompression = async () => {
           @submit.prevent="saveReleaseInfo"
           @keydown.enter.prevent
         >
-          <div class="font-bold text-[17px]">Release info</div>
+          <div class="font-bold text-[17px]">Release details</div>
+          <p class="text-[12.5px] text-base-content/60 -mt-1.5">
+            Name and describe the collection now that you can see what is in it.
+          </p>
           <div class="grid grid-cols-2 gap-3">
             <TextInput
               id="designer"
@@ -435,7 +412,7 @@ const cancelCompression = async () => {
                 <span class="loading loading-spinner loading-sm"></span>
                 Saving...
               </template>
-              <span v-else>Save &amp; continue → Models</span>
+              <span v-else>Save &amp; continue → Pack</span>
             </button>
             <button
               type="button"
@@ -448,191 +425,197 @@ const cancelCompression = async () => {
         </form>
       </div>
 
-      <!-- STEP 2: MODELS -->
+      <!-- STEP 1: MODELS + OPTIONAL RENDERS -->
       <div
-        v-if="releasesStore.releaseStep === 2"
+        v-if="releasesStore.releaseStep === 1"
         class="flex-1 overflow-y-auto px-6 py-5"
       >
-        <div class="flex gap-6">
-          <form
-            class="flex-1 max-w-[480px] flex flex-col gap-3"
-            @submit.prevent="saveModel"
-            @keydown.enter.prevent
-          >
-            <div class="font-bold text-[17px]">Add a model</div>
-            <TextInput
-              id="model-name"
-              label="Model name"
-              placeholder="Enter model name..."
-              v-model="model.name"
-            />
-            <div class="grid grid-cols-2 gap-3">
-              <TextInput
-                id="group"
-                label="Group"
-                placeholder="e.g. Heroes"
-                v-model="model.group"
-                :options="releasesStore.groups"
-              />
-              <TagInput
-                id="tags"
-                v-model="model.tags"
-                label="Tags"
-                placeholder="bust, presupported..."
-              />
-            </div>
-            <FileSelect
-              id="model-files"
-              label="Model files — .stl .obj .3mf .chitubox .lys"
-              multiple
-              accept=".stl,.obj,.chitubox,.lys,.3mf,.blend,.gcode"
-              v-model="modelFiles"
-            />
-            <button
-              type="submit"
-              class="btn btn-primary max-w-[180px]"
-              :disabled="!modelFormComplete || isStoringModel"
-            >
-              <template v-if="isStoringModel">
-                <span class="loading loading-spinner loading-sm"></span>
-                Storing...
-              </template>
-              <span v-else>Save model</span>
-            </button>
-          </form>
-          <div class="w-[300px] shrink-0">
-            <ImageSelect v-model="modelImages" />
-          </div>
-        </div>
+        <div class="font-bold text-[17px]">Selected models</div>
+        <p class="text-[12.5px] text-base-content/60 mt-1">
+          Add models from the catalog. Changes here are release-only and never
+          modify the catalog.
+        </p>
 
-        <div v-if="releasesStore.models.length" class="mt-6 max-w-[804px]">
-          <div
-            class="font-mono font-semibold text-[10px] tracking-[0.12em] text-base-content/40 border-b border-base-content/10 pb-1.5"
-          >
-            IN THIS RELEASE — {{ modelCount }} MODELS
+        <div
+          v-if="draftGroups.length"
+          class="grid grid-cols-[minmax(360px,1fr)_320px] gap-5 mt-5 max-w-[980px]"
+        >
+          <div class="flex flex-col gap-3">
+            <section
+              v-for="group in draftGroups"
+              :key="group.name"
+              class="border border-base-content/10 rounded-box overflow-hidden"
+            >
+              <div class="flex items-center px-3 py-2 bg-base-200">
+                <span class="font-semibold text-[13px] flex-1">{{
+                  group.name
+                }}</span>
+                <span class="font-mono text-[10px] text-base-content/45 mr-2">
+                  {{ group.variants.length }} pose{{
+                    group.variants.length === 1 ? "" : "s"
+                  }}
+                </span>
+                <button
+                  type="button"
+                  class="btn btn-xs btn-ghost"
+                  @click="removeDraftGroup(group.name)"
+                >
+                  Remove
+                </button>
+              </div>
+              <button
+                v-for="variant in group.variants"
+                :key="variant.id ?? variant.name"
+                type="button"
+                class="w-full flex items-center gap-3 px-3 py-2 border-t border-base-content/5 text-left cursor-pointer"
+                :class="
+                  selectedDraftId === variant.id
+                    ? 'bg-primary/10'
+                    : 'hover:bg-base-content/5'
+                "
+                @click="selectedDraftId = variant.id"
+              >
+                <img
+                  v-if="variant.images[0]"
+                  :src="convertFileSrc(variant.images[0])"
+                  class="w-10 h-10 rounded-box object-cover"
+                  alt=""
+                />
+                <img
+                  v-else
+                  :src="logoForFileName(variant.model_files[0] ?? '')"
+                  class="w-10 h-10 rounded-box"
+                  alt=""
+                />
+                <span class="flex-1 min-w-0">
+                  <span class="block font-medium text-[13px] truncate">{{
+                    variant.pose || variant.name
+                  }}</span>
+                  <span
+                    class="block font-mono text-[10px] text-base-content/45"
+                  >
+                    {{ variant.support_status || "unknown supports" }} ·
+                    {{ variant.model_files.length }} files
+                  </span>
+                </span>
+                <span
+                  class="font-mono text-[10px]"
+                  :class="
+                    variant.images.length ? 'text-success' : 'text-warning'
+                  "
+                >
+                  {{ variant.images.length ? "✓ render" : "no render" }}
+                </span>
+              </button>
+            </section>
           </div>
-          <div
-            v-for="d in releasesStore.models"
-            :key="d.id ?? d.name"
-            class="flex items-center gap-3 border-b border-base-content/5 py-2"
+
+          <aside
+            v-if="selectedDraft"
+            class="border border-base-content/10 rounded-box p-3.5 flex flex-col gap-3 self-start"
           >
             <img
-              :src="logoForFileName(d.model_files[0] ?? '')"
-              class="w-9 h-9 rounded-box"
+              v-if="selectedDraft.images[0]"
+              :src="convertFileSrc(selectedDraft.images[0])"
+              class="w-full aspect-[4/3] object-cover rounded-box"
               alt=""
             />
-            <span class="flex-1 font-medium text-[13px]">{{ d.name }}</span>
-            <span class="font-mono text-[10.5px] text-base-content/60"
-              >{{ d.model_files.length }} files ·
-              {{ d.images.length }} images</span
+            <div
+              v-else
+              class="w-full aspect-[4/3] rounded-box bg-base-200 flex items-center justify-center text-sm text-base-content/40"
             >
+              No render for this pose
+            </div>
+            <TextInput
+              id="draft-name"
+              label="Release name"
+              v-model="selectedDraft.name"
+            />
+            <TextArea
+              id="draft-description"
+              label="Description"
+              v-model="selectedDraft.description"
+            />
+            <div class="flex flex-col gap-1">
+              <span class="font-mono text-[9px] text-base-content/40">TAGS</span>
+              <div class="flex flex-wrap gap-1.5 items-center">
+                <span
+                  v-for="tag in selectedDraft.tags"
+                  :key="tag"
+                  class="font-mono text-[10px] text-base-content/60 border border-base-content/15 rounded-full px-2.5 py-0.5 flex items-center gap-1"
+                >
+                  {{ tag }}
+                  <button
+                    type="button"
+                    class="opacity-50 hover:opacity-100"
+                    @click="removeDraftTag(tag)"
+                  >
+                    ✕
+                  </button>
+                </span>
+                <form class="join" @submit.prevent="addDraftTag">
+                  <input
+                    v-model="newDraftTag"
+                    type="text"
+                    class="input input-xs join-item w-24"
+                    placeholder="+ tag"
+                  />
+                </form>
+              </div>
+              <span class="font-mono text-[9px] text-base-content/40">
+                release-only — the catalog stays untouched
+              </span>
+            </div>
+            <div
+              class="grid grid-cols-2 gap-2 font-mono text-[10px] text-base-content/50"
+            >
+              <span>POSE · {{ selectedDraft.pose || "—" }}</span>
+              <span>SCALE · {{ selectedDraft.scale || "—" }}</span>
+            </div>
             <button
               type="button"
-              class="btn btn-xs btn-ghost"
-              @click="releasesStore.removeModel(d)"
+              class="btn btn-sm btn-secondary"
+              :disabled="
+                !selectedDraft.model_files.some((path) =>
+                  path.toLowerCase().endsWith('.stl'),
+                )
+              "
+              @click="openRenderStudio(selectedDraft)"
             >
-              Remove
+              {{
+                selectedDraft.images.length
+                  ? "Replace render"
+                  : "Render this pose"
+              }}
             </button>
-          </div>
+          </aside>
+        </div>
+        <div
+          v-else
+          class="mt-6 max-w-[640px] border border-dashed border-base-content/15 rounded-box p-8 text-center text-sm text-base-content/45"
+        >
+          No models selected. Add them from the catalog to begin.
         </div>
 
         <div class="flex gap-2.5 mt-6">
           <button
             type="button"
             class="btn btn-primary"
-            @click="releasesStore.setReleaseStep(3)"
+            :disabled="!modelCount"
+            @click="releasesStore.setReleaseStep(2)"
           >
-            Continue → Render
+            Continue → Release details
           </button>
         </div>
       </div>
 
-      <!-- STEP 3: RENDER -->
+      <!-- STEP 3: PACK -->
       <div
         v-if="releasesStore.releaseStep === 3"
         class="flex-1 overflow-y-auto px-6 py-5"
       >
         <div class="max-w-[640px] flex flex-col gap-3.5">
-          <div class="font-bold text-[17px]">Promo renders</div>
-          <p class="text-[12.5px] text-base-content/60 -mt-1.5">
-            Render a promo image per model in the Render studio, then send it
-            back here as the model's catalog image.
-          </p>
-          <div v-if="releasesStore.models.length">
-            <div
-              class="flex font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 border-b border-base-content/10 pb-1.5"
-            >
-              <span class="flex-1">MODEL</span>
-              <span class="w-[120px]">STATUS</span>
-              <span class="w-[110px]"></span>
-            </div>
-            <div
-              v-for="d in releasesStore.models"
-              :key="d.id ?? d.name"
-              class="flex items-center border-b border-base-content/5 py-2.5"
-            >
-              <span class="flex-1 font-medium text-[13px]">{{ d.name }}</span>
-              <span
-                class="w-[120px] font-mono text-[11px]"
-                :class="
-                  d.images.length ? 'text-success' : 'text-base-content/40'
-                "
-                >{{ d.images.length ? "✓ has image" : "no image yet" }}</span
-              >
-              <button
-                type="button"
-                class="w-[110px] font-semibold text-[11px] text-base-content/60 cursor-pointer text-left"
-                @click="openRenderStudio(d.model_files)"
-              >
-                open studio →
-              </button>
-            </div>
-          </div>
-          <div v-else class="text-sm text-base-content/40">
-            Add models in step 2 first.
-          </div>
-          <div
-            class="flex items-center gap-3.5 bg-base-200 border border-base-content/10 rounded-box px-3.5 py-3"
-          >
-            <span class="font-mono text-[11px] text-base-content/60"
-              >Renders are opened in the Render studio and sent back per
-              model</span
-            >
-            <span class="flex-1"></span>
-            <button
-              type="button"
-              class="font-semibold text-[11.5px] text-primary-content bg-primary rounded-full px-3.5 py-1.5 cursor-pointer"
-              @click="openRenderStudio()"
-            >
-              Open render studio
-            </button>
-          </div>
-          <div class="flex gap-2.5">
-            <button
-              type="button"
-              class="btn btn-primary"
-              @click="releasesStore.setReleaseStep(4)"
-            >
-              Continue → Finalize
-            </button>
-            <button
-              type="button"
-              class="btn btn-ghost"
-              @click="releasesStore.setReleaseStep(2)"
-            >
-              ← Back
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- STEP 4: FINALIZE -->
-      <div
-        v-if="releasesStore.releaseStep === 4"
-        class="flex-1 overflow-y-auto px-6 py-5"
-      >
-        <div class="max-w-[640px] flex flex-col gap-3.5">
-          <div class="font-bold text-[17px]">Finalize &amp; export</div>
+          <div class="font-bold text-[17px]">Pack release</div>
           <div class="grid grid-cols-3 gap-2.5">
             <div
               class="bg-base-200 border border-base-content/10 rounded-box px-3.5 py-3"
@@ -666,7 +649,7 @@ const cancelCompression = async () => {
               :disabled="!modelCount || isCompressing || isStartingExport"
               v-if="!isCompressing"
             >
-              Finalize &amp; export .3pk
+              Pack &amp; export .3pk
             </button>
             <button
               v-else
@@ -682,7 +665,7 @@ const cancelCompression = async () => {
           <button
             type="button"
             class="btn btn-ghost self-start"
-            @click="releasesStore.setReleaseStep(3)"
+            @click="releasesStore.setReleaseStep(2)"
           >
             ← Back
           </button>

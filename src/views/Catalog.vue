@@ -551,13 +551,13 @@
               type="button"
               class="font-semibold text-[11px] tracking-[0.03em] text-center border border-dashed rounded-md py-2 cursor-pointer"
               :class="
-                releasesStore.releaseExists
+                releasesStore.modelCount
                   ? 'border-base-content/25 text-primary'
                   : 'border-base-content/15 text-base-content/40'
               "
               @click="addToDraftRelease"
             >
-              + Add to draft release
+              + Add to release
             </button>
 
             <div>
@@ -1243,48 +1243,65 @@ const displayPath = computed(() => {
 });
 
 /**
- * Composes two existing, already-tested commands (getCatalogModelFiles +
- * addModel) — this is exactly the path AddSTL/step 2 uses, so a catalog
- * model becomes a real release model with no new backend code.
+ * Stage a catalog model using its source paths. The release builder copies
+ * it only after the user has chosen the release details.
  */
 const addToDraftRelease = async () => {
   if (!selected.value) return;
-  if (!releasesStore.releaseExists || !releasesStore.releaseDir) {
-    toastStore.addToast(
-      "Create a release first, then add models to it from the catalog.",
-      "error",
+  try {
+    const entry = selected.value;
+    const groupName = selectedGroup.value?.group_name ?? entry.name;
+    const variants = members.value.length ? members.value : [entry];
+    const newVariants = variants.filter(
+      (variant) =>
+        !releasesStore.models.some(
+          (draft) => draft.source_dir === variant.dir_path,
+        ),
     );
-    releasesStore.setReleaseStep(1);
-    return;
-  }
-  const entry = selected.value;
-  const fileResult = await commands.getCatalogModelFiles(entry.dir_path);
-  if (fileResult.status !== "ok") {
-    toastStore.reportError("Failed to read model files", fileResult.error);
-    return;
-  }
-  const result = await commands.addModel(
-    {
-      id: null,
-      name: entry.name,
-      description: entry.description,
-      tags: entry.tags,
-      images: [],
-      model_files: [],
-      group: null,
-    },
-    releasesStore.releaseDir,
-    fileResult.data.map((f) => f.path),
-    entry.preview_path ? [entry.preview_path] : [],
-  );
-  if (result.status === "ok") {
-    releasesStore.addModel(...result.data);
-    toastStore.addToast(
-      `Added "${entry.name}" to the draft release`,
-      "success",
+    const fileResults = await Promise.all(
+      newVariants.map((variant) =>
+        commands.getCatalogModelFiles(variant.dir_path),
+      ),
     );
-  } else {
-    toastStore.reportError("Failed to add model to release", result.error);
+    for (const [index, variant] of newVariants.entries()) {
+      const fileResult = fileResults[index];
+      if (fileResult.status !== "ok") throw fileResult.error;
+      const poseKey = variant.pose ?? variant.name;
+      // Mirror the catalog drawer's preview resolution so the render the user
+      // sees on the card actually rides along: the pose's own image, else a
+      // sibling variant sharing the pose, else the group's aggregate preview.
+      const preview =
+        variant.preview_path ??
+        variants.find(
+          (candidate) =>
+            candidate.preview_path &&
+            (candidate.pose ?? candidate.name) === poseKey,
+        )?.preview_path ??
+        selectedGroup.value?.preview_path ??
+        null;
+      releasesStore.models.push({
+        id: `draft-${Date.now()}-${releasesStore.models.length}`,
+        name: variant.name,
+        description: variant.description,
+        tags: [...variant.tags],
+        images: preview ? [preview] : [],
+        model_files: fileResult.data.map((file) => file.path),
+        group: variants.length > 1 ? groupName : null,
+        source_dir: variant.dir_path,
+        source_group: groupName,
+        pose: variant.pose,
+        scale: variant.scale,
+        support_status: variant.support_status,
+      });
+    }
+    toastStore.addToast(
+      newVariants.length
+        ? `Added “${groupName}” with ${newVariants.length} pose${newVariants.length === 1 ? "" : "s"}`
+        : `“${groupName}” is already in the release`,
+      newVariants.length ? "success" : "info",
+    );
+  } catch (error) {
+    toastStore.reportError("Failed to add model to release", error);
   }
 };
 

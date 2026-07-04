@@ -1,4 +1,4 @@
-import { defineStore } from "pinia";
+import { acceptHMRUpdate, defineStore } from "pinia";
 import { computed, ref } from "vue";
 import type {
   ModelLocation,
@@ -8,17 +8,25 @@ import type {
 } from "../bindings";
 import { useToastStore } from "./toastStore.ts";
 
+export type DraftReleaseModel = StlModel & {
+  source_dir?: string;
+  source_group?: string;
+  pose?: string | null;
+  scale?: string | null;
+  support_status?: string | null;
+};
+
 // Top-level sidebar sections. The old flat release/addStl/finalize tabs are
 // gone — those now live as steps INSIDE "releases" (see releaseStep below).
 export type Tab = "catalog" | "releases" | "render" | "settings";
 
-/** The 4 steps of the release-builder stepper (Info -> Models -> Render -> Finalize). */
-export type ReleaseStep = 1 | 2 | 3 | 4;
+/** The release-builder flow: Models (including renders) -> Details -> Pack. */
+export type ReleaseStep = 1 | 2 | 3;
 
 export const useReleasesStore = defineStore("releases", () => {
   const toastStore = useToastStore();
   const release = ref<Release | undefined>();
-  const models = ref<StlModel[]>([]);
+  const models = ref<DraftReleaseModel[]>([]);
   const releaseDir = ref<string | undefined>();
   const activeTab = ref<Tab>("catalog");
   const releaseStep = ref<ReleaseStep>(1);
@@ -27,6 +35,9 @@ export const useReleasesStore = defineStore("releases", () => {
   // When the handoff came from a catalog model, its dir_path rides along so
   // the finished render can be written back as that model's preview
   const renderPreviewTarget = ref<string | null>(null);
+  // A render launched from the builder is attached directly to this staged
+  // model. This lets rendering happen before a release directory exists.
+  const renderDraftTarget = ref<string | null>(null);
   // ...and the Render tab can push finished promo images into Add STL
   const pendingModelImages = ref<string[]>([]);
 
@@ -40,9 +51,14 @@ export const useReleasesStore = defineStore("releases", () => {
     activeTab.value = "releases";
   };
 
-  const requestRender = (paths: string[], previewTargetDir?: string) => {
+  const requestRender = (
+    paths: string[],
+    previewTargetDir?: string,
+    draftTargetId?: string,
+  ) => {
     renderParts.value = paths;
     renderPreviewTarget.value = previewTargetDir ?? null;
+    renderDraftTarget.value = draftTargetId ?? null;
     activeTab.value = "render";
   };
 
@@ -58,13 +74,6 @@ export const useReleasesStore = defineStore("releases", () => {
       ...newRelease,
       model_references: [...(newRelease.model_references || [])],
     };
-    // Keep the local model list consistent with the new reference list —
-    // e.g. creating a fresh release must not keep the previous one's models
-    models.value = models.value.filter((model) =>
-      release.value?.model_references.some(
-        (reference) => reference.id === model.id,
-      ),
-    );
   };
 
   const addModel = (model: StlModel, path: string) => {
@@ -83,10 +92,22 @@ export const useReleasesStore = defineStore("releases", () => {
     });
   };
 
-  const removeModel = (model: StlModel) => {
-    if (!release.value || !release.value.model_references || !models.value)
-      return;
+  /** Stage source paths in memory; they are copied only after details are saved. */
+  const stageModel = (model: StlModel) => {
+    // Do not rely on Web Crypto here: some Tauri WebViews do not expose
+    // crypto.randomUUID(), which made catalog additions fail silently.
+    const draftId = `draft-${Date.now()}-${models.value.length}`;
+    const staged = { ...model, id: model.id ?? draftId };
+    models.value.push(staged);
+    return staged;
+  };
 
+  const attachImageToModel = (id: string, path: string) => {
+    const target = models.value.find((model) => model.id === id);
+    if (target && !target.images.includes(path)) target.images.push(path);
+  };
+
+  const removeModel = (model: StlModel) => {
     // Match by id in EACH list independently: names are not unique across
     // groups, and coupling the two arrays by index deletes the wrong
     // reference the moment they drift
@@ -94,16 +115,18 @@ export const useReleasesStore = defineStore("releases", () => {
     if (index !== -1) {
       models.value.splice(index, 1);
     }
-    const refIndex = release.value.model_references.findIndex(
-      (reference) => reference.id === model.id,
-    );
-    if (refIndex !== -1) {
+    const refIndex =
+      release.value?.model_references.findIndex(
+        (reference) => reference.id === model.id,
+      ) ?? -1;
+    if (refIndex !== -1 && release.value) {
       release.value.model_references.splice(refIndex, 1);
     }
   };
 
   const modelCount = computed(
-    () => release.value?.model_references?.length || 0,
+    () =>
+      new Set(models.value.map((model) => model.source_group ?? model.id)).size,
   );
 
   const clearModels = () => {
@@ -122,6 +145,7 @@ export const useReleasesStore = defineStore("releases", () => {
   const clearRelease = () => {
     clearModels();
     release.value = undefined;
+    releaseDir.value = undefined;
     releaseStep.value = 1;
   };
 
@@ -140,6 +164,7 @@ export const useReleasesStore = defineStore("releases", () => {
     setReleaseStep,
     renderParts,
     renderPreviewTarget,
+    renderDraftTarget,
     requestRender,
     pendingModelImages,
     queueModelImage,
@@ -153,7 +178,14 @@ export const useReleasesStore = defineStore("releases", () => {
     modelCount,
     groups,
     addModel,
+    stageModel,
+    attachImageToModel,
     removeModel,
     clearModels,
   };
 });
+
+// Preserve newly added state/actions when this store changes during `vite dev`.
+if (import.meta.hot) {
+  import.meta.hot.accept(acceptHMRUpdate(useReleasesStore, import.meta.hot));
+}

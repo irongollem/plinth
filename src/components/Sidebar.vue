@@ -25,19 +25,16 @@ onMounted(async () => {
 });
 
 const stepDefs: { step: ReleaseStep; label: string }[] = [
-  { step: 1, label: "Release info" },
-  { step: 2, label: "Models" },
-  { step: 3, label: "Render" },
-  { step: 4, label: "Finalize" },
+  { step: 1, label: "Models" },
+  { step: 2, label: "Release details" },
+  { step: 3, label: "Pack" },
 ];
 
 const stepState = (step: ReleaseStep) => {
   const active =
     releasesStore.activeTab === "releases" &&
     releasesStore.releaseStep === step;
-  const done =
-    step < releasesStore.releaseStep ||
-    (step === 1 && releasesStore.releaseExists);
+  const done = step < releasesStore.releaseStep;
   return { active, done };
 };
 </script>
@@ -104,7 +101,7 @@ const stepState = (step: ReleaseStep) => {
 
     <!-- draft stepper -->
     <div
-      v-if="releasesStore.releaseExists"
+      v-if="releasesStore.modelCount"
       class="mx-[14px] mt-2 bg-base-200 border border-base-content/10 rounded-box px-3 pt-3 pb-[9px]"
     >
       <div class="flex items-center gap-[6px] mb-2">
@@ -142,7 +139,7 @@ const stepState = (step: ReleaseStep) => {
         </span>
         {{ s.label }}
         <span
-          v-if="s.step === 2"
+          v-if="s.step === 1"
           class="font-mono text-[10px] text-base-content/50 ml-auto"
           >{{ releasesStore.modelCount }} added</span
         >

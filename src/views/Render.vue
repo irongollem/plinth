@@ -424,7 +424,7 @@
           </button>
         </div>
         <button
-          v-if="releasesStore.releaseExists"
+          v-if="releasesStore.releaseExists || releasesStore.renderDraftTarget"
           class="btn btn-sm btn-secondary w-full"
           @click="sendToAddStl"
         >
@@ -657,6 +657,16 @@ watch(resultPath, async (path) => {
 
 const sendToAddStl = () => {
   if (!resultPath.value) return;
+  if (releasesStore.renderDraftTarget) {
+    releasesStore.attachImageToModel(
+      releasesStore.renderDraftTarget,
+      resultPath.value,
+    );
+    releasesStore.renderDraftTarget = null;
+    toastStore.addToast("Render attached to the model", "success");
+    releasesStore.setReleaseStep(1);
+    return;
+  }
   releasesStore.queueModelImage(resultPath.value);
   toastStore.addToast("Render queued as a model image", "success");
   releasesStore.setReleaseStep(2);
