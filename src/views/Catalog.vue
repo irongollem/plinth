@@ -776,10 +776,25 @@
       v-if="showDups && dupGroups.length"
       class="max-h-48 overflow-y-auto bg-base-200 border border-base-content/10 rounded-box p-3 text-xs space-y-2"
     >
-      <div
-        class="font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 pb-1"
-      >
-        DUPLICATE GROUPS — PICK THE COPY TO KEEP, RECLAIM THE REST
+      <div class="flex items-center gap-2 pb-1">
+        <span
+          class="font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40"
+        >
+          DUPLICATE GROUPS — MERGE TO SHARE ONE COPY, OR DELETE THE EXTRAS
+        </span>
+        <span class="flex-1"></span>
+        <span v-if="linkSupport === false" class="text-base-content/50">
+          this drive can't merge files — you can still delete copies
+        </span>
+        <button
+          v-else-if="reclaimableGroups.length > 1"
+          type="button"
+          class="btn btn-xs btn-primary"
+          :disabled="reclaimBusy || linkSupport === null"
+          @click="mergeAllGroups"
+        >
+          merge all — free {{ formatFileSize(wastedBytes) }}
+        </button>
       </div>
       <div v-for="group in dupGroups" :key="group.hash">
         <div class="flex items-center gap-2">
@@ -794,16 +809,27 @@
           >
             shared · stored once
           </span>
-          <button
-            v-else
-            type="button"
-            class="btn btn-xs btn-outline btn-error"
-            :disabled="reclaimBusy"
-            @click="reclaimGroup(group)"
-          >
-            reclaim
-            {{ formatFileSize(reclaimableBytes(group)) }}
-          </button>
+          <template v-else>
+            <button
+              v-if="linkSupport !== false"
+              type="button"
+              class="btn btn-xs btn-primary"
+              :disabled="reclaimBusy || linkSupport === null"
+              title="Keep every file where it is, but store the bytes once — all variants keep working"
+              @click="mergeGroup(group)"
+            >
+              merge — free {{ formatFileSize(reclaimableBytes(group)) }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-xs btn-outline btn-error"
+              :disabled="reclaimBusy"
+              title="Remove the copies from disk — only the kept file remains"
+              @click="reclaimGroup(group)"
+            >
+              delete copies
+            </button>
+          </template>
         </div>
         <ul class="opacity-70">
           <li
@@ -1375,6 +1401,76 @@ const reveal = async (path: string) => {
 
 const keepFor = (group: DuplicateGroup) =>
   keepChoice.value[group.hash] ?? group.paths[0];
+
+// Probed with a real hardlink attempt next to the first duplicate (NAS and
+// exFAT support can't be guessed from names) — gates the merge buttons so
+// link-less volumes get delete-only instead of a button that can't work.
+const linkSupport = ref<boolean | null>(null);
+watch(showDups, async (open) => {
+  const probePath = dupGroups.value[0]?.paths[0];
+  if (!open || linkSupport.value !== null || !probePath) return;
+  const result = await commands.supportsFileLinks(probePath);
+  linkSupport.value = result.status === "ok" ? result.data : false;
+});
+
+const runMerge = async (group: DuplicateGroup) => {
+  const keep = keepFor(group);
+  const others = group.paths.filter((path) => path !== keep);
+  const result = await commands.mergeDuplicateFiles(keep, others);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to merge duplicates", result.error);
+    return 0;
+  }
+  for (const error of result.data.errors) toastStore.addToast(error, "error");
+  return result.data.succeeded;
+};
+
+const mergeGroup = async (group: DuplicateGroup) => {
+  const confirmed = await confirm(
+    `Merge ${group.paths.length} identical files so they share one copy on disk?\n\nEvery variant keeps a working file — ${formatFileSize(reclaimableBytes(group))} is freed.`,
+    { title: "Merge duplicates", kind: "info" },
+  );
+  if (!confirmed) return;
+  reclaimBusy.value = true;
+  try {
+    const merged = await runMerge(group);
+    if (merged) {
+      toastStore.addToast(
+        `Merged into one shared copy — ${formatFileSize(reclaimableBytes(group))} freed`,
+        "success",
+      );
+    }
+    await refreshMeta();
+  } finally {
+    reclaimBusy.value = false;
+  }
+};
+
+const mergeAllGroups = async () => {
+  const targets = reclaimableGroups.value;
+  const confirmed = await confirm(
+    `Merge all ${targets.length} duplicate groups so identical files share one copy on disk?\n\nNothing disappears from any folder — ${formatFileSize(wastedBytes.value)} is freed.`,
+    { title: "Merge all duplicates", kind: "info" },
+  );
+  if (!confirmed) return;
+  reclaimBusy.value = true;
+  try {
+    let merged = 0;
+    // Sequential on purpose: every merge re-hashes whole files on the same
+    // disk (often a NAS) — concurrency would only add seek thrash
+    // oxlint-disable-next-line no-await-in-loop
+    for (const group of targets) merged += await runMerge(group);
+    if (merged) {
+      toastStore.addToast(
+        `Merged ${merged} duplicate file${merged === 1 ? "" : "s"} into shared copies`,
+        "success",
+      );
+    }
+    await refreshMeta();
+  } finally {
+    reclaimBusy.value = false;
+  }
+};
 
 const reclaimGroup = async (group: DuplicateGroup) => {
   const keep = keepFor(group);

@@ -11,9 +11,9 @@ use catalog::commands::{
     add_catalog_tag, assign_files_to_pose, batch_move_models, cancel_catalog_job, clear_file_pose,
     combine_catalog_groups, delete_duplicate_files, get_catalog_group_members,
     get_catalog_model_files, get_catalog_releases, get_catalog_stats, get_catalog_tags,
-    get_duplicate_groups, get_file_variants, remove_catalog_tag, rename_catalog_group,
-    search_catalog, search_catalog_groups, set_model_preview, start_catalog_scan,
-    start_duplicate_scan, update_model_metadata,
+    get_duplicate_groups, get_file_variants, merge_duplicate_files, remove_catalog_tag,
+    rename_catalog_group, search_catalog, search_catalog_groups, set_model_preview,
+    start_catalog_scan, start_duplicate_scan, supports_file_links, update_model_metadata,
 };
 use file::commands::{add_model, cancel_compression, create_release, finalize_release};
 use models::events::{CompressionStatus, DuplicateStatus, RenderStatus, ScanStatus};
@@ -69,6 +69,8 @@ fn create_specta_builder() -> Builder {
             update_model_metadata,
             set_model_preview,
             delete_duplicate_files,
+            merge_duplicate_files,
+            supports_file_links,
             batch_move_models,
             search_catalog_groups,
             get_catalog_group_members,

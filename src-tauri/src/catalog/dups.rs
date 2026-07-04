@@ -113,6 +113,88 @@ pub fn find_duplicates(
     db::duplicate_groups(conn)
 }
 
+/// Replace each duplicate path with a hardlink to `keep`, so every name
+/// shares one physical copy and the difference is reclaimed. Contents are
+/// re-verified byte-for-byte right before each replacement: the catalog's
+/// hashes date from the last scan, and replacing a file that has since
+/// diverged would destroy data. The swap itself is link-to-hidden-temp then
+/// rename, so no path ever observes a missing file — a crash leaves at worst
+/// a dot-file the scanner ignores. Returns merged paths + per-file errors.
+pub fn merge_duplicates(
+    keep: &Path,
+    duplicates: &[String],
+) -> Result<(Vec<String>, Vec<String>), AppError> {
+    let keep_hash = hash_file(keep, None)?;
+    let keep_identity = file_identity(keep);
+    let mut merged: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for (n, dup) in duplicates.iter().enumerate() {
+        let dup_path = Path::new(dup);
+        // Already one file on disk (e.g. merged in an earlier run): done
+        if keep_identity.is_some() && file_identity(dup_path) == keep_identity {
+            merged.push(dup.clone());
+            continue;
+        }
+        match hash_file(dup_path, None) {
+            Ok(hash) if hash == keep_hash => {}
+            Ok(_) => {
+                errors.push(format!(
+                    "{}: contents changed since the last scan — rescan duplicates first",
+                    dup
+                ));
+                continue;
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", dup, e));
+                continue;
+            }
+        }
+        let Some(parent) = dup_path.parent() else {
+            errors.push(format!("{}: has no parent directory", dup));
+            continue;
+        };
+        let temp = parent.join(format!(".plinth-merge-{}-{}.tmp", std::process::id(), n));
+        // Cross-volume or link-less filesystems (exFAT, some SMB mounts)
+        // fail here, before anything is touched
+        if let Err(e) = std::fs::hard_link(keep, &temp) {
+            errors.push(format!(
+                "{}: this location doesn't support merging ({})",
+                dup, e
+            ));
+            continue;
+        }
+        match std::fs::rename(&temp, dup_path) {
+            Ok(()) => merged.push(dup.clone()),
+            Err(e) => {
+                std::fs::remove_file(&temp).ok();
+                errors.push(format!("{}: {}", dup, e));
+            }
+        }
+    }
+    Ok((merged, errors))
+}
+
+/// Whether the volume holding `path` lets us create hardlinks — answered by
+/// making one, not by guessing from filesystem names: NAS mounts route the
+/// operation through a network protocol whose support is config-dependent.
+pub fn supports_links(path: &Path) -> bool {
+    let dir = if path.is_dir() {
+        path
+    } else {
+        match path.parent() {
+            Some(parent) => parent,
+            None => return false,
+        }
+    };
+    let base = dir.join(format!(".plinth-probe-{}", std::process::id()));
+    let link = dir.join(format!(".plinth-probe-{}.link", std::process::id()));
+    let supported =
+        std::fs::write(&base, b"probe").is_ok() && std::fs::hard_link(&base, &link).is_ok();
+    std::fs::remove_file(&link).ok();
+    std::fs::remove_file(&base).ok();
+    supported
+}
+
 fn hash_file(path: &Path, limit: Option<usize>) -> Result<String, AppError> {
     let mut file = std::fs::File::open(path)
         .map_err(|e| AppError::IoError(format!("Cannot open {}: {}", path.display(), e)))?;
@@ -239,6 +321,46 @@ mod tests {
         // Headline stats report disk usage, not the sum of names: 3×16 minus
         // the 16 bytes the hardlink doesn't actually occupy
         assert_eq!(db::stats(&conn).unwrap().total_size_bytes, 32.0);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn merge_links_identical_files_and_refuses_changed_ones() {
+        let dir = std::env::temp_dir().join(format!("stlpack_merge_test_{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(dir.join("variant_b")).unwrap();
+        let keep = dir.join("base.stl");
+        let same = dir.join("variant_b").join("base.stl");
+        let changed = dir.join("edited.stl");
+        fs::write(&keep, b"unicorn-base-bytes").unwrap();
+        fs::write(&same, b"unicorn-base-bytes").unwrap();
+        // Same length, different bytes — must be refused, not clobbered
+        fs::write(&changed, b"unicorn-EDIT-bytes").unwrap();
+
+        let (merged, errors) = merge_duplicates(
+            &keep,
+            &[
+                same.to_string_lossy().into_owned(),
+                changed.to_string_lossy().into_owned(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("contents changed"));
+        // The merged path is now the same physical file as the keeper…
+        assert_eq!(file_identity(&keep), file_identity(&same));
+        // …and the diverged file kept its own bytes
+        assert_eq!(fs::read(&changed).unwrap(), b"unicorn-EDIT-bytes");
+        // Merging again is a no-op success, not an error
+        let (again, again_errors) =
+            merge_duplicates(&keep, &[same.to_string_lossy().into_owned()]).unwrap();
+        assert_eq!(again.len(), 1);
+        assert!(again_errors.is_empty());
+
+        assert!(supports_links(&keep));
 
         fs::remove_dir_all(&dir).ok();
     }

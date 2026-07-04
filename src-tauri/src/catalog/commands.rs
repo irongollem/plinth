@@ -596,6 +596,51 @@ pub async fn delete_duplicate_files(
     .map_err(|e| AppError::ConfigError(format!("File deletion task failed: {}", e)))?
 }
 
+/// Merge a duplicate group: every path in `duplicate_paths` becomes another
+/// name for `keep_path`'s bytes (a hardlink), freeing the copies while every
+/// variant keeps a working file. The catalog's identities are updated in
+/// place so the group reports "shared" without waiting for a rescan.
+#[tauri::command]
+#[specta::specta]
+pub async fn merge_duplicate_files(
+    app_handle: AppHandle,
+    keep_path: String,
+    duplicate_paths: Vec<String>,
+) -> Result<BatchOutcome, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let keep = PathBuf::from(&keep_path);
+        let (merged, errors) = dups::merge_duplicates(&keep, &duplicate_paths)?;
+        if !merged.is_empty() {
+            if let Some(identity) = dups::file_identity(&keep) {
+                let entries: Vec<(String, String)> = merged
+                    .iter()
+                    .chain(std::iter::once(&keep_path))
+                    .map(|p| (p.clone(), identity.clone()))
+                    .collect();
+                let conn = open_db(&app_handle)?;
+                db::store_identities(&conn, &entries)?;
+            }
+        }
+        Ok(BatchOutcome {
+            succeeded: merged.len() as u32,
+            errors,
+        })
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Merge task failed: {}", e)))?
+}
+
+/// Probe whether the volume holding `path` supports hardlink merging.
+/// Consulted by the duplicates panel so link-less filesystems (exFAT, some
+/// NAS mounts) get delete-only instead of a button that can't work.
+#[tauri::command]
+#[specta::specta]
+pub async fn supports_file_links(path: String) -> Result<bool, AppError> {
+    tauri::async_runtime::spawn_blocking(move || Ok(dups::supports_links(Path::new(&path))))
+        .await
+        .map_err(|e| AppError::ConfigError(format!("Probe task failed: {}", e)))?
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn batch_move_models(
