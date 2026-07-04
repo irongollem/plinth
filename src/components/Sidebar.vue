@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import { commands } from "../bindings";
+import { useOS } from "../composables/useOS";
 import { useReleasesStore } from "../stores/releasesStore";
 import type { ReleaseStep } from "../stores/releasesStore";
 import { useThemeStore } from "../stores/themeStore";
@@ -8,6 +9,11 @@ import { formatFileSize } from "../utils/format";
 
 const releasesStore = useReleasesStore();
 const themeStore = useThemeStore();
+const { osType } = useOS();
+// The window's titlebar is transparent (titleBarStyle: Overlay), so the
+// sidebar bg flows up behind the traffic lights. Only macOS parks lights
+// in our top-left corner — drop the logo below them there.
+const isMac = osType.value === "macos";
 
 const catalogRoot = ref("");
 const libraryLine = ref("");
@@ -43,7 +49,11 @@ const stepState = (step: ReleaseStep) => {
   <div
     class="w-[220px] shrink-0 bg-base-300 flex flex-col py-4 border-r border-base-content/10"
   >
-    <div class="flex items-center gap-[7px] px-[18px] mb-[22px]">
+    <div
+      data-tauri-drag-region
+      class="flex items-center gap-[7px] px-[18px] mb-[22px]"
+      :class="isMac ? 'pt-[22px]' : ''"
+    >
       <span class="font-display text-[15px] tracking-[0.06em]">PLINTH</span>
       <span class="w-1.5 h-1.5 bg-primary"></span>
       <span class="flex-1"></span>
