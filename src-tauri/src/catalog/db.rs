@@ -3,8 +3,8 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 
 use super::{
-    CatalogEntry, CatalogFile, CatalogGroup, CatalogStats, DuplicateGroup, ExtensionStat,
-    FileRow, FileVariant, ModelRow, ReleaseSummary,
+    CatalogEntry, CatalogFile, CatalogGroup, CatalogStats, DuplicateGroup, ExtensionStat, FileRow,
+    FileVariant, ModelRow, ReleaseSummary,
 };
 
 const SCHEMA_VERSION: i64 = 5;
@@ -135,6 +135,20 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             support_status TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_file_variants_dir ON file_variants(dir_path);
+
+        -- Per-variant preview override. A dump folder fans out into several
+        -- members that all share one dir_path, so model_user_meta.preview_path
+        -- (keyed by dir_path) can't tell them apart: a render for one pose
+        -- would overwrite every pose's picture. Keyed by the member's full
+        -- variant_key (dir\u1f variant\u1f pose) instead, so each variant keeps
+        -- its own shot. dir_path rides along for rescan-time pruning.
+        -- Whole-folder models keep using model_user_meta.
+        CREATE TABLE IF NOT EXISTS variant_previews (
+            variant_key  TEXT PRIMARY KEY,
+            dir_path     TEXT NOT NULL,
+            preview_path TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_variant_previews_dir ON variant_previews(dir_path);
         "#,
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to init catalog schema: {}", e)))?;
@@ -159,9 +173,10 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             if existing.iter().any(|c| c == column) {
                 continue;
             }
-            if let Err(e) =
-                conn.execute(&format!("ALTER TABLE {} ADD COLUMN {} TEXT", table, column), [])
-            {
+            if let Err(e) = conn.execute(
+                &format!("ALTER TABLE {} ADD COLUMN {} TEXT", table, column),
+                [],
+            ) {
                 if !e.to_string().contains("duplicate column name") {
                     return Err(AppError::ConfigError(format!(
                         "Failed to migrate {} (add {}): {}",
@@ -174,7 +189,14 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
     };
     add_text_columns(
         "models",
-        &["pose", "scale", "support_status", "release_date", "group_name", "sculptor"],
+        &[
+            "pose",
+            "scale",
+            "support_status",
+            "release_date",
+            "group_name",
+            "sculptor",
+        ],
     )?;
     // designer already exists on models (from the release); these are the
     // per-model user overrides plus the artist, release-name and variant.
@@ -433,7 +455,11 @@ fn refresh_fts_row(conn: &Connection, dir_path: &str) -> Result<(), rusqlite::Er
 /// caller skips the FTS filter entirely.
 fn fts_query(text: &str) -> String {
     text.split_whitespace()
-        .map(|word| word.chars().filter(|c| c.is_alphanumeric()).collect::<String>())
+        .map(|word| {
+            word.chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect::<String>()
+        })
         .filter(|word| word.chars().count() >= 3)
         .map(|word| format!("\"{}\"", word))
         .collect::<Vec<_>>()
@@ -594,6 +620,10 @@ fn expand_file_variants(
             continue;
         }
         let sizes = file_sizes_for_dir(conn, &entry.dir_path)?;
+        // Per-variant preview overrides for this folder, keyed by variant_key.
+        // A member with its own render beats the folder-level preview it would
+        // otherwise inherit from `entry` below.
+        let previews = get_variant_previews(conn, &entry.dir_path)?;
         // (support, variant, pose) -> file paths; BTreeMap for a stable order
         let mut buckets: BTreeMap<(Option<String>, String, String), Vec<String>> = BTreeMap::new();
         let mut claimed: HashSet<String> = HashSet::new();
@@ -616,6 +646,11 @@ fn expand_file_variants(
                     label.push_str(facet);
                 }
             }
+            let key = variant_key(&entry.dir_path, &variant, &pose);
+            let preview_path = previews
+                .get(&key)
+                .cloned()
+                .or_else(|| entry.preview_path.clone());
             out.push(CatalogEntry {
                 name: label,
                 variant: (!variant.is_empty()).then(|| variant.clone()),
@@ -623,7 +658,8 @@ fn expand_file_variants(
                 support_status: support.or_else(|| entry.support_status.clone()),
                 file_count: paths.len() as u32,
                 total_size_bytes: bytes as f64,
-                variant_key: Some(variant_key(&entry.dir_path, &variant, &pose)),
+                preview_path,
+                variant_key: Some(key),
                 ..entry.clone()
             });
         }
@@ -632,13 +668,19 @@ fn expand_file_variants(
         let residual: Vec<&String> = sizes.keys().filter(|p| !claimed.contains(*p)).collect();
         if !residual.is_empty() {
             let bytes: i64 = residual.iter().filter_map(|p| sizes.get(*p)).sum();
+            let key = variant_key(&entry.dir_path, "", "");
+            let preview_path = previews
+                .get(&key)
+                .cloned()
+                .or_else(|| entry.preview_path.clone());
             out.push(CatalogEntry {
                 name: format!("{} (unassigned)", entry.name),
                 variant: None,
                 pose: None,
                 file_count: residual.len() as u32,
                 total_size_bytes: bytes as f64,
-                variant_key: Some(variant_key(&entry.dir_path, "", "")),
+                preview_path,
+                variant_key: Some(key),
                 ..entry
             });
         }
@@ -958,8 +1000,10 @@ pub fn model_files(
                      WHERE dir_path = ?1 AND COALESCE(variant,'') = ?2
                        AND COALESCE(pose,'') = ?3){order}"
             );
-            conn.prepare(&sql)
-                .and_then(|mut s| s.query_map(params![dir_path, variant, pose], read)?.collect())
+            conn.prepare(&sql).and_then(|mut s| {
+                s.query_map(params![dir_path, variant, pose], read)?
+                    .collect()
+            })
         }
     }
     .map_err(map)?;
@@ -1197,6 +1241,65 @@ pub fn set_model_preview(
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to set preview: {}", e)))?;
     Ok(())
+}
+
+/// Point a single fanned-out member (one pose/variant of a dump folder) at a
+/// preview, keyed by its full variant_key so sibling poses in the same folder
+/// keep their own pictures. dir_path (the owning folder) rides along so a
+/// rescan can prune previews for folders that no longer exist.
+pub fn set_variant_preview(
+    conn: &Connection,
+    dir_path: &str,
+    variant_key: &str,
+    preview_path: &str,
+) -> Result<(), AppError> {
+    require_model(conn, dir_path)?;
+    conn.execute(
+        "INSERT INTO variant_previews (variant_key, dir_path, preview_path)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(variant_key) DO UPDATE SET
+             preview_path = excluded.preview_path,
+             dir_path = excluded.dir_path",
+        params![variant_key, dir_path, preview_path],
+    )
+    .map_err(|e| AppError::ConfigError(format!("Failed to set variant preview: {}", e)))?;
+    Ok(())
+}
+
+/// Route a preview to the right store: a fanned-out member (variant_key set)
+/// gets a per-variant preview so poses in one folder don't clobber each other;
+/// a whole-folder member falls back to model_user_meta.
+pub fn set_preview(
+    conn: &Connection,
+    dir_path: &str,
+    variant_key: Option<&str>,
+    preview_path: &str,
+) -> Result<(), AppError> {
+    match variant_key {
+        Some(key) => set_variant_preview(conn, dir_path, key, preview_path),
+        None => set_model_preview(conn, dir_path, preview_path),
+    }
+}
+
+/// variant_key -> preview_path for every per-variant preview under one folder.
+/// Consulted by expand_file_variants to override the folder-level preview each
+/// synthesized member would otherwise inherit.
+fn get_variant_previews(
+    conn: &Connection,
+    dir_path: &str,
+) -> Result<std::collections::HashMap<String, String>, AppError> {
+    let map = |e: rusqlite::Error| {
+        AppError::ConfigError(format!("Failed to read variant previews: {}", e))
+    };
+    let mut stmt = conn
+        .prepare("SELECT variant_key, preview_path FROM variant_previews WHERE dir_path = ?1")
+        .map_err(map)?;
+    let rows = stmt
+        .query_map([dir_path], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(map)?;
+    rows.collect::<Result<_, _>>().map_err(map)
 }
 
 /// Assign a set of files to a pose bucket (and optional per-file support),
@@ -1653,7 +1756,10 @@ mod tests {
         assert_eq!(variants[0].variant.as_deref(), Some("sword"));
         assert_eq!(variants[0].pose.as_deref(), Some("B"));
         assert_eq!(variants[0].support_status.as_deref(), Some("unsupported"));
-        assert_eq!(variants[0].dir_path, "/lib/newt", "dir_path denormalized from files");
+        assert_eq!(
+            variants[0].dir_path, "/lib/newt",
+            "dir_path denormalized from files"
+        );
 
         // reassigning updates in place rather than duplicating
         set_file_variants(
@@ -1680,7 +1786,14 @@ mod tests {
         assert!(get_file_variants(&conn, "/lib/newt").unwrap().is_empty());
 
         // and clearing drops the assignment explicitly
-        set_file_variants(&mut conn, &[files[1].path.clone()], None, Some("A".into()), None).unwrap();
+        set_file_variants(
+            &mut conn,
+            &[files[1].path.clone()],
+            None,
+            Some("A".into()),
+            None,
+        )
+        .unwrap();
         clear_file_variants(&conn, &[files[1].path.clone()]).unwrap();
         assert!(get_file_variants(&conn, "/lib/bugbear").unwrap().is_empty());
     }
@@ -1729,27 +1842,45 @@ mod tests {
             None,
         )
         .unwrap();
-        set_file_variants(&mut conn, &["/dump/mob/b.stl".into()], None, Some("2".into()), None)
-            .unwrap();
+        set_file_variants(
+            &mut conn,
+            &["/dump/mob/b.stl".into()],
+            None,
+            Some("2".into()),
+            None,
+        )
+        .unwrap();
 
         let members = group_members(&conn, "mob").unwrap();
         // two facet members + one residual
         assert_eq!(members.len(), 3);
-        let swordy = members.iter().find(|m| m.variant.as_deref() == Some("sword")).unwrap();
+        let swordy = members
+            .iter()
+            .find(|m| m.variant.as_deref() == Some("sword"))
+            .unwrap();
         assert_eq!(swordy.name, "mob sword 1", "label shows variant then pose");
         assert_eq!(swordy.pose.as_deref(), Some("1"));
         assert_eq!(swordy.file_count, 1);
         assert_eq!(swordy.total_size_bytes, 100.0);
-        assert_eq!(swordy.variant_key.as_deref(), Some("/dump/mob\u{1f}sword\u{1f}1"));
+        assert_eq!(
+            swordy.variant_key.as_deref(),
+            Some("/dump/mob\u{1f}sword\u{1f}1")
+        );
 
-        let pose2 = members.iter().find(|m| m.pose.as_deref() == Some("2")).unwrap();
+        let pose2 = members
+            .iter()
+            .find(|m| m.pose.as_deref() == Some("2"))
+            .unwrap();
         assert!(pose2.variant.is_none());
         assert_eq!(pose2.variant_key.as_deref(), Some("/dump/mob\u{1f}\u{1f}2"));
 
         let residual = members.iter().find(|m| m.pose.is_none()).unwrap();
         assert_eq!(residual.name, "mob (unassigned)");
         assert_eq!(residual.file_count, 1);
-        assert_eq!(residual.variant_key.as_deref(), Some("/dump/mob\u{1f}\u{1f}"));
+        assert_eq!(
+            residual.variant_key.as_deref(),
+            Some("/dump/mob\u{1f}\u{1f}")
+        );
 
         // files are scoped per member, keyed on (variant, pose)
         let f1 = model_files(&conn, "/dump/mob", swordy.variant_key.as_deref()).unwrap();
@@ -1762,6 +1893,105 @@ mod tests {
         // clearing every assignment collapses back to the whole-folder member
         clear_file_variants(&conn, &["/dump/mob/a.stl".into(), "/dump/mob/b.stl".into()]).unwrap();
         assert_eq!(group_members(&conn, "mob").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn per_pose_previews_do_not_clobber_each_other() {
+        // The bug: rendering pose A then pose B in one dump folder made every
+        // member show B, because the preview was keyed by the shared dir_path.
+        let mut conn = test_conn();
+        let files = vec![
+            file_row("/dump/mob/a.stl", "/dump/mob", 100),
+            file_row("/dump/mob/b.stl", "/dump/mob", 200),
+        ];
+        let models = vec![ModelRow {
+            dir_path: "/dump/mob".into(),
+            name: "mob".into(),
+            description: None,
+            designer: None,
+            release_name: None,
+            preview_path: None,
+            source: "heuristic".into(),
+            uuid: None,
+            file_count: 2,
+            total_size_bytes: 300,
+            pose: None,
+            scale: None,
+            support_status: None,
+            release_date: None,
+            group_name: Some("mob".into()),
+        }];
+        replace_catalog(&mut conn, &files, &models, &[]).unwrap();
+        set_file_variants(
+            &mut conn,
+            &["/dump/mob/a.stl".into()],
+            None,
+            Some("A".into()),
+            None,
+        )
+        .unwrap();
+        set_file_variants(
+            &mut conn,
+            &["/dump/mob/b.stl".into()],
+            None,
+            Some("B".into()),
+            None,
+        )
+        .unwrap();
+
+        let key_a = variant_key("/dump/mob", "", "A");
+        let key_b = variant_key("/dump/mob", "", "B");
+
+        // render pose A, then pose B — the sequence that used to clobber
+        set_preview(&conn, "/dump/mob", Some(&key_a), "/previews/a.png").unwrap();
+        set_preview(&conn, "/dump/mob", Some(&key_b), "/previews/b.png").unwrap();
+
+        let members = group_members(&conn, "mob").unwrap();
+        let preview_of = |members: &[CatalogEntry], pose: &str| {
+            members
+                .iter()
+                .find(|m| m.pose.as_deref() == Some(pose))
+                .unwrap()
+                .preview_path
+                .clone()
+        };
+        assert_eq!(
+            preview_of(&members, "A").as_deref(),
+            Some("/previews/a.png")
+        );
+        assert_eq!(
+            preview_of(&members, "B").as_deref(),
+            Some("/previews/b.png"),
+            "B did not clobber A",
+        );
+
+        // re-rendering A updates only A
+        set_preview(&conn, "/dump/mob", Some(&key_a), "/previews/a2.png").unwrap();
+        let members = group_members(&conn, "mob").unwrap();
+        assert_eq!(
+            preview_of(&members, "A").as_deref(),
+            Some("/previews/a2.png")
+        );
+        assert_eq!(
+            preview_of(&members, "B").as_deref(),
+            Some("/previews/b.png")
+        );
+
+        // per-variant previews survive a rescan, like the other user metadata
+        replace_catalog(&mut conn, &files, &models, &[]).unwrap();
+        set_file_variants(
+            &mut conn,
+            &["/dump/mob/a.stl".into()],
+            None,
+            Some("A".into()),
+            None,
+        )
+        .unwrap();
+        let members = group_members(&conn, "mob").unwrap();
+        assert_eq!(
+            preview_of(&members, "A").as_deref(),
+            Some("/previews/a2.png")
+        );
     }
 
     #[test]
@@ -1800,7 +2030,11 @@ mod tests {
         assert_eq!(entry.sculptor.as_deref(), Some("A. Sculptor"));
         assert_eq!(entry.release_name.as_deref(), Some("Order of the Unicorn"));
         assert_eq!(entry.variant.as_deref(), Some("mounted"));
-        assert_eq!(search(&conn, "mounted", &[], 10, 0).unwrap().total, 1, "variant is searchable");
+        assert_eq!(
+            search(&conn, "mounted", &[], 10, 0).unwrap().total,
+            1,
+            "variant is searchable"
+        );
         // fuzzy/trigram search: possessive apostrophe is folded out, so the
         // designer matches when typed as "trappers"; and a mid-word chunk of
         // sculptor matches by substring — neither worked with prefix-only FTS
@@ -1809,7 +2043,10 @@ mod tests {
         // the release name is searchable too
         assert_eq!(search(&conn, "unicorn", &[], 10, 0).unwrap().total, 1);
         // a multi-field query still ANDs: designer word + the model name
-        assert_eq!(search(&conn, "trappers repose", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(
+            search(&conn, "trappers repose", &[], 10, 0).unwrap().total,
+            1
+        );
         assert_eq!(
             entry.preview_path.as_deref(),
             Some("/appdata/previews/abc.png")
@@ -1817,12 +2054,26 @@ mod tests {
 
         // clearing the override reverts to the scanner name and designer
         update_model_user_meta(
-            &conn, "/lib/newt", None, None, None, None, None, None, None, None, None,
+            &conn,
+            "/lib/newt",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         let page = search(&conn, "newt", &[], 10, 0).unwrap();
         assert_eq!(page.entries[0].name, "Giant Newt");
-        assert_eq!(page.entries[0].designer.as_deref(), Some("DTL"), "reverts to release designer");
+        assert_eq!(
+            page.entries[0].designer.as_deref(),
+            Some("DTL"),
+            "reverts to release designer"
+        );
         assert!(page.entries[0].sculptor.is_none());
         assert_eq!(
             page.entries[0].release_name.as_deref(),
@@ -1835,12 +2086,10 @@ mod tests {
             Some("/appdata/previews/abc.png")
         );
 
-        assert!(
-            update_model_user_meta(
-                &conn, "/nope", None, None, None, None, None, None, None, None, None
-            )
-            .is_err()
-        );
+        assert!(update_model_user_meta(
+            &conn, "/nope", None, None, None, None, None, None, None, None, None
+        )
+        .is_err());
         assert!(set_model_preview(&conn, "/nope", "/x.png").is_err());
     }
 

@@ -224,7 +224,10 @@ pub fn scan(
             support_status: inferred
                 .as_ref()
                 .and_then(|i| i.support_status.clone())
-                .or_else(|| info.has_presupported_format.then(|| "supported".to_string()))
+                .or_else(|| {
+                    info.has_presupported_format
+                        .then(|| "supported".to_string())
+                })
                 .or_else(|| info.filename_support.map(String::from)),
             release_date: inferred.as_ref().and_then(|i| i.release_date.clone()),
             group_name: Some(group_name),
@@ -267,7 +270,10 @@ fn ancestor_image(
     let mut current = Path::new(dir_path).parent();
     while let Some(dir) = current {
         let key = dir.to_string_lossy();
-        if let Some(image) = dirs.get(key.as_ref()).and_then(|info| info.first_image.clone()) {
+        if let Some(image) = dirs
+            .get(key.as_ref())
+            .and_then(|info| info.first_image.clone())
+        {
             return Some(image);
         }
         if key.as_ref() == base {
@@ -769,7 +775,10 @@ mod tests {
             Some("unsupported"),
             "unsupported wins even though it contains 'supported'"
         );
-        assert_eq!(support_from_filename("presupported-torso.stl"), Some("supported"));
+        assert_eq!(
+            support_from_filename("presupported-torso.stl"),
+            Some("supported")
+        );
         assert_eq!(support_from_filename("dryad_dragon_head.stl"), None);
     }
 
@@ -809,8 +818,7 @@ mod tests {
 
     #[test]
     fn infers_designer_from_a_studio_folder() {
-        let root =
-            std::env::temp_dir().join(format!("stlpack_designer_{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("stlpack_designer_{}", std::process::id()));
         // a studio folder, spelled with underscores and no apostrophe
         let dir = root.join("dragon_trappers_lodge").join("goblin");
         fs::create_dir_all(&dir).unwrap();

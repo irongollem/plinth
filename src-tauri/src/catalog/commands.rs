@@ -91,8 +91,11 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
             let mut last_emit = Instant::now();
             let progress_app = app_handle.clone();
             let progress_job = job_id_clone.clone();
-            let outcome =
-                scanner::scan(Path::new(&root), &cancel, &designers, |files_indexed, current_dir| {
+            let outcome = scanner::scan(
+                Path::new(&root),
+                &cancel,
+                &designers,
+                |files_indexed, current_dir| {
                     if last_emit.elapsed() >= PROGRESS_EMIT_INTERVAL {
                         last_emit = Instant::now();
                         ScanStatus::Progress(ScanProgressStatus {
@@ -103,7 +106,8 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
                         .emit(&progress_app)
                         .ok();
                     }
-                })?;
+                },
+            )?;
 
             let mut conn = open_db(&app_handle)?;
             db::replace_catalog(
@@ -499,6 +503,10 @@ pub async fn set_model_preview(
     app_handle: AppHandle,
     dir_path: String,
     image_path: String,
+    // A fanned-out member (one pose/variant of a dump folder) passes its
+    // variant_key so the preview lands per-variant instead of clobbering the
+    // whole folder. Whole-folder models pass null.
+    variant_key: Option<String>,
 ) -> Result<String, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         if !Path::new(&image_path).is_file() {
@@ -515,9 +523,15 @@ pub async fn set_model_preview(
         std::fs::create_dir_all(&previews_dir)
             .map_err(|e| AppError::IoError(format!("Failed to create previews dir: {}", e)))?;
 
+        // Hash the variant_key when present so each member's preview gets its
+        // own on-disk file: sharing a dir_path-only prefix would make one
+        // pose's render sweep away a sibling pose's still-referenced image.
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        dir_path.hash(&mut hasher);
+        variant_key
+            .as_deref()
+            .unwrap_or(&dir_path)
+            .hash(&mut hasher);
         let prefix = format!("{:016x}", hasher.finish());
 
         if let Ok(entries) = std::fs::read_dir(&previews_dir) {
@@ -542,7 +556,7 @@ pub async fn set_model_preview(
 
         let dest_str = dest.to_string_lossy().into_owned();
         let conn = open_db(&app_handle)?;
-        db::set_model_preview(&conn, &dir_path, &dest_str)?;
+        db::set_preview(&conn, &dir_path, variant_key.as_deref(), &dest_str)?;
         Ok(dest_str)
     })
     .await
