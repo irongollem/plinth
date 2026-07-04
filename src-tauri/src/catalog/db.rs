@@ -105,8 +105,10 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             -- designer (the studio/brand) rides on the release for scanned
             -- models but is overridable per model; sculptor (the artist) has
             -- no folder signal at all, so it's user/manifest-supplied only.
+            -- release_name likewise overrides the scanned release.json value.
             designer       TEXT,
-            sculptor       TEXT
+            sculptor       TEXT,
+            release_name   TEXT
         );
 
         -- Group display-name overrides, keyed by the SCANNER's group name
@@ -172,8 +174,8 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
         &["pose", "scale", "support_status", "release_date", "group_name", "sculptor"],
     )?;
     // designer already exists on models (from the release); these are the
-    // per-model user overrides plus the artist field.
-    add_text_columns("model_user_meta", &["designer", "sculptor"])?;
+    // per-model user overrides plus the artist and release-name fields.
+    add_text_columns("model_user_meta", &["designer", "sculptor", "release_name"])?;
 
     if version >= SCHEMA_VERSION {
         return Ok(());
@@ -394,7 +396,8 @@ fn fts_insert_select() -> String {
                        WHERE t.dir_path = m.dir_path), '')
                  || ' ' || COALESCE(r.display_name, '')
                  || ' ' || COALESCE(u.designer, m.designer, '')
-                 || ' ' || COALESCE(u.sculptor, m.sculptor, '')"
+                 || ' ' || COALESCE(u.sculptor, m.sculptor, '')
+                 || ' ' || COALESCE(u.release_name, m.release_name, '')"
         ),
     )
 }
@@ -479,7 +482,8 @@ fn entry_select_sql(where_sql: &str, tail_sql: &str) -> String {
     format!(
         "SELECT m.dir_path, COALESCE(u.custom_name, m.name), m.description,
                 COALESCE(u.designer, m.designer),
-                m.release_name, COALESCE(u.preview_path, m.preview_path),
+                COALESCE(u.release_name, m.release_name),
+                COALESCE(u.preview_path, m.preview_path),
                 m.file_count, m.total_size_bytes,
                 COALESCE((SELECT group_concat(t.tag, char(31)) FROM model_tags t
                           WHERE t.dir_path = m.dir_path), ''),
@@ -1097,13 +1101,14 @@ pub fn update_model_user_meta(
     release_date: Option<String>,
     designer: Option<String>,
     sculptor: Option<String>,
+    release_name: Option<String>,
 ) -> Result<(), AppError> {
     require_model(conn, dir_path)?;
     conn.execute(
         "INSERT INTO model_user_meta
              (dir_path, custom_name, pose, scale, support_status, release_date,
-              designer, sculptor)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+              designer, sculptor, release_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(dir_path) DO UPDATE SET
              custom_name = excluded.custom_name,
              pose = excluded.pose,
@@ -1111,7 +1116,8 @@ pub fn update_model_user_meta(
              support_status = excluded.support_status,
              release_date = excluded.release_date,
              designer = excluded.designer,
-             sculptor = excluded.sculptor",
+             sculptor = excluded.sculptor,
+             release_name = excluded.release_name",
         params![
             dir_path,
             custom_name,
@@ -1120,7 +1126,8 @@ pub fn update_model_user_meta(
             support_status,
             release_date,
             designer,
-            sculptor
+            sculptor,
+            release_name
         ],
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to update metadata: {}", e)))?;
@@ -1700,6 +1707,7 @@ mod tests {
             None,
             Some("Dragon Trapper's Lodge".into()),
             Some("A. Sculptor".into()),
+            Some("Order of the Unicorn".into()),
         )
         .unwrap();
         set_model_preview(&conn, "/lib/newt", "/appdata/previews/abc.png").unwrap();
@@ -1716,11 +1724,14 @@ mod tests {
         // designer overrides the release's, sculptor is user-only
         assert_eq!(entry.designer.as_deref(), Some("Dragon Trapper's Lodge"));
         assert_eq!(entry.sculptor.as_deref(), Some("A. Sculptor"));
+        assert_eq!(entry.release_name.as_deref(), Some("Order of the Unicorn"));
         // fuzzy/trigram search: possessive apostrophe is folded out, so the
         // designer matches when typed as "trappers"; and a mid-word chunk of
         // sculptor matches by substring — neither worked with prefix-only FTS
         assert_eq!(search(&conn, "trappers", &[], 10, 0).unwrap().total, 1);
         assert_eq!(search(&conn, "ulpto", &[], 10, 0).unwrap().total, 1);
+        // the release name is searchable too
+        assert_eq!(search(&conn, "unicorn", &[], 10, 0).unwrap().total, 1);
         // a multi-field query still ANDs: designer word + the model name
         assert_eq!(search(&conn, "trappers repose", &[], 10, 0).unwrap().total, 1);
         assert_eq!(
@@ -1729,11 +1740,17 @@ mod tests {
         );
 
         // clearing the override reverts to the scanner name and designer
-        update_model_user_meta(&conn, "/lib/newt", None, None, None, None, None, None, None).unwrap();
+        update_model_user_meta(&conn, "/lib/newt", None, None, None, None, None, None, None, None)
+            .unwrap();
         let page = search(&conn, "newt", &[], 10, 0).unwrap();
         assert_eq!(page.entries[0].name, "Giant Newt");
         assert_eq!(page.entries[0].designer.as_deref(), Some("DTL"), "reverts to release designer");
         assert!(page.entries[0].sculptor.is_none());
+        assert_eq!(
+            page.entries[0].release_name.as_deref(),
+            Some("Critterfolk"),
+            "reverts to the scanned release name"
+        );
         // ...but the preview set separately is untouched by a metadata save
         assert_eq!(
             page.entries[0].preview_path.as_deref(),
@@ -1741,7 +1758,7 @@ mod tests {
         );
 
         assert!(
-            update_model_user_meta(&conn, "/nope", None, None, None, None, None, None, None)
+            update_model_user_meta(&conn, "/nope", None, None, None, None, None, None, None, None)
                 .is_err()
         );
         assert!(set_model_preview(&conn, "/nope", "/x.png").is_err());
@@ -1919,6 +1936,7 @@ mod tests {
             &conn,
             "/lib/newt",
             Some("Shiny Newt".into()),
+            None,
             None,
             None,
             None,

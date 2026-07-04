@@ -425,6 +425,7 @@ pub async fn update_model_metadata(
     release_date: Option<String>,
     designer: Option<String>,
     sculptor: Option<String>,
+    release_name: Option<String>,
 ) -> Result<(), AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
@@ -438,6 +439,7 @@ pub async fn update_model_metadata(
             release_date,
             designer,
             sculptor,
+            release_name,
         )
     })
     .await

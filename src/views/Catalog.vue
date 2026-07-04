@@ -196,9 +196,9 @@
             <span class="w-4"></span>
             <span class="w-10"></span>
             <span class="flex-1">MODEL</span>
-            <span class="w-[140px]">DESIGNER</span>
-            <span class="w-[160px]">VARIANTS</span>
-            <span class="w-[60px] text-right">SIZE</span>
+            <span class="w-35">DESIGNER</span>
+            <span class="w-40">VARIANTS</span>
+            <span class="w-15 text-right">SIZE</span>
           </div>
           <!-- div, not button: the row hosts a nested checkbox and
                interactive elements can't nest -->
@@ -235,15 +235,15 @@
             <span class="flex-1 font-medium text-[13px] truncate">{{
               group.group_name
             }}</span>
-            <span class="w-[140px] text-[12px] text-base-content/60 truncate">{{
+            <span class="w-35 text-[12px] text-base-content/60 truncate">{{
               group.designer
             }}</span>
             <span
-              class="w-[160px] font-mono text-[10.5px] text-base-content/50 truncate"
+              class="w-40 font-mono text-[10.5px] text-base-content/50 truncate"
               >{{ groupSummary(group) }}</span
             >
             <span
-              class="w-[60px] text-right font-mono text-[11px] text-base-content/50"
+              class="w-15 text-right font-mono text-[11px] text-base-content/50"
               >{{ formatFileSize(group.total_size_bytes) }}</span
             >
           </div>
@@ -300,7 +300,7 @@
           <!-- Picture area: preview image, or the 3D viewport inline when
              toggled (no more full-screen overlay) -->
           <div
-            class="relative aspect-[4/3] rounded-box bg-base-300 border border-base-content/10 flex items-center justify-center text-base-content/30 overflow-hidden"
+            class="relative aspect-4/3 rounded-box bg-base-300 border border-base-content/10 flex items-center justify-center text-base-content/30 overflow-hidden"
           >
             <StlViewport
               v-if="show3d && stlPaths.length"
@@ -540,6 +540,17 @@
                     placeholder="YYYY-MM"
                   />
                 </label>
+                <label class="flex flex-col gap-0.5 col-span-2">
+                  <span class="font-mono text-[9px] text-base-content/40"
+                    >RELEASE</span
+                  >
+                  <input
+                    v-model="metaDraft.release_name"
+                    type="text"
+                    class="input input-xs font-mono"
+                    placeholder="e.g. Order of the Unicorn"
+                  />
+                </label>
               </div>
               <button
                 v-if="metaDirty"
@@ -554,14 +565,14 @@
             <div class="flex gap-1.5">
               <button
                 type="button"
-                class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] bg-primary text-primary-content rounded-md py-2 cursor-pointer"
+                class="flex-1 text-center font-semibold text-[11px] tracking-wider bg-primary text-primary-content rounded-md py-2 cursor-pointer"
                 @click="printModel"
               >
                 PRINT
               </button>
               <button
                 type="button"
-                class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] border rounded-md py-2 cursor-pointer disabled:opacity-40"
+                class="flex-1 text-center font-semibold text-[11px] tracking-wider border rounded-md py-2 cursor-pointer disabled:opacity-40"
                 :class="
                   show3d
                     ? 'border-primary text-primary'
@@ -574,7 +585,7 @@
               </button>
               <button
                 type="button"
-                class="flex-1 text-center font-semibold text-[11px] tracking-[0.05em] border border-base-content/15 rounded-md py-2 cursor-pointer disabled:opacity-40"
+                class="flex-1 text-center font-semibold text-[11px] tracking-wider border border-base-content/15 rounded-md py-2 cursor-pointer disabled:opacity-40"
                 :disabled="!stlPaths.length"
                 @click="renderSelected"
               >
@@ -599,9 +610,13 @@
               <div
                 class="flex items-center gap-2 font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 mb-1.5"
               >
-                <span>FILES · {{ formatFileSize(selected.total_size_bytes) }}</span>
+                <span
+                  >FILES · {{ formatFileSize(selected.total_size_bytes) }}</span
+                >
                 <span class="flex-1"></span>
-                <span class="normal-case tracking-normal font-normal opacity-70">
+                <span
+                  class="normal-case tracking-normal font-normal opacity-70"
+                >
                   tick files to file them under a pose
                 </span>
               </div>
@@ -612,7 +627,9 @@
                 v-if="checkedFiles.length"
                 class="flex items-center gap-1.5 bg-base-200 border border-base-content/10 rounded-lg px-2 py-1.5 mb-1.5"
               >
-                <span class="font-mono text-[10px] text-base-content/60 shrink-0">
+                <span
+                  class="font-mono text-[10px] text-base-content/60 shrink-0"
+                >
                   {{ checkedFiles.length }} sel
                 </span>
                 <form
@@ -864,6 +881,7 @@ const metaDraft = ref({
   release_date: "",
   designer: "",
   sculptor: "",
+  release_name: "",
 });
 
 /* Resizable detail drawer — width persists so it survives navigation. */
@@ -872,7 +890,10 @@ const DRAWER_MAX = 720;
 const drawerWidth = ref(
   Math.min(
     DRAWER_MAX,
-    Math.max(DRAWER_MIN, Number(localStorage.getItem("catalogDrawerWidth")) || 340),
+    Math.max(
+      DRAWER_MIN,
+      Number(localStorage.getItem("catalogDrawerWidth")) || 340,
+    ),
   ),
 );
 const startDrawerResize = (event: MouseEvent) => {
@@ -1040,7 +1061,11 @@ const assignChecked = async () => {
   const pose = poseAssignDraft.value.trim();
   if (!dir || !pose || !checkedFiles.value.length) return;
   const count = checkedFiles.value.length;
-  const result = await commands.assignFilesToPose(checkedFiles.value, pose, null);
+  const result = await commands.assignFilesToPose(
+    checkedFiles.value,
+    pose,
+    null,
+  );
   if (result.status !== "ok") {
     toastStore.reportError("Failed to assign files", result.error);
     return;
@@ -1365,13 +1390,17 @@ const moveChecked = async () => {
 
 watch(selected, (entry) => {
   metaDraft.value = {
-    name: entry?.name ?? "",
+    // NAME is the card/sort name — i.e. the GROUP name — not the per-variant
+    // name. Variants are told apart by their pose, so this one field renames
+    // the whole model regardless of how many poses it has.
+    name: selectedGroup.value?.group_name ?? entry?.name ?? "",
     pose: entry?.pose ?? "",
     scale: entry?.scale ?? "",
     support_status: entry?.support_status ?? "",
     release_date: entry?.release_date ?? "",
     designer: entry?.designer ?? "",
     sculptor: entry?.sculptor ?? "",
+    release_name: entry?.release_name ?? "",
   };
   // fresh member: drop any ticks, and seed the assign box with the scanner's
   // pose guess (the "pre-estimate") so filing more files under it is one tap
@@ -1384,44 +1413,63 @@ const metaDirty = computed(() => {
   if (!entry) return false;
   const draft = metaDraft.value;
   return (
-    draft.name !== entry.name ||
+    draft.name !== (selectedGroup.value?.group_name ?? entry.name) ||
     draft.pose !== (entry.pose ?? "") ||
     draft.scale !== (entry.scale ?? "") ||
     draft.support_status !== (entry.support_status ?? "") ||
     draft.release_date !== (entry.release_date ?? "") ||
     draft.designer !== (entry.designer ?? "") ||
-    draft.sculptor !== (entry.sculptor ?? "")
+    draft.sculptor !== (entry.sculptor ?? "") ||
+    draft.release_name !== (entry.release_name ?? "")
   );
 });
 
 const saveMetadata = async () => {
   const entry = selected.value;
-  if (!entry) return;
+  const group = selectedGroup.value;
+  if (!entry || !group) return;
   const orNull = (value: string) => value.trim() || null;
   const draft = metaDraft.value;
-  // An untouched name keeps whatever override exists; an edited one becomes
-  // the override; clearing the field reverts to the scanner's name
-  const trimmedName = draft.name.trim();
-  const customName =
-    trimmedName === entry.name
-      ? (entry.custom_name ?? null)
-      : trimmedName || null;
+
+  // Per-variant metadata. custom_name is preserved untouched — the NAME
+  // field drives the group name below, not a per-variant override.
   const result = await commands.updateModelMetadata(
     entry.dir_path,
-    customName,
+    entry.custom_name ?? null,
     orNull(draft.pose),
     orNull(draft.scale),
     orNull(draft.support_status),
     orNull(draft.release_date),
     orNull(draft.designer),
     orNull(draft.sculptor),
+    orNull(draft.release_name),
   );
-  if (result.status === "ok") {
-    toastStore.addToast("Details saved", "success");
-    await refreshSelected();
-  } else {
+  if (result.status !== "ok") {
     toastStore.reportError("Failed to save details", result.error);
+    return;
   }
+
+  // NAME edits the group/card name (the sort key) for every model.
+  const newName = draft.name.trim();
+  if (newName && newName !== group.group_name) {
+    const renamed = await commands.renameCatalogGroup(group.group_name, newName);
+    if (renamed.status !== "ok") {
+      toastStore.reportError("Saved details, but rename failed", renamed.error);
+      await refreshSelected();
+      return;
+    }
+    toastStore.addToast("Details saved", "success");
+    // the card moved to its new name — re-open it there
+    await Promise.all([runSearch(), refreshMeta()]);
+    const found = groups.value.find(
+      (g) => g.group_name.toLowerCase() === newName.toLowerCase(),
+    );
+    if (found) await selectGroup(found);
+    return;
+  }
+
+  toastStore.addToast("Details saved", "success");
+  await refreshSelected();
 };
 
 const pickPreviewImage = async () => {
