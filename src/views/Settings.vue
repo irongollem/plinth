@@ -95,6 +95,44 @@
       <div class="flex flex-col gap-1.5">
         <span
           class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
+          >KNOWN DESIGNERS — RECOGNIZED IN FOLDER NAMES WHEN SCANNING</span
+        >
+        <div
+          class="flex flex-wrap gap-1.5 items-center bg-base-200 border border-base-content/10 rounded-lg p-2"
+        >
+          <span
+            v-for="designer in settings.known_designers ?? []"
+            :key="designer"
+            class="font-mono text-[11px] text-base-content/70 border border-base-content/15 rounded-full px-2.5 py-0.5 flex items-center gap-1"
+          >
+            {{ designer }}
+            <button
+              type="button"
+              class="opacity-50 hover:opacity-100"
+              @click="removeDesigner(designer)"
+            >
+              ✕
+            </button>
+          </span>
+          <form class="join" @submit.prevent="addDesigner">
+            <input
+              v-model="newDesigner"
+              type="text"
+              class="input input-xs join-item w-40 font-mono"
+              placeholder="+ add designer"
+            />
+          </form>
+        </div>
+        <p class="text-[10.5px] text-base-content/40">
+          Infers a model's designer from its folder path when there's no
+          release metadata. Matching ignores case, spaces and punctuation.
+          Applies on the next scan.
+        </p>
+      </div>
+
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-[0.1em] text-base-content/40"
           >APPEARANCE</span
         >
         <div
@@ -150,7 +188,26 @@ const settings = ref<Settings>({
   max_compression_threads: null,
   blender_path: null,
   catalog_root: null,
+  known_designers: null,
 });
+
+/* The scanner's designer lexicon, editable here; seeded server-side with
+   sensible defaults. Mutating the array triggers the deep-watch auto-save. */
+const newDesigner = ref("");
+const addDesigner = () => {
+  const name = newDesigner.value.trim();
+  newDesigner.value = "";
+  if (!name) return;
+  const list = settings.value.known_designers ?? [];
+  if (!list.some((d) => d.toLowerCase() === name.toLowerCase())) {
+    settings.value.known_designers = [...list, name];
+  }
+};
+const removeDesigner = (name: string) => {
+  settings.value.known_designers = (settings.value.known_designers ?? []).filter(
+    (d) => d !== name,
+  );
+};
 
 const blenderStatus = ref("");
 const blenderFound = ref(false);

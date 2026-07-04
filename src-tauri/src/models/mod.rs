@@ -13,6 +13,9 @@ pub struct Settings {
     pub max_compression_threads: Option<u32>,
     pub blender_path: Option<String>,
     pub catalog_root: Option<String>,
+    /// Studios the scanner recognizes in folder names to infer a designer.
+    /// Seeded from scanner::DEFAULT_DESIGNERS on first load; user-editable.
+    pub known_designers: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

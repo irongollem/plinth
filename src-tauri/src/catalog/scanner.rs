@@ -34,6 +34,7 @@ struct ReleaseInfo {
 pub fn scan(
     root: &Path,
     cancel: &AtomicBool,
+    designers: &[String],
     mut on_progress: impl FnMut(u32, &str),
 ) -> Result<ScanOutcome, AppError> {
     if !root.is_dir() {
@@ -193,7 +194,7 @@ pub fn scan(
             designer: release
                 .as_ref()
                 .and_then(|r| r.designer.clone())
-                .or_else(|| infer_designer(root, dir_path)),
+                .or_else(|| infer_designer(root, dir_path, designers)),
             release_name: release.map(|r| r.name.clone()),
             preview_path: preview,
             source: source.to_string(),
@@ -343,12 +344,13 @@ fn infer_model_identity(root: &Path, dir_path: &str) -> InferredModel {
     }
 }
 
-/// A starter lexicon of common STL-mini studios. Trees rarely spell the
-/// designer as a field, but very often name a folder after the studio.
-/// Matching is on alphanumerics only, so "dragon_trappers_lodge", "Dragon
-/// Trapper's Lodge" and "DragonTrappersLodge" all hit. Extend freely — it's
-/// a recognition aid, always overridable in the UI.
-const DESIGNERS: &[&str] = &[
+/// The starter lexicon of common STL-mini studios, seeded into settings on
+/// first run. Trees rarely spell the designer as a field, but very often
+/// name a folder after the studio. Matching is on alphanumerics only, so
+/// "dragon_trappers_lodge", "Dragon Trapper's Lodge" and
+/// "DragonTrappersLodge" all hit. The user's saved list (settings) is what
+/// the scanner actually uses — this is only the default the UI starts from.
+pub const DEFAULT_DESIGNERS: &[&str] = &[
     "Dragon Trapper's Lodge",
     "Artisan Guild",
     "Titan Forge",
@@ -379,15 +381,16 @@ fn alnum_key(text: &str) -> String {
         .collect()
 }
 
-/// The first known studio named by any ancestor segment of `dir_path` — a
-/// fallback designer for trees with no release.json to state it outright.
-fn infer_designer(root: &Path, dir_path: &str) -> Option<String> {
+/// The first `designers`-listed studio named by any ancestor segment of
+/// `dir_path` — a fallback designer for trees with no release.json to state
+/// it outright. The list comes from settings (seeded with DEFAULT_DESIGNERS).
+fn infer_designer(root: &Path, dir_path: &str, designers: &[String]) -> Option<String> {
     let mut current = Some(Path::new(dir_path));
     while let Some(dir) = current {
         if let Some(segment) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) {
             let key = alnum_key(&segment);
-            if let Some(hit) = DESIGNERS.iter().find(|d| key.contains(&alnum_key(d))) {
-                return Some((*hit).to_string());
+            if let Some(hit) = designers.iter().find(|d| key.contains(&alnum_key(d))) {
+                return Some(hit.clone());
             }
         }
         if dir == root {
@@ -579,7 +582,7 @@ mod tests {
         fs::write(root.join("loose/notes.txt"), b"ignore me").unwrap();
 
         let cancel = AtomicBool::new(false);
-        let outcome = scan(&root, &cancel, |_, _| {}).unwrap();
+        let outcome = scan(&root, &cancel, &[], |_, _| {}).unwrap();
 
         assert_eq!(outcome.files.len(), 2, "only model files are indexed");
 
@@ -702,7 +705,7 @@ mod tests {
         fs::write(model_root.join("goblin-render.png"), b"png").unwrap();
 
         let cancel = AtomicBool::new(false);
-        let outcome = scan(&root, &cancel, |_, _| {}).unwrap();
+        let outcome = scan(&root, &cancel, &[], |_, _| {}).unwrap();
 
         assert!(!outcome.models.is_empty());
         for model in &outcome.models {
@@ -730,8 +733,9 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("gob.stl"), b"solid").unwrap();
 
+        let designers: Vec<String> = DEFAULT_DESIGNERS.iter().map(|s| s.to_string()).collect();
         let cancel = AtomicBool::new(false);
-        let outcome = scan(&root, &cancel, |_, _| {}).unwrap();
+        let outcome = scan(&root, &cancel, &designers, |_, _| {}).unwrap();
 
         let goblin = outcome
             .models

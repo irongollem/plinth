@@ -65,6 +65,15 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
         )));
     }
 
+    // Resolve the designer lexicon up front (async store read) so the
+    // blocking scan can borrow it; fall back to the built-in defaults.
+    let designers = crate::settings::get_settings(app_handle.clone())
+        .await
+        .ok()
+        .and_then(|s| s.known_designers)
+        .filter(|list| !list.is_empty())
+        .unwrap_or_else(crate::settings::default_designers);
+
     let job_id = Uuid::new_v4().to_string();
     let cancel = register_job(&job_id)?;
     let job_id_clone = job_id.clone();
@@ -83,7 +92,7 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
             let progress_app = app_handle.clone();
             let progress_job = job_id_clone.clone();
             let outcome =
-                scanner::scan(Path::new(&root), &cancel, |files_indexed, current_dir| {
+                scanner::scan(Path::new(&root), &cancel, &designers, |files_indexed, current_dir| {
                     if last_emit.elapsed() >= PROGRESS_EMIT_INTERVAL {
                         last_emit = Instant::now();
                         ScanStatus::Progress(ScanProgressStatus {

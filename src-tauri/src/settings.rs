@@ -14,10 +14,19 @@ pub(crate) static SETTINGS_CACHE: Lazy<Mutex<Settings>> = Lazy::new(|| {
         max_compression_threads: None,
         blender_path: None,
         catalog_root: None,
+        known_designers: None,
     })
 });
 
 const STORE_PATH: &str = "settings.json";
+
+/// The designer lexicon the UI starts from before the user edits it.
+pub fn default_designers() -> Vec<String> {
+    crate::catalog::scanner::DEFAULT_DESIGNERS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
 
 async fn get_store_arc(app_handle: &AppHandle) -> Result<Arc<Store<Wry>>, String> {
     let store_res = app_handle.get_store(STORE_PATH);
@@ -80,6 +89,19 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         .get("catalog_root")
         .and_then(|v| v.as_str().map(String::from));
 
+    // Seed the lexicon on first load so the UI has something to show and the
+    // scanner has something to match; the user's saved list wins thereafter.
+    let known_designers = store
+        .get("known_designers")
+        .and_then(|v| v.as_array().cloned())
+        .map(|arr| {
+            arr.into_iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        })
+        .filter(|list| !list.is_empty())
+        .unwrap_or_else(default_designers);
+
     let settings = Settings {
         scratch_dir,
         target_dir,
@@ -88,6 +110,7 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         max_compression_threads,
         blender_path,
         catalog_root,
+        known_designers: Some(known_designers),
     };
 
     {
@@ -151,6 +174,11 @@ pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(
         &store,
         "catalog_root",
         settings.catalog_root.as_deref().map(|v| json!(v)),
+    );
+    set_or_delete(
+        &store,
+        "known_designers",
+        settings.known_designers.as_ref().map(|v| json!(v)),
     );
 
     store.save().map_err(|e| e.to_string())?;
