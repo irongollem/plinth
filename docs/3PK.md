@@ -47,48 +47,59 @@ option; v1 is deliberately modular.
   "release": {
     "name": "Dungeon Classics",
     "designer": "Some Designer",
-    "date": "2026-05",              // YYYY-MM (canonical; input MM/YYYY is normalized)
+    "date": "2026-05", // YYYY-MM (canonical; input MM/YYYY is normalized)
     "version": "1.0.0",
     "description": "…",
     "tags": ["dungeon", "classic"],
-    "images": ["images/cover.png"]  // paths inside release.3pk
+    "images": ["images/cover.png"], // paths inside release.3pk
   },
 
   "components": [
     {
-      "name": "galeb duhr",         // the logical model / group
-      "archive": "galeb duhr.zip",  // sibling file, relative to the release dir
+      "name": "galeb duhr", // the logical model / group
+      "archive": "galeb duhr.zip", // sibling file, relative to the release dir
       "checksum": "blake3:9f86d0…", // of the archive bytes — drives update detection
       "size_bytes": 896812345,
 
       "models": [
         {
-          "id": "0e37…-uuid",       // stable identity; survives moves/rescans
-          "name": "galeb duhr",     // scanner/base name
-          "custom_name": null,      // user override, if any (else null)
+          "id": "0e37…-uuid", // stable identity; survives moves/rescans
+          "name": "galeb duhr", // scanner/base name
+          "custom_name": null, // user override, if any (else null)
           "description": null,
           "group": "galeb duhr",
           "tags": ["earth-elemental"],
 
-          "designer": "Some Studio",// the studio/brand (defaults from release, per-model override)
-          "sculptor": "A. Artist",  // the individual artist, if known
+          "designer": "Some Studio", // the studio/brand (defaults from release, per-model override)
+          "sculptor": "A. Artist", // the individual artist, if known
 
-          "pose": "A",              // model-level metadata (→ model_user_meta)
+          "pose": "A", // model-level metadata (→ model_user_meta)
           "scale": "32mm",
           "support_status": "unsupported",
           "release_date": "2026-05",
           "preview": "images/galeb duhr A.png",
 
-          "files": [                // paths are relative to the component archive root
-            { "name": "A/body.stl",  "checksum": "blake3:…", "size_bytes": 1234,
-              "pose": "A", "support_status": "unsupported" },
-            { "name": "shared/base.stl", "checksum": "blake3:…", "size_bytes": 567,
-              "pose": null, "support_status": null }
-          ]
-        }
-      ]
-    }
-  ]
+          "files": [
+            // paths are relative to the component archive root
+            {
+              "name": "A/body.stl",
+              "checksum": "blake3:…",
+              "size_bytes": 1234,
+              "pose": "A",
+              "support_status": "unsupported",
+            },
+            {
+              "name": "shared/base.stl",
+              "checksum": "blake3:…",
+              "size_bytes": 567,
+              "pose": null,
+              "support_status": null,
+            },
+          ],
+        },
+      ],
+    },
+  ],
 }
 ```
 
@@ -97,16 +108,16 @@ option; v1 is deliberately modular.
 The manifest is the wire form of the catalog's rescan-safe tables. On
 import the scanner restores:
 
-| Manifest field | Catalog destination |
-|---|---|
+| Manifest field                                                                       | Catalog destination                             |
+| ------------------------------------------------------------------------------------ | ----------------------------------------------- |
 | `models[].custom_name`, `pose`, `scale`, `support_status`, `release_date`, `preview` | `model_user_meta` (overrides scanner inference) |
-| `models[].tags` | `model_tags` (source `metadata`) |
-| `models[].files[].pose` / `support_status` | `file_variants` (the dump-folder splits) |
-| `release.*`, `components[]` | `models.release_name/designer`, group identity |
+| `models[].tags`                                                                      | `model_tags` (source `metadata`)                |
+| `models[].files[].pose` / `support_status`                                           | `file_variants` (the dump-folder splits)        |
+| `release.*`, `components[]`                                                          | `models.release_name/designer`, group identity  |
 
 Because `file_variants` rides in the manifest, a folder someone split into
 poses on their machine reappears already split on yours — the whole point
-of making pose *metadata* rather than folder structure.
+of making pose _metadata_ rather than folder structure.
 
 ### Checksums
 

@@ -32,6 +32,16 @@ Duplicates across variants (e.g. one base STL repeated in 5 weapon variants) sho
 - [ ] Phase 5 (only if real users are stuck on link-less volumes) — virtual sharing tier: catalog-pointer fallback, viable once print resolves paths in-app; Finder browsing is the only remaining gap
 - [ ] Cleanup-tooling contract: same-volume `rename()` preserves links; deleting a variant folder only drops one name; cross-volume moves split shared inodes — cleaner must re-merge on the destination side
 
+### 3pk writer (spec + reader done; see docs/3PK.md)
+
+The format (`manifest::Manifest` structs + BLAKE3) and the scanner-side reader
+(rich `model.json` → catalog, incl. per-file poses) are built. The writer is
+the remaining half and depends on the release-builder flow settling first.
+
+- [ ] Enrich what `add_model` writes to `model.json`: carry the catalog metadata (variant/pose/scale/support/designer/sculptor/release_name + `file_poses`) through the release-builder staging → `add_model` → sidecar, so a packed release actually contains the curation the reader restores. Needs `StlModel` (and the frontend `DraftReleaseModel`) extended, and the staging in Catalog.vue `addToDraftRelease` to pull designer/sculptor/release_name + `file_variants`.
+- [ ] Container `manifest.json` in `release.3pk`: one component per group with a BLAKE3 archive checksum + per-file checksums, built at pack time (in `compression_jobs` after archives exist). Fold in the Phase-4 checksum-dedup (store each unique blob once, list all names against one checksum) while there are no external readers.
+- [ ] Wire the finalize flow to emit the manifest and verify round-trip: pack → scan on a clean profile → curation restored.
+
 ### Modular Package Strategy Implementation
 
 - [ ] Create a modular compression system that packages each group separately
