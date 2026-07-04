@@ -423,7 +423,7 @@
                 "
                 @click="selectEntry(member)"
               >
-                {{ member.pose ?? member.name }}
+                {{ memberLabel(member) }}
               </button>
             </div>
 
@@ -495,7 +495,18 @@
                 </label>
                 <label class="flex flex-col gap-0.5">
                   <span class="font-mono text-[9px] text-base-content/40"
-                    >POSE / VARIANT</span
+                    >VARIANT</span
+                  >
+                  <input
+                    v-model="metaDraft.variant"
+                    type="text"
+                    class="input input-xs font-mono"
+                    placeholder="e.g. sword, mounted"
+                  />
+                </label>
+                <label class="flex flex-col gap-0.5">
+                  <span class="font-mono text-[9px] text-base-content/40"
+                    >POSE</span
                   >
                   <input
                     v-model="metaDraft.pose"
@@ -637,17 +648,23 @@
                   @submit.prevent="assignChecked"
                 >
                   <input
-                    v-model="poseAssignDraft"
+                    v-model="variantAssignDraft"
                     type="text"
                     class="input input-xs font-mono flex-1 min-w-0"
-                    placeholder="pose e.g. A"
+                    placeholder="variant e.g. sword"
+                  />
+                  <input
+                    v-model="poseAssignDraft"
+                    type="text"
+                    class="input input-xs font-mono w-20 shrink-0"
+                    placeholder="pose"
                   />
                   <button
                     type="submit"
                     class="btn btn-xs btn-primary"
-                    :disabled="!poseAssignDraft.trim()"
+                    :disabled="!variantAssignDraft.trim() && !poseAssignDraft.trim()"
                   >
-                    assign
+                    file
                   </button>
                 </form>
                 <button
@@ -876,6 +893,7 @@ const show3dModal = ref(false);
 const showImageModal = ref(false);
 const metaDraft = ref({
   name: "",
+  variant: "",
   pose: "",
   scale: "",
   support_status: "",
@@ -884,6 +902,12 @@ const metaDraft = ref({
   sculptor: "",
   release_name: "",
 });
+
+// A synthesized member's variant_key is `dir\u{1f}variant\u{1f}pose`; keep the
+// format in one place. Empty variant AND pose is the residual/unassigned pool.
+const KEY_SEP = "\u{1f}";
+const variantKeyFor = (dir: string, variant: string, pose: string) =>
+  `${dir}${KEY_SEP}${variant}${KEY_SEP}${pose}`;
 
 /* Resizable detail drawer — width persists so it survives navigation. */
 const DRAWER_MIN = 300;
@@ -1005,6 +1029,12 @@ const toggleDups = () => {
 // members (variant_key null).
 const memberKey = (entry: CatalogEntry) => entry.variant_key ?? entry.dir_path;
 
+// Chip label: "sword · 2" from the facets, else the pose, else the name.
+const memberLabel = (entry: CatalogEntry) =>
+  [entry.variant, entry.pose].filter(Boolean).join(" · ") ||
+  entry.pose ||
+  entry.name;
+
 const selectEntry = async (entry: CatalogEntry) => {
   selected.value = entry;
   files.value = [];
@@ -1017,16 +1047,20 @@ const selectEntry = async (entry: CatalogEntry) => {
   if (fileResult.status === "ok") files.value = fileResult.data;
   if (variantResult.status === "ok") {
     const map: Record<string, string> = {};
-    for (const v of variantResult.data) if (v.pose) map[v.path] = v.pose;
+    for (const v of variantResult.data) {
+      const label = [v.variant, v.pose].filter(Boolean).join(" · ");
+      if (label) map[v.path] = label;
+    }
     fileVariantMap.value = map;
   }
 };
 
-/* ---- deliverable 3: assign files in a dump folder to poses ---- */
-// checked file paths in the drawer's file list, and the pose to file them under
+/* ---- assign files in a dump folder to variant/pose buckets ---- */
+// checked file paths in the drawer's file list, and the facets to file them under
 const checkedFiles = ref<string[]>([]);
+const variantAssignDraft = ref("");
 const poseAssignDraft = ref("");
-// path -> assigned pose, so already-sorted files show a badge
+// path -> "variant · pose" label, so already-sorted files show a badge
 const fileVariantMap = ref<Record<string, string>>({});
 
 const toggleCheckedFile = (path: string) => {
@@ -1060,29 +1094,33 @@ const reloadMembers = async (preferKey?: string) => {
 
 const assignChecked = async () => {
   const dir = selected.value?.dir_path;
+  const variant = variantAssignDraft.value.trim();
   const pose = poseAssignDraft.value.trim();
-  if (!dir || !pose || !checkedFiles.value.length) return;
+  // need at least one facet to file under, and files to file
+  if (!dir || (!variant && !pose) || !checkedFiles.value.length) return;
   const count = checkedFiles.value.length;
   const result = await commands.assignFilesToPose(
     checkedFiles.value,
-    pose,
+    variant || null,
+    pose || null,
     null,
   );
   if (result.status !== "ok") {
     toastStore.reportError("Failed to assign files", result.error);
     return;
   }
+  const label = [variant, pose].filter(Boolean).join(" · ");
   toastStore.addToast(
-    `Filed ${count} file${count === 1 ? "" : "s"} under pose “${pose}”`,
+    `Filed ${count} file${count === 1 ? "" : "s"} under “${label}”`,
     "success",
   );
   checkedFiles.value = [];
+  variantAssignDraft.value = "";
   poseAssignDraft.value = "";
-  // Stay on the unassigned pool (the residual member, key "<dir>\u{1f}") so
-  // the remaining files are still in front of you to keep filing poses. When
-  // the last file is assigned the residual is gone and reloadMembers falls
-  // back to a real member.
-  await Promise.all([runSearch(), reloadMembers(`${dir}\u{1f}`)]);
+  // Stay on the unassigned pool so the remaining files are still in front of
+  // you to keep filing. When the last file is filed the pool is gone and
+  // reloadMembers falls back to a real member.
+  await Promise.all([runSearch(), reloadMembers(variantKeyFor(dir, "", ""))]);
 };
 
 const clearChecked = async () => {
@@ -1399,6 +1437,7 @@ watch(selected, (entry) => {
     // name. Variants are told apart by their pose, so this one field renames
     // the whole model regardless of how many poses it has.
     name: selectedGroup.value?.group_name ?? entry?.name ?? "",
+    variant: entry?.variant ?? "",
     pose: entry?.pose ?? "",
     scale: entry?.scale ?? "",
     support_status: entry?.support_status ?? "",
@@ -1407,9 +1446,10 @@ watch(selected, (entry) => {
     sculptor: entry?.sculptor ?? "",
     release_name: entry?.release_name ?? "",
   };
-  // fresh member: drop any ticks, and seed the assign box with the scanner's
-  // pose guess (the "pre-estimate") so filing more files under it is one tap
+  // fresh member: drop any ticks, and seed the assign boxes with this member's
+  // facets so filing more files under the same bucket is one tap
   checkedFiles.value = [];
+  variantAssignDraft.value = entry?.variant ?? "";
   poseAssignDraft.value = entry?.pose ?? "";
 });
 
@@ -1419,6 +1459,7 @@ const metaDirty = computed(() => {
   const draft = metaDraft.value;
   return (
     draft.name !== (selectedGroup.value?.group_name ?? entry.name) ||
+    draft.variant !== (entry.variant ?? "") ||
     draft.pose !== (entry.pose ?? "") ||
     draft.scale !== (entry.scale ?? "") ||
     draft.support_status !== (entry.support_status ?? "") ||
@@ -1434,46 +1475,50 @@ const saveMetadata = async () => {
   const group = selectedGroup.value;
   if (!entry || !group) return;
   const draft = metaDraft.value;
-  // A file-split pose member's pose + support live in file_variants, not
+  // A file-split member's variant/pose/support live in file_variants, not
   // model_user_meta — writing them there would silently revert on reload.
   const isVariant = !!entry.variant_key;
+  const newVariant = draft.variant.trim();
   const newPose = draft.pose.trim();
   const bucketChanged =
     isVariant &&
-    (newPose !== (entry.pose ?? "") ||
+    (newVariant !== (entry.variant ?? "") ||
+      newPose !== (entry.pose ?? "") ||
       orNull(draft.support_status) !== (entry.support_status ?? null));
 
   if (bucketChanged) {
-    // re-file this member's files under the edited pose/support (or unfile
-    // them back to the pool when the pose is cleared)
+    // re-file this member's files under the edited facets (or unfile them
+    // back to the pool when both variant and pose are cleared)
     const paths = files.value.map((file) => file.path);
-    const refiled = newPose
-      ? await commands.assignFilesToPose(
-          paths,
-          newPose,
-          orNull(draft.support_status),
-        )
-      : await commands.clearFilePose(paths);
+    const refiled =
+      newVariant || newPose
+        ? await commands.assignFilesToPose(
+            paths,
+            newVariant || null,
+            newPose || null,
+            orNull(draft.support_status),
+          )
+        : await commands.clearFilePose(paths);
     if (refiled.status !== "ok") {
-      toastStore.reportError("Failed to rename pose", refiled.error);
+      toastStore.reportError("Failed to re-file member", refiled.error);
       return;
     }
   }
 
-  // Model-level metadata (shared by every pose member of the folder).
-  // custom_name is preserved — NAME drives the group name below. For a
-  // variant member pose/support are null here; they went to file_variants.
-  const result = await commands.updateModelMetadata(
-    entry.dir_path,
-    entry.custom_name ?? null,
-    isVariant ? null : orNull(draft.pose),
-    orNull(draft.scale),
-    isVariant ? null : orNull(draft.support_status),
-    orNull(draft.release_date),
-    orNull(draft.designer),
-    orNull(draft.sculptor),
-    orNull(draft.release_name),
-  );
+  // Model-level metadata (shared by every member of the folder). custom_name
+  // is preserved — NAME drives the group name below. For a variant member
+  // variant/pose/support are null here; they went to file_variants.
+  const result = await commands.updateModelMetadata(entry.dir_path, {
+    custom_name: entry.custom_name ?? null,
+    variant: isVariant ? null : orNull(draft.variant),
+    pose: isVariant ? null : orNull(draft.pose),
+    scale: orNull(draft.scale),
+    support_status: isVariant ? null : orNull(draft.support_status),
+    release_date: orNull(draft.release_date),
+    designer: orNull(draft.designer),
+    sculptor: orNull(draft.sculptor),
+    release_name: orNull(draft.release_name),
+  });
   if (result.status !== "ok") {
     toastStore.reportError("Failed to save details", result.error);
     return;
@@ -1499,11 +1544,11 @@ const saveMetadata = async () => {
   }
 
   toastStore.addToast("Details saved", "success");
-  // land on the renamed bucket (or the pool, if the pose was cleared)
+  // land on the re-filed bucket (or the pool, if both facets were cleared)
   if (bucketChanged) {
     await Promise.all([
       runSearch(),
-      reloadMembers(`${entry.dir_path}\u{1f}${newPose}`),
+      reloadMembers(variantKeyFor(entry.dir_path, newVariant, newPose)),
     ]);
   } else {
     await refreshSelected();

@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use super::{
     db, dups, scanner, BatchOutcome, CatalogEntry, CatalogFile, CatalogGroupResult,
-    CatalogSearchResult, CatalogStats, DuplicateGroup, FileVariant, MoveOperation, ReleaseSummary,
-    TagCount,
+    CatalogSearchResult, CatalogStats, DuplicateGroup, FileVariant, ModelMetaUpdate, MoveOperation,
+    ReleaseSummary, TagCount,
 };
 
 /// Scan and duplicate jobs share one registry; both cancel through
@@ -418,28 +418,22 @@ pub async fn get_catalog_releases(app_handle: AppHandle) -> Result<Vec<ReleaseSu
 pub async fn update_model_metadata(
     app_handle: AppHandle,
     dir_path: String,
-    custom_name: Option<String>,
-    pose: Option<String>,
-    scale: Option<String>,
-    support_status: Option<String>,
-    release_date: Option<String>,
-    designer: Option<String>,
-    sculptor: Option<String>,
-    release_name: Option<String>,
+    meta: ModelMetaUpdate,
 ) -> Result<(), AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
         db::update_model_user_meta(
             &conn,
             &dir_path,
-            custom_name,
-            pose,
-            scale,
-            support_status,
-            release_date,
-            designer,
-            sculptor,
-            release_name,
+            meta.custom_name,
+            meta.pose,
+            meta.scale,
+            meta.support_status,
+            meta.release_date,
+            meta.designer,
+            meta.sculptor,
+            meta.release_name,
+            meta.variant,
         )
     })
     .await
@@ -454,12 +448,13 @@ pub async fn update_model_metadata(
 pub async fn assign_files_to_pose(
     app_handle: AppHandle,
     paths: Vec<String>,
+    variant: Option<String>,
     pose: Option<String>,
     support_status: Option<String>,
 ) -> Result<u32, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut conn = open_db(&app_handle)?;
-        db::set_file_variants(&mut conn, &paths, pose, support_status)
+        db::set_file_variants(&mut conn, &paths, variant, pose, support_status)
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Assign task failed: {}", e)))?

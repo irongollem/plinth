@@ -108,7 +108,9 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             -- release_name likewise overrides the scanned release.json value.
             designer       TEXT,
             sculptor       TEXT,
-            release_name   TEXT
+            release_name   TEXT,
+            -- the facet between support and pose (weapon/mount/etc.)
+            variant        TEXT
         );
 
         -- Group display-name overrides, keyed by the SCANNER's group name
@@ -128,6 +130,7 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
         CREATE TABLE IF NOT EXISTS file_variants (
             path           TEXT PRIMARY KEY,
             dir_path       TEXT NOT NULL,
+            variant        TEXT,
             pose           TEXT,
             support_status TEXT
         );
@@ -174,8 +177,12 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
         &["pose", "scale", "support_status", "release_date", "group_name", "sculptor"],
     )?;
     // designer already exists on models (from the release); these are the
-    // per-model user overrides plus the artist and release-name fields.
-    add_text_columns("model_user_meta", &["designer", "sculptor", "release_name"])?;
+    // per-model user overrides plus the artist, release-name and variant.
+    add_text_columns(
+        "model_user_meta",
+        &["designer", "sculptor", "release_name", "variant"],
+    )?;
+    add_text_columns("file_variants", &["variant"])?;
 
     if version >= SCHEMA_VERSION {
         return Ok(());
@@ -397,7 +404,8 @@ fn fts_insert_select() -> String {
                  || ' ' || COALESCE(r.display_name, '')
                  || ' ' || COALESCE(u.designer, m.designer, '')
                  || ' ' || COALESCE(u.sculptor, m.sculptor, '')
-                 || ' ' || COALESCE(u.release_name, m.release_name, '')"
+                 || ' ' || COALESCE(u.release_name, m.release_name, '')
+                 || ' ' || COALESCE(u.variant, '')"
         ),
     )
 }
@@ -490,7 +498,7 @@ fn entry_select_sql(where_sql: &str, tail_sql: &str) -> String {
                 COALESCE(u.pose, m.pose), COALESCE(u.scale, m.scale),
                 COALESCE(u.support_status, m.support_status),
                 COALESCE(u.release_date, m.release_date),
-                u.custom_name, COALESCE(u.sculptor, m.sculptor)
+                u.custom_name, COALESCE(u.sculptor, m.sculptor), u.variant
          FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path {} {}",
         where_sql, tail_sql
     )
@@ -518,16 +526,33 @@ fn map_entry_row(row: &rusqlite::Row) -> rusqlite::Result<CatalogEntry> {
         release_date: row.get(12)?,
         custom_name: row.get(13)?,
         sculptor: row.get(14)?,
+        variant: row.get(15)?,
         // Whole-folder member; expand_file_variants stamps a key on any
         // synthetic pose members it derives from this row.
         variant_key: None,
     })
 }
 
-/// Separator inside a variant_key, between dir_path and pose. The unit
-/// separator can't occur in a path, so a key never collides with a real
-/// directory and `rsplit` cleanly recovers the pose (empty = residual).
+/// Separator inside a variant_key. The unit separator can't occur in a path,
+/// so a key never collides with a real directory. Format is
+/// `dir\u{1f}variant\u{1f}pose`; empty variant AND pose = the residual pool.
 const VARIANT_SEP: char = '\u{1f}';
+
+/// Build a member's variant_key. Empty facet strings encode "no variant"/
+/// "no pose"; both empty is the residual/unassigned member.
+fn variant_key(dir_path: &str, variant: &str, pose: &str) -> String {
+    format!("{dir_path}{VARIANT_SEP}{variant}{VARIANT_SEP}{pose}")
+}
+
+/// Recover (variant, pose) from a variant_key. dir_path is the authority for
+/// which folder, so the leading segment is ignored; the last two fields are
+/// the facets (either may be "" for unset).
+fn parse_variant_key(key: &str) -> (&str, &str) {
+    let mut fields = key.rsplit(VARIANT_SEP);
+    let pose = fields.next().unwrap_or("");
+    let variant = fields.next().unwrap_or("");
+    (variant, pose)
+}
 
 /// path -> size for a dir's indexed files (model files only; images aren't
 /// indexed). Used to recompute per-pose counts and sizes after a split.
@@ -569,26 +594,36 @@ fn expand_file_variants(
             continue;
         }
         let sizes = file_sizes_for_dir(conn, &entry.dir_path)?;
-        // (support, pose) -> its file paths; BTreeMap gives a stable order
-        let mut buckets: BTreeMap<(Option<String>, String), Vec<String>> = BTreeMap::new();
+        // (support, variant, pose) -> file paths; BTreeMap for a stable order
+        let mut buckets: BTreeMap<(Option<String>, String, String), Vec<String>> = BTreeMap::new();
         let mut claimed: HashSet<String> = HashSet::new();
         for v in assigned {
-            let pose = v.pose.unwrap();
+            let variant = v.variant.unwrap_or_default();
+            let pose = v.pose.unwrap_or_default();
             claimed.insert(v.path.clone());
             buckets
-                .entry((v.support_status, pose))
+                .entry((v.support_status, variant, pose))
                 .or_default()
                 .push(v.path);
         }
-        for ((support, pose), paths) in buckets {
+        for ((support, variant, pose), paths) in buckets {
             let bytes: i64 = paths.iter().filter_map(|p| sizes.get(p)).sum();
+            // label reads "mob sword 2" — base plus whichever facets are set
+            let mut label = entry.name.clone();
+            for facet in [&variant, &pose] {
+                if !facet.is_empty() {
+                    label.push(' ');
+                    label.push_str(facet);
+                }
+            }
             out.push(CatalogEntry {
-                name: format!("{} {}", entry.name, pose),
-                pose: Some(pose.clone()),
+                name: label,
+                variant: (!variant.is_empty()).then(|| variant.clone()),
+                pose: (!pose.is_empty()).then(|| pose.clone()),
                 support_status: support.or_else(|| entry.support_status.clone()),
                 file_count: paths.len() as u32,
                 total_size_bytes: bytes as f64,
-                variant_key: Some(format!("{}{}{}", entry.dir_path, VARIANT_SEP, pose)),
+                variant_key: Some(variant_key(&entry.dir_path, &variant, &pose)),
                 ..entry.clone()
             });
         }
@@ -599,10 +634,11 @@ fn expand_file_variants(
             let bytes: i64 = residual.iter().filter_map(|p| sizes.get(*p)).sum();
             out.push(CatalogEntry {
                 name: format!("{} (unassigned)", entry.name),
+                variant: None,
                 pose: None,
                 file_count: residual.len() as u32,
                 total_size_bytes: bytes as f64,
-                variant_key: Some(format!("{}{}", entry.dir_path, VARIANT_SEP)),
+                variant_key: Some(variant_key(&entry.dir_path, "", "")),
                 ..entry
             });
         }
@@ -887,26 +923,7 @@ pub fn model_files(
     let map = |e: rusqlite::Error| AppError::ConfigError(format!("File listing failed: {}", e));
     // The key's own dir prefix is ignored — dir_path is the authority — so a
     // stale key can never pull files from another folder.
-    let pose = variant_key.map(|k| k.rsplit(VARIANT_SEP).next().unwrap_or(""));
-    let (where_sql, pose_param): (&str, Option<&str>) = match pose {
-        None => ("f.dir_path = ?1", None),
-        Some("") => (
-            "f.dir_path = ?1 AND f.path NOT IN
-                 (SELECT path FROM file_variants
-                  WHERE dir_path = ?1 AND pose IS NOT NULL AND pose <> '')",
-            None,
-        ),
-        Some(p) => (
-            "f.path IN (SELECT path FROM file_variants WHERE dir_path = ?1 AND pose = ?2)",
-            Some(p),
-        ),
-    };
-    let sql = format!(
-        "SELECT f.path, f.file_name, f.extension, f.size_bytes FROM files f
-         WHERE {} ORDER BY f.file_name COLLATE NOCASE",
-        where_sql
-    );
-    let mut stmt = conn.prepare(&sql).map_err(map)?;
+    let facets = variant_key.map(parse_variant_key);
     let read = |row: &rusqlite::Row| {
         Ok(CatalogFile {
             path: row.get(0)?,
@@ -915,11 +932,36 @@ pub fn model_files(
             size_bytes: row.get::<_, i64>(3)? as f64,
         })
     };
-    let rows = match pose_param {
-        Some(p) => stmt.query_map(params![dir_path, p], read),
-        None => stmt.query_map(params![dir_path], read),
+    let select = "SELECT f.path, f.file_name, f.extension, f.size_bytes FROM files f WHERE ";
+    let order = " ORDER BY f.file_name COLLATE NOCASE";
+    let rows = match facets {
+        // whole-folder member: every file
+        None => {
+            let sql = format!("{select}f.dir_path = ?1{order}");
+            conn.prepare(&sql)
+                .and_then(|mut s| s.query_map(params![dir_path], read)?.collect())
+        }
+        // residual pool: files with no (variant/pose) assignment
+        Some(("", "")) => {
+            let sql = format!(
+                "{select}f.dir_path = ?1 AND f.path NOT IN
+                     (SELECT path FROM file_variants WHERE dir_path = ?1
+                      AND (COALESCE(variant,'') <> '' OR COALESCE(pose,'') <> '')){order}"
+            );
+            conn.prepare(&sql)
+                .and_then(|mut s| s.query_map(params![dir_path], read)?.collect())
+        }
+        // a specific (variant, pose) bucket
+        Some((variant, pose)) => {
+            let sql = format!(
+                "{select}f.path IN (SELECT path FROM file_variants
+                     WHERE dir_path = ?1 AND COALESCE(variant,'') = ?2
+                       AND COALESCE(pose,'') = ?3){order}"
+            );
+            conn.prepare(&sql)
+                .and_then(|mut s| s.query_map(params![dir_path, variant, pose], read)?.collect())
+        }
     }
-    .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
     .map_err(map)?;
     Ok(rows)
 }
@@ -1102,13 +1144,14 @@ pub fn update_model_user_meta(
     designer: Option<String>,
     sculptor: Option<String>,
     release_name: Option<String>,
+    variant: Option<String>,
 ) -> Result<(), AppError> {
     require_model(conn, dir_path)?;
     conn.execute(
         "INSERT INTO model_user_meta
              (dir_path, custom_name, pose, scale, support_status, release_date,
-              designer, sculptor, release_name)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+              designer, sculptor, release_name, variant)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(dir_path) DO UPDATE SET
              custom_name = excluded.custom_name,
              pose = excluded.pose,
@@ -1117,7 +1160,8 @@ pub fn update_model_user_meta(
              release_date = excluded.release_date,
              designer = excluded.designer,
              sculptor = excluded.sculptor,
-             release_name = excluded.release_name",
+             release_name = excluded.release_name,
+             variant = excluded.variant",
         params![
             dir_path,
             custom_name,
@@ -1127,7 +1171,8 @@ pub fn update_model_user_meta(
             release_date,
             designer,
             sculptor,
-            release_name
+            release_name,
+            variant
         ],
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to update metadata: {}", e)))?;
@@ -1163,6 +1208,7 @@ pub fn set_model_preview(
 pub fn set_file_variants(
     conn: &mut Connection,
     paths: &[String],
+    variant: Option<String>,
     pose: Option<String>,
     support_status: Option<String>,
 ) -> Result<u32, AppError> {
@@ -1172,15 +1218,18 @@ pub fn set_file_variants(
     {
         let mut stmt = tx
             .prepare(
-                "INSERT INTO file_variants (path, dir_path, pose, support_status)
-                 SELECT ?1, dir_path, ?2, ?3 FROM files WHERE path = ?1
+                "INSERT INTO file_variants (path, dir_path, variant, pose, support_status)
+                 SELECT ?1, dir_path, ?2, ?3, ?4 FROM files WHERE path = ?1
                  ON CONFLICT(path) DO UPDATE SET
+                     variant = excluded.variant,
                      pose = excluded.pose,
                      support_status = excluded.support_status",
             )
             .map_err(map)?;
         for path in paths {
-            assigned += stmt.execute(params![path, pose, support_status]).map_err(map)? as u32;
+            assigned += stmt
+                .execute(params![path, variant, pose, support_status])
+                .map_err(map)? as u32;
         }
     }
     tx.commit().map_err(map)?;
@@ -1201,7 +1250,7 @@ pub fn clear_file_variants(conn: &Connection, paths: &[String]) -> Result<(), Ap
 pub fn get_file_variants(conn: &Connection, dir_path: &str) -> Result<Vec<FileVariant>, AppError> {
     let mut stmt = conn
         .prepare(
-            "SELECT path, dir_path, pose, support_status
+            "SELECT path, dir_path, variant, pose, support_status
              FROM file_variants WHERE dir_path = ?1 ORDER BY path",
         )
         .map_err(|e| AppError::ConfigError(format!("Failed to read assignments: {}", e)))?;
@@ -1210,8 +1259,9 @@ pub fn get_file_variants(conn: &Connection, dir_path: &str) -> Result<Vec<FileVa
             Ok(FileVariant {
                 path: row.get(0)?,
                 dir_path: row.get(1)?,
-                pose: row.get(2)?,
-                support_status: row.get(3)?,
+                variant: row.get(2)?,
+                pose: row.get(3)?,
+                support_status: row.get(4)?,
             })
         })
         .map_err(|e| AppError::ConfigError(format!("Failed to read assignments: {}", e)))?;
@@ -1591,6 +1641,7 @@ mod tests {
                 "/lib/newt/GiantNewt_v02.stl".into(),
                 "/lib/newt/does-not-exist.stl".into(),
             ],
+            Some("sword".into()),
             Some("B".into()),
             Some("unsupported".into()),
         )
@@ -1599,16 +1650,24 @@ mod tests {
 
         let variants = get_file_variants(&conn, "/lib/newt").unwrap();
         assert_eq!(variants.len(), 1);
+        assert_eq!(variants[0].variant.as_deref(), Some("sword"));
         assert_eq!(variants[0].pose.as_deref(), Some("B"));
         assert_eq!(variants[0].support_status.as_deref(), Some("unsupported"));
         assert_eq!(variants[0].dir_path, "/lib/newt", "dir_path denormalized from files");
 
         // reassigning updates in place rather than duplicating
-        set_file_variants(&mut conn, &["/lib/newt/GiantNewt_v02.stl".into()], Some("C".into()), None)
-            .unwrap();
+        set_file_variants(
+            &mut conn,
+            &["/lib/newt/GiantNewt_v02.stl".into()],
+            None,
+            Some("C".into()),
+            None,
+        )
+        .unwrap();
         let variants = get_file_variants(&conn, "/lib/newt").unwrap();
         assert_eq!(variants.len(), 1);
         assert_eq!(variants[0].pose.as_deref(), Some("C"));
+        assert!(variants[0].variant.is_none(), "variant cleared on reassign");
 
         // a rescan that still lists the file keeps the assignment
         replace_catalog(&mut conn, &files, &models, &tags).unwrap();
@@ -1621,7 +1680,7 @@ mod tests {
         assert!(get_file_variants(&conn, "/lib/newt").unwrap().is_empty());
 
         // and clearing drops the assignment explicitly
-        set_file_variants(&mut conn, &[files[1].path.clone()], Some("A".into()), None).unwrap();
+        set_file_variants(&mut conn, &[files[1].path.clone()], None, Some("A".into()), None).unwrap();
         clear_file_variants(&conn, &[files[1].path.clone()]).unwrap();
         assert!(get_file_variants(&conn, "/lib/bugbear").unwrap().is_empty());
     }
@@ -1660,26 +1719,40 @@ mod tests {
         assert!(members[0].variant_key.is_none());
         assert_eq!(model_files(&conn, "/dump/mob", None).unwrap().len(), 3);
 
-        // assign a.stl -> pose 1, b.stl -> pose 2; c.stl left unassigned
-        set_file_variants(&mut conn, &["/dump/mob/a.stl".into()], Some("1".into()), None).unwrap();
-        set_file_variants(&mut conn, &["/dump/mob/b.stl".into()], Some("2".into()), None).unwrap();
+        // a.stl -> variant sword / pose 1; b.stl -> pose 2 (no variant);
+        // c.stl left unassigned
+        set_file_variants(
+            &mut conn,
+            &["/dump/mob/a.stl".into()],
+            Some("sword".into()),
+            Some("1".into()),
+            None,
+        )
+        .unwrap();
+        set_file_variants(&mut conn, &["/dump/mob/b.stl".into()], None, Some("2".into()), None)
+            .unwrap();
 
         let members = group_members(&conn, "mob").unwrap();
-        // two pose members + one residual
+        // two facet members + one residual
         assert_eq!(members.len(), 3);
-        let pose1 = members.iter().find(|m| m.pose.as_deref() == Some("1")).unwrap();
-        assert_eq!(pose1.name, "mob 1");
-        assert_eq!(pose1.file_count, 1);
-        assert_eq!(pose1.total_size_bytes, 100.0);
-        assert_eq!(pose1.variant_key.as_deref(), Some("/dump/mob\u{1f}1"));
+        let swordy = members.iter().find(|m| m.variant.as_deref() == Some("sword")).unwrap();
+        assert_eq!(swordy.name, "mob sword 1", "label shows variant then pose");
+        assert_eq!(swordy.pose.as_deref(), Some("1"));
+        assert_eq!(swordy.file_count, 1);
+        assert_eq!(swordy.total_size_bytes, 100.0);
+        assert_eq!(swordy.variant_key.as_deref(), Some("/dump/mob\u{1f}sword\u{1f}1"));
+
+        let pose2 = members.iter().find(|m| m.pose.as_deref() == Some("2")).unwrap();
+        assert!(pose2.variant.is_none());
+        assert_eq!(pose2.variant_key.as_deref(), Some("/dump/mob\u{1f}\u{1f}2"));
 
         let residual = members.iter().find(|m| m.pose.is_none()).unwrap();
         assert_eq!(residual.name, "mob (unassigned)");
         assert_eq!(residual.file_count, 1);
-        assert_eq!(residual.variant_key.as_deref(), Some("/dump/mob\u{1f}"));
+        assert_eq!(residual.variant_key.as_deref(), Some("/dump/mob\u{1f}\u{1f}"));
 
-        // files are scoped per member
-        let f1 = model_files(&conn, "/dump/mob", pose1.variant_key.as_deref()).unwrap();
+        // files are scoped per member, keyed on (variant, pose)
+        let f1 = model_files(&conn, "/dump/mob", swordy.variant_key.as_deref()).unwrap();
         assert_eq!(f1.len(), 1);
         assert_eq!(f1[0].file_name, "a.stl");
         let fr = model_files(&conn, "/dump/mob", residual.variant_key.as_deref()).unwrap();
@@ -1708,6 +1781,7 @@ mod tests {
             Some("Dragon Trapper's Lodge".into()),
             Some("A. Sculptor".into()),
             Some("Order of the Unicorn".into()),
+            Some("mounted".into()),
         )
         .unwrap();
         set_model_preview(&conn, "/lib/newt", "/appdata/previews/abc.png").unwrap();
@@ -1725,6 +1799,8 @@ mod tests {
         assert_eq!(entry.designer.as_deref(), Some("Dragon Trapper's Lodge"));
         assert_eq!(entry.sculptor.as_deref(), Some("A. Sculptor"));
         assert_eq!(entry.release_name.as_deref(), Some("Order of the Unicorn"));
+        assert_eq!(entry.variant.as_deref(), Some("mounted"));
+        assert_eq!(search(&conn, "mounted", &[], 10, 0).unwrap().total, 1, "variant is searchable");
         // fuzzy/trigram search: possessive apostrophe is folded out, so the
         // designer matches when typed as "trappers"; and a mid-word chunk of
         // sculptor matches by substring — neither worked with prefix-only FTS
@@ -1740,8 +1816,10 @@ mod tests {
         );
 
         // clearing the override reverts to the scanner name and designer
-        update_model_user_meta(&conn, "/lib/newt", None, None, None, None, None, None, None, None)
-            .unwrap();
+        update_model_user_meta(
+            &conn, "/lib/newt", None, None, None, None, None, None, None, None, None,
+        )
+        .unwrap();
         let page = search(&conn, "newt", &[], 10, 0).unwrap();
         assert_eq!(page.entries[0].name, "Giant Newt");
         assert_eq!(page.entries[0].designer.as_deref(), Some("DTL"), "reverts to release designer");
@@ -1758,8 +1836,10 @@ mod tests {
         );
 
         assert!(
-            update_model_user_meta(&conn, "/nope", None, None, None, None, None, None, None, None)
-                .is_err()
+            update_model_user_meta(
+                &conn, "/nope", None, None, None, None, None, None, None, None, None
+            )
+            .is_err()
         );
         assert!(set_model_preview(&conn, "/nope", "/x.png").is_err());
     }
@@ -1936,6 +2016,7 @@ mod tests {
             &conn,
             "/lib/newt",
             Some("Shiny Newt".into()),
+            None,
             None,
             None,
             None,

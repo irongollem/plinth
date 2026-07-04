@@ -61,6 +61,9 @@ pub struct CatalogEntry {
     pub tags: Vec<String>,
     pub file_count: u32,
     pub total_size_bytes: f64,
+    /// The facet between support and pose — a weapon/sculpt option
+    /// (sword, mounted, …). Free-text, user-supplied (no scanner inference).
+    pub variant: Option<String>,
     pub pose: Option<String>,
     pub scale: Option<String>,
     pub support_status: Option<String>,
@@ -113,6 +116,21 @@ pub struct CatalogFile {
     pub size_bytes: f64,
 }
 
+/// The user-editable metadata for one model, saved together from the drawer.
+/// A struct rather than positional args because specta caps command arity.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct ModelMetaUpdate {
+    pub custom_name: Option<String>,
+    pub variant: Option<String>,
+    pub pose: Option<String>,
+    pub scale: Option<String>,
+    pub support_status: Option<String>,
+    pub release_date: Option<String>,
+    pub designer: Option<String>,
+    pub sculptor: Option<String>,
+    pub release_name: Option<String>,
+}
+
 /// A user's per-file pose assignment for a "dump everything in one folder"
 /// model. Purely metadata (keyed by path, rescan-safe): the file stays put
 /// on disk, but the catalog fans the folder out into one member per pose.
@@ -120,6 +138,7 @@ pub struct CatalogFile {
 pub struct FileVariant {
     pub path: String,
     pub dir_path: String,
+    pub variant: Option<String>,
     pub pose: Option<String>,
     pub support_status: Option<String>,
 }
