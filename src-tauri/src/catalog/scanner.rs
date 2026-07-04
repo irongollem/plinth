@@ -261,7 +261,15 @@ fn infer_model_identity(root: &Path, dir_path: &str) -> InferredModel {
             if let Some(p) = pose_from_segment(&segment) {
                 pose.get_or_insert(p);
             } else if !is_generic_segment(&segment) {
-                base_name = Some(prettify_segment(&segment));
+                // The pose is often baked into the name segment itself
+                // ("galeb duhr A") rather than a nested folder. Peel a
+                // trailing short marker off so the A/B/C variants collapse
+                // into one model instead of three lookalike cards.
+                let (base, trailing) = split_trailing_pose(&segment);
+                if let Some(p) = trailing {
+                    pose.get_or_insert(p);
+                }
+                base_name = Some(base);
             }
         }
         current = dir.parent();
@@ -360,6 +368,30 @@ fn pose_from_segment(segment: &str) -> Option<String> {
         return Some(normalized);
     }
     None
+}
+
+/// Peels a trailing pose marker off a name segment when the pose is baked
+/// into the name rather than a nested folder: "galeb duhr A" ->
+/// ("galeb duhr", Some("A")). Conservative: only a single trailing short
+/// marker (a letter, a 1-2 char code, or "pose X"), and only when a
+/// meaningful base name survives in front of it — so "warhammer 40k" and
+/// "st b" stay whole, but "galeb duhr A/B/C" collapse into one model.
+/// Folder inference is only a default here; user metadata still overrides it.
+fn split_trailing_pose(segment: &str) -> (String, Option<String>) {
+    let pretty = prettify_segment(segment);
+    let Some(split_at) = pretty.rfind(' ') else {
+        return (pretty, None);
+    };
+    let base = pretty[..split_at].trim();
+    let marker = pretty[split_at + 1..].trim();
+    // The base must still read like a name, not a stray initial or another
+    // packaging word left behind once the marker is gone.
+    if base.chars().count() >= 3 && !is_generic_segment(base) {
+        if let Some(pose) = pose_from_segment(marker) {
+            return (base.to_string(), Some(pose));
+        }
+    }
+    (pretty, None)
 }
 
 /// Container words that describe packaging, not the model.
@@ -534,6 +566,25 @@ mod tests {
         assert_eq!(inferred.group_name, "knight");
         let inferred = infer_model_identity(root, "/lib/creatures/minotaur");
         assert_eq!(inferred.name, "minotaur", "unknown words are names");
+
+        // pose baked into the name segment (no nested pose folder): the
+        // trailing marker peels off so A/B/C collapse into one "galeb duhr"
+        let inferred = infer_model_identity(root, "/lib/dungeon_classics/galeb duhr A");
+        assert_eq!(inferred.name, "galeb duhr A");
+        assert_eq!(inferred.group_name, "galeb duhr", "poses share the group");
+        assert_eq!(inferred.pose.as_deref(), Some("A"));
+        let inferred = infer_model_identity(root, "/lib/dungeon_classics/galeb_duhr_B2");
+        assert_eq!(inferred.pose.as_deref(), Some("B2"));
+        assert_eq!(inferred.group_name, "galeb duhr");
+
+        // but a trailing token that isn't a short marker stays part of the
+        // name, and a base too thin to be a name is left whole
+        let inferred = infer_model_identity(root, "/lib/tanks/warhammer 40k");
+        assert_eq!(inferred.name, "warhammer 40k");
+        assert!(inferred.pose.is_none());
+        let inferred = infer_model_identity(root, "/lib/misc/st b");
+        assert_eq!(inferred.name, "st b", "base too short to split");
+        assert!(inferred.pose.is_none());
     }
 
     #[test]
