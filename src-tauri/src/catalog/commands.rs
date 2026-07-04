@@ -361,10 +361,11 @@ pub async fn remove_catalog_tag(
 pub async fn get_catalog_model_files(
     app_handle: AppHandle,
     dir_path: String,
+    variant_key: Option<String>,
 ) -> Result<Vec<CatalogFile>, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
-        db::model_files(&conn, &dir_path)
+        db::model_files(&conn, &dir_path, variant_key.as_deref())
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("File task failed: {}", e)))?

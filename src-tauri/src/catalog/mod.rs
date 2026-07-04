@@ -65,6 +65,12 @@ pub struct CatalogEntry {
     pub support_status: Option<String>,
     pub release_date: Option<String>,
     pub custom_name: Option<String>,
+    /// Set only on members synthesized from file→pose assignments: a stable
+    /// `{dir_path}\u{1f}{pose}` handle ("...\u{1f}" for the residual
+    /// unassigned member). None means a whole-folder member — its dir_path
+    /// alone identifies it. The UI keys members on `variant_key ?? dir_path`
+    /// and passes it back to fetch only that pose's files.
+    pub variant_key: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

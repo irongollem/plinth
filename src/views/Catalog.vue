@@ -400,11 +400,11 @@
             <div v-if="tabMembers.length > 1" class="flex flex-wrap gap-1.5">
               <button
                 v-for="member in tabMembers"
-                :key="member.dir_path"
+                :key="memberKey(member)"
                 type="button"
                 class="font-mono text-[11px] rounded-full px-2.5 py-1 border cursor-pointer"
                 :class="
-                  member.dir_path === selected.dir_path
+                  memberKey(member) === memberKey(selected)
                     ? 'bg-primary text-primary-content border-primary'
                     : 'text-base-content/60 border-base-content/15'
                 "
@@ -858,10 +858,20 @@ const toggleDups = () => {
   if (dupGroups.value.length) showDups.value = !showDups.value;
 };
 
+// A folder split into poses yields several members sharing one dir_path;
+// their variant_key disambiguates. Fall back to dir_path for whole-folder
+// members (variant_key null).
+const memberKey = (entry: CatalogEntry) => entry.variant_key ?? entry.dir_path;
+
 const selectEntry = async (entry: CatalogEntry) => {
   selected.value = entry;
   files.value = [];
-  const result = await commands.getCatalogModelFiles(entry.dir_path);
+  // A synthesized pose member carries a variant_key; pass it so we list
+  // only that pose's files. Whole-folder members send null (all files).
+  const result = await commands.getCatalogModelFiles(
+    entry.dir_path,
+    entry.variant_key,
+  );
   if (result.status === "ok") files.value = result.data;
 };
 
@@ -985,14 +995,14 @@ const removeTag = async (tag: string) => {
 /** Re-fetch the group's members so tag/detail edits show up immediately. */
 const refreshSelected = async () => {
   const group = selectedGroup.value;
-  const dirPath = selected.value?.dir_path;
+  const key = selected.value ? memberKey(selected.value) : undefined;
   await runSearch();
   if (!group) return;
   const result = await commands.getCatalogGroupMembers(group.group_name);
   if (result.status !== "ok") return;
   members.value = result.data;
-  const updated = dirPath
-    ? members.value.find((m) => m.dir_path === dirPath)
+  const updated = key
+    ? members.value.find((m) => memberKey(m) === key)
     : undefined;
   if (updated) selected.value = updated;
 };
@@ -1260,7 +1270,7 @@ const addToDraftRelease = async () => {
     );
     const fileResults = await Promise.all(
       newVariants.map((variant) =>
-        commands.getCatalogModelFiles(variant.dir_path),
+        commands.getCatalogModelFiles(variant.dir_path, variant.variant_key),
       ),
     );
     for (const [index, variant] of newVariants.entries()) {

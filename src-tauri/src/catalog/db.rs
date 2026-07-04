@@ -451,7 +451,96 @@ fn map_entry_row(row: &rusqlite::Row) -> rusqlite::Result<CatalogEntry> {
         support_status: row.get(11)?,
         release_date: row.get(12)?,
         custom_name: row.get(13)?,
+        // Whole-folder member; expand_file_variants stamps a key on any
+        // synthetic pose members it derives from this row.
+        variant_key: None,
     })
+}
+
+/// Separator inside a variant_key, between dir_path and pose. The unit
+/// separator can't occur in a path, so a key never collides with a real
+/// directory and `rsplit` cleanly recovers the pose (empty = residual).
+const VARIANT_SEP: char = '\u{1f}';
+
+/// path -> size for a dir's indexed files (model files only; images aren't
+/// indexed). Used to recompute per-pose counts and sizes after a split.
+fn file_sizes_for_dir(
+    conn: &Connection,
+    dir_path: &str,
+) -> Result<std::collections::HashMap<String, i64>, AppError> {
+    let map = |e: rusqlite::Error| AppError::ConfigError(format!("File size lookup failed: {}", e));
+    let mut stmt = conn
+        .prepare("SELECT path, size_bytes FROM files WHERE dir_path = ?1")
+        .map_err(map)?;
+    let rows = stmt
+        .query_map([dir_path], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(map)?;
+    rows.collect::<Result<_, _>>().map_err(map)
+}
+
+/// Fan a folder that carries file→pose assignments into one member per
+/// assigned pose, plus a residual member for any still-unassigned model
+/// files. Counts and sizes are recomputed per bucket from the files table.
+/// Folders with no assignments pass through untouched, so nothing regresses
+/// for the folder-per-model libraries. Ordered supported-before-unsupported
+/// then by pose, matching the whole-folder member ordering.
+fn expand_file_variants(
+    conn: &Connection,
+    entries: Vec<CatalogEntry>,
+) -> Result<Vec<CatalogEntry>, AppError> {
+    use std::collections::{BTreeMap, HashSet};
+    let mut out = Vec::new();
+    for entry in entries {
+        let assigned: Vec<FileVariant> = get_file_variants(conn, &entry.dir_path)?
+            .into_iter()
+            .filter(|v| v.pose.as_deref().is_some_and(|p| !p.is_empty()))
+            .collect();
+        if assigned.is_empty() {
+            out.push(entry);
+            continue;
+        }
+        let sizes = file_sizes_for_dir(conn, &entry.dir_path)?;
+        // (support, pose) -> its file paths; BTreeMap gives a stable order
+        let mut buckets: BTreeMap<(Option<String>, String), Vec<String>> = BTreeMap::new();
+        let mut claimed: HashSet<String> = HashSet::new();
+        for v in assigned {
+            let pose = v.pose.unwrap();
+            claimed.insert(v.path.clone());
+            buckets
+                .entry((v.support_status, pose))
+                .or_default()
+                .push(v.path);
+        }
+        for ((support, pose), paths) in buckets {
+            let bytes: i64 = paths.iter().filter_map(|p| sizes.get(p)).sum();
+            out.push(CatalogEntry {
+                name: format!("{} {}", entry.name, pose),
+                pose: Some(pose.clone()),
+                support_status: support.or_else(|| entry.support_status.clone()),
+                file_count: paths.len() as u32,
+                total_size_bytes: bytes as f64,
+                variant_key: Some(format!("{}{}{}", entry.dir_path, VARIANT_SEP, pose)),
+                ..entry.clone()
+            });
+        }
+        // Whatever the user hasn't sorted yet stays visible as a residual
+        // member so no file silently vanishes from the folder.
+        let residual: Vec<&String> = sizes.keys().filter(|p| !claimed.contains(*p)).collect();
+        if !residual.is_empty() {
+            let bytes: i64 = residual.iter().filter_map(|p| sizes.get(*p)).sum();
+            out.push(CatalogEntry {
+                name: format!("{} (unassigned)", entry.name),
+                pose: None,
+                file_count: residual.len() as u32,
+                total_size_bytes: bytes as f64,
+                variant_key: Some(format!("{}{}", entry.dir_path, VARIANT_SEP)),
+                ..entry
+            });
+        }
+    }
+    Ok(out)
 }
 
 pub fn search(
@@ -592,7 +681,9 @@ pub fn group_members(conn: &Connection, group_name: &str) -> Result<Vec<CatalogE
         .map_err(map_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(map_err)?;
-    Ok(entries)
+    // A curated dump folder becomes several pose members here; untouched
+    // folders pass straight through.
+    expand_file_variants(conn, entries)
 }
 
 /// Map every scanner-level source group currently SHOWN as `group_name`
@@ -717,24 +808,52 @@ pub fn remove_tag(conn: &Connection, dir_path: &str, tag: &str) -> Result<(), Ap
     Ok(())
 }
 
-pub fn model_files(conn: &Connection, dir_path: &str) -> Result<Vec<CatalogFile>, AppError> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT path, file_name, extension, size_bytes FROM files
-             WHERE dir_path = ?1 ORDER BY file_name COLLATE NOCASE",
-        )
-        .map_err(|e| AppError::ConfigError(format!("File listing failed: {}", e)))?;
-    let rows = stmt
-        .query_map([dir_path], |row| {
-            Ok(CatalogFile {
-                path: row.get(0)?,
-                file_name: row.get(1)?,
-                extension: row.get(2)?,
-                size_bytes: row.get::<_, i64>(3)? as f64,
-            })
+/// Files for a member. `variant_key` (from a synthesized pose member)
+/// narrows to just that pose's assigned files; `...{sep}` with an empty
+/// pose returns the residual unassigned files; None returns every file in
+/// the folder (the whole-folder member, and every non-split model).
+pub fn model_files(
+    conn: &Connection,
+    dir_path: &str,
+    variant_key: Option<&str>,
+) -> Result<Vec<CatalogFile>, AppError> {
+    let map = |e: rusqlite::Error| AppError::ConfigError(format!("File listing failed: {}", e));
+    // The key's own dir prefix is ignored — dir_path is the authority — so a
+    // stale key can never pull files from another folder.
+    let pose = variant_key.map(|k| k.rsplit(VARIANT_SEP).next().unwrap_or(""));
+    let (where_sql, pose_param): (&str, Option<&str>) = match pose {
+        None => ("f.dir_path = ?1", None),
+        Some("") => (
+            "f.dir_path = ?1 AND f.path NOT IN
+                 (SELECT path FROM file_variants
+                  WHERE dir_path = ?1 AND pose IS NOT NULL AND pose <> '')",
+            None,
+        ),
+        Some(p) => (
+            "f.path IN (SELECT path FROM file_variants WHERE dir_path = ?1 AND pose = ?2)",
+            Some(p),
+        ),
+    };
+    let sql = format!(
+        "SELECT f.path, f.file_name, f.extension, f.size_bytes FROM files f
+         WHERE {} ORDER BY f.file_name COLLATE NOCASE",
+        where_sql
+    );
+    let mut stmt = conn.prepare(&sql).map_err(map)?;
+    let read = |row: &rusqlite::Row| {
+        Ok(CatalogFile {
+            path: row.get(0)?,
+            file_name: row.get(1)?,
+            extension: row.get(2)?,
+            size_bytes: row.get::<_, i64>(3)? as f64,
         })
-        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-        .map_err(|e| AppError::ConfigError(format!("File listing failed: {}", e)))?;
+    };
+    let rows = match pose_param {
+        Some(p) => stmt.query_map(params![dir_path, p], read),
+        None => stmt.query_map(params![dir_path], read),
+    }
+    .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+    .map_err(map)?;
     Ok(rows)
 }
 
@@ -1136,6 +1255,17 @@ mod tests {
         conn
     }
 
+    fn file_row(path: &str, dir_path: &str, size_bytes: i64) -> FileRow {
+        FileRow {
+            path: path.into(),
+            dir_path: dir_path.into(),
+            file_name: path.rsplit('/').next().unwrap().into(),
+            extension: path.rsplit('.').next().unwrap().into(),
+            size_bytes,
+            modified_at: 100,
+        }
+    }
+
     fn sample_rows() -> (Vec<FileRow>, Vec<ModelRow>, Vec<(String, String)>) {
         let files = vec![
             FileRow {
@@ -1417,6 +1547,71 @@ mod tests {
         set_file_variants(&mut conn, &[files[1].path.clone()], Some("A".into()), None).unwrap();
         clear_file_variants(&conn, &[files[1].path.clone()]).unwrap();
         assert!(get_file_variants(&conn, "/lib/bugbear").unwrap().is_empty());
+    }
+
+    #[test]
+    fn split_folder_fans_into_pose_members_with_scoped_files() {
+        let mut conn = test_conn();
+        // one dump folder holding three model files, no pose subfolders
+        let files = vec![
+            file_row("/dump/mob/a.stl", "/dump/mob", 100),
+            file_row("/dump/mob/b.stl", "/dump/mob", 200),
+            file_row("/dump/mob/c.stl", "/dump/mob", 400),
+        ];
+        let models = vec![ModelRow {
+            dir_path: "/dump/mob".into(),
+            name: "mob".into(),
+            description: None,
+            designer: None,
+            release_name: None,
+            preview_path: None,
+            source: "heuristic".into(),
+            uuid: None,
+            file_count: 3,
+            total_size_bytes: 700,
+            pose: None,
+            scale: None,
+            support_status: None,
+            release_date: None,
+            group_name: Some("mob".into()),
+        }];
+        replace_catalog(&mut conn, &files, &models, &[]).unwrap();
+
+        // before any split: one whole-folder member, all files, no key
+        let members = group_members(&conn, "mob").unwrap();
+        assert_eq!(members.len(), 1);
+        assert!(members[0].variant_key.is_none());
+        assert_eq!(model_files(&conn, "/dump/mob", None).unwrap().len(), 3);
+
+        // assign a.stl -> pose 1, b.stl -> pose 2; c.stl left unassigned
+        set_file_variants(&mut conn, &["/dump/mob/a.stl".into()], Some("1".into()), None).unwrap();
+        set_file_variants(&mut conn, &["/dump/mob/b.stl".into()], Some("2".into()), None).unwrap();
+
+        let members = group_members(&conn, "mob").unwrap();
+        // two pose members + one residual
+        assert_eq!(members.len(), 3);
+        let pose1 = members.iter().find(|m| m.pose.as_deref() == Some("1")).unwrap();
+        assert_eq!(pose1.name, "mob 1");
+        assert_eq!(pose1.file_count, 1);
+        assert_eq!(pose1.total_size_bytes, 100.0);
+        assert_eq!(pose1.variant_key.as_deref(), Some("/dump/mob\u{1f}1"));
+
+        let residual = members.iter().find(|m| m.pose.is_none()).unwrap();
+        assert_eq!(residual.name, "mob (unassigned)");
+        assert_eq!(residual.file_count, 1);
+        assert_eq!(residual.variant_key.as_deref(), Some("/dump/mob\u{1f}"));
+
+        // files are scoped per member
+        let f1 = model_files(&conn, "/dump/mob", pose1.variant_key.as_deref()).unwrap();
+        assert_eq!(f1.len(), 1);
+        assert_eq!(f1[0].file_name, "a.stl");
+        let fr = model_files(&conn, "/dump/mob", residual.variant_key.as_deref()).unwrap();
+        assert_eq!(fr.len(), 1);
+        assert_eq!(fr[0].file_name, "c.stl");
+
+        // clearing every assignment collapses back to the whole-folder member
+        clear_file_variants(&conn, &["/dump/mob/a.stl".into(), "/dump/mob/b.stl".into()]).unwrap();
+        assert_eq!(group_members(&conn, "mob").unwrap().len(), 1);
     }
 
     #[test]
