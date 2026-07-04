@@ -460,6 +460,28 @@
                 </label>
                 <label class="flex flex-col gap-0.5">
                   <span class="font-mono text-[9px] text-base-content/40"
+                    >DESIGNER</span
+                  >
+                  <input
+                    v-model="metaDraft.designer"
+                    type="text"
+                    class="input input-xs font-mono"
+                    placeholder="studio / brand"
+                  />
+                </label>
+                <label class="flex flex-col gap-0.5">
+                  <span class="font-mono text-[9px] text-base-content/40"
+                    >SCULPTOR</span
+                  >
+                  <input
+                    v-model="metaDraft.sculptor"
+                    type="text"
+                    class="input input-xs font-mono"
+                    placeholder="artist (if known)"
+                  />
+                </label>
+                <label class="flex flex-col gap-0.5">
+                  <span class="font-mono text-[9px] text-base-content/40"
                     >POSE / VARIANT</span
                   >
                   <input
@@ -827,6 +849,8 @@ const metaDraft = ref({
   scale: "",
   support_status: "",
   release_date: "",
+  designer: "",
+  sculptor: "",
 });
 
 const visibleTags = computed(() => {
@@ -1304,6 +1328,8 @@ watch(selected, (entry) => {
     scale: entry?.scale ?? "",
     support_status: entry?.support_status ?? "",
     release_date: entry?.release_date ?? "",
+    designer: entry?.designer ?? "",
+    sculptor: entry?.sculptor ?? "",
   };
   // fresh member: drop any ticks, and seed the assign box with the scanner's
   // pose guess (the "pre-estimate") so filing more files under it is one tap
@@ -1320,7 +1346,9 @@ const metaDirty = computed(() => {
     draft.pose !== (entry.pose ?? "") ||
     draft.scale !== (entry.scale ?? "") ||
     draft.support_status !== (entry.support_status ?? "") ||
-    draft.release_date !== (entry.release_date ?? "")
+    draft.release_date !== (entry.release_date ?? "") ||
+    draft.designer !== (entry.designer ?? "") ||
+    draft.sculptor !== (entry.sculptor ?? "")
   );
 });
 
@@ -1343,6 +1371,8 @@ const saveMetadata = async () => {
     orNull(draft.scale),
     orNull(draft.support_status),
     orNull(draft.release_date),
+    orNull(draft.designer),
+    orNull(draft.sculptor),
   );
   if (result.status === "ok") {
     toastStore.addToast("Details saved", "success");

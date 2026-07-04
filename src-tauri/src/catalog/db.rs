@@ -96,7 +96,12 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             scale          TEXT,
             support_status TEXT,
             release_date   TEXT,
-            preview_path   TEXT
+            preview_path   TEXT,
+            -- designer (the studio/brand) rides on the release for scanned
+            -- models but is overridable per model; sculptor (the artist) has
+            -- no folder signal at all, so it's user/manifest-supplied only.
+            designer       TEXT,
+            sculptor       TEXT
         );
 
         -- Group display-name overrides, keyed by the SCANNER's group name
@@ -129,39 +134,41 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
     // code, and a version gate then locks that ALTER out forever ("no such
     // column" with no way back). Asking the table what it actually has
     // makes the check idempotent and self-healing on every open.
-    let existing_columns: Vec<String> = conn
-        .prepare("PRAGMA table_info(models)")
-        .and_then(|mut stmt| {
-            stmt.query_map([], |row| row.get::<_, String>(1))
-                .and_then(|rows| rows.collect())
-        })
-        .map_err(|e| AppError::ConfigError(format!("Failed to inspect catalog schema: {}", e)))?;
-    for column in [
-        "pose",
-        "scale",
-        "support_status",
-        "release_date",
-        "group_name",
-    ] {
-        if !existing_columns.iter().any(|c| c == column) {
-            if let Err(e) = conn.execute(
-                &format!("ALTER TABLE models ADD COLUMN {} TEXT", column),
-                [],
-            ) {
-                // Every command opens its own connection and the UI fires
-                // several in parallel, so two opens can both see the column
-                // missing and race the ALTER. The loser's "duplicate column"
-                // means the winner already added it — that IS the goal state,
-                // not a failure. Anything else must still surface.
+    // Add any missing TEXT columns to a table. Racy-safe: several
+    // connections open in parallel and can both see a column missing, so the
+    // loser's "duplicate column" is the goal state, not a failure.
+    let add_text_columns = |table: &str, columns: &[&str]| -> Result<(), AppError> {
+        let existing: Vec<String> = conn
+            .prepare(&format!("PRAGMA table_info({})", table))
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| row.get::<_, String>(1))
+                    .and_then(|rows| rows.collect())
+            })
+            .map_err(|e| AppError::ConfigError(format!("Failed to inspect {}: {}", table, e)))?;
+        for column in columns {
+            if existing.iter().any(|c| c == column) {
+                continue;
+            }
+            if let Err(e) =
+                conn.execute(&format!("ALTER TABLE {} ADD COLUMN {} TEXT", table, column), [])
+            {
                 if !e.to_string().contains("duplicate column name") {
                     return Err(AppError::ConfigError(format!(
-                        "Failed to migrate catalog schema (add {}): {}",
-                        column, e
+                        "Failed to migrate {} (add {}): {}",
+                        table, column, e
                     )));
                 }
             }
         }
-    }
+        Ok(())
+    };
+    add_text_columns(
+        "models",
+        &["pose", "scale", "support_status", "release_date", "group_name", "sculptor"],
+    )?;
+    // designer already exists on models (from the release); these are the
+    // per-model user overrides plus the artist field.
+    add_text_columns("model_user_meta", &["designer", "sculptor"])?;
 
     if version >= SCHEMA_VERSION {
         return Ok(());
@@ -339,12 +346,17 @@ pub fn replace_catalog(
 // The group's display name is folded into the tags text so a search for a
 // RENAMED group ("Stone Guardian") still finds its member rows, whose own
 // names may say something else entirely ("galeb duhr A").
+// designer and sculptor ride in the free-text (tags) column rather than
+// their own FTS columns — that keeps the virtual table shape stable while
+// making both queryable, case-insensitively, via the same prefix search.
 const FTS_INSERT_SELECT: &str = "INSERT INTO models_fts (name, description, tags, dir_path)
          SELECT COALESCE(u.custom_name, m.name),
                 COALESCE(m.description, ''),
                 COALESCE((SELECT group_concat(t.tag, ' ') FROM model_tags t
                           WHERE t.dir_path = m.dir_path), '')
-                    || ' ' || COALESCE(r.display_name, ''),
+                    || ' ' || COALESCE(r.display_name, '')
+                    || ' ' || COALESCE(u.designer, m.designer, '')
+                    || ' ' || COALESCE(u.sculptor, m.sculptor, ''),
                 m.dir_path
          FROM models m
          LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
@@ -416,7 +428,8 @@ fn build_search_filter(
 /// (and clear it to revert).
 fn entry_select_sql(where_sql: &str, tail_sql: &str) -> String {
     format!(
-        "SELECT m.dir_path, COALESCE(u.custom_name, m.name), m.description, m.designer,
+        "SELECT m.dir_path, COALESCE(u.custom_name, m.name), m.description,
+                COALESCE(u.designer, m.designer),
                 m.release_name, COALESCE(u.preview_path, m.preview_path),
                 m.file_count, m.total_size_bytes,
                 COALESCE((SELECT group_concat(t.tag, char(31)) FROM model_tags t
@@ -424,7 +437,7 @@ fn entry_select_sql(where_sql: &str, tail_sql: &str) -> String {
                 COALESCE(u.pose, m.pose), COALESCE(u.scale, m.scale),
                 COALESCE(u.support_status, m.support_status),
                 COALESCE(u.release_date, m.release_date),
-                u.custom_name
+                u.custom_name, COALESCE(u.sculptor, m.sculptor)
          FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path {} {}",
         where_sql, tail_sql
     )
@@ -451,6 +464,7 @@ fn map_entry_row(row: &rusqlite::Row) -> rusqlite::Result<CatalogEntry> {
         support_status: row.get(11)?,
         release_date: row.get(12)?,
         custom_name: row.get(13)?,
+        sculptor: row.get(14)?,
         // Whole-folder member; expand_file_variants stamps a key on any
         // synthetic pose members it derives from this row.
         variant_key: None,
@@ -621,7 +635,7 @@ pub fn search_groups(
     // MAX(designer) likewise picks an arbitrary non-null representative
     let sql = format!(
         "SELECT COALESCE(r.display_name, m.group_name, m.name) AS gname,
-                MAX(m.designer),
+                MAX(COALESCE(u.designer, m.designer)),
                 COUNT(*),
                 COUNT(DISTINCT COALESCE(u.pose, m.pose)),
                 group_concat(DISTINCT COALESCE(u.support_status, m.support_status)),
@@ -1032,25 +1046,32 @@ pub fn update_model_user_meta(
     scale: Option<String>,
     support_status: Option<String>,
     release_date: Option<String>,
+    designer: Option<String>,
+    sculptor: Option<String>,
 ) -> Result<(), AppError> {
     require_model(conn, dir_path)?;
     conn.execute(
         "INSERT INTO model_user_meta
-             (dir_path, custom_name, pose, scale, support_status, release_date)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             (dir_path, custom_name, pose, scale, support_status, release_date,
+              designer, sculptor)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(dir_path) DO UPDATE SET
              custom_name = excluded.custom_name,
              pose = excluded.pose,
              scale = excluded.scale,
              support_status = excluded.support_status,
-             release_date = excluded.release_date",
+             release_date = excluded.release_date,
+             designer = excluded.designer,
+             sculptor = excluded.sculptor",
         params![
             dir_path,
             custom_name,
             pose,
             scale,
             support_status,
-            release_date
+            release_date,
+            designer,
+            sculptor
         ],
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to update metadata: {}", e)))?;
@@ -1628,6 +1649,8 @@ mod tests {
             Some("32mm".into()),
             Some("supported".into()),
             None,
+            Some("Dragon Trapper's Lodge".into()),
+            Some("A. Sculptor".into()),
         )
         .unwrap();
         set_model_preview(&conn, "/lib/newt", "/appdata/previews/abc.png").unwrap();
@@ -1641,22 +1664,33 @@ mod tests {
         assert_eq!(entry.custom_name.as_deref(), Some("Newt, Giant (repose)"));
         assert_eq!(entry.pose.as_deref(), Some("A"));
         assert_eq!(entry.scale.as_deref(), Some("32mm"));
+        // designer overrides the release's, sculptor is user-only
+        assert_eq!(entry.designer.as_deref(), Some("Dragon Trapper's Lodge"));
+        assert_eq!(entry.sculptor.as_deref(), Some("A. Sculptor"));
+        // both are searchable, case-insensitively, after the rescan
+        assert_eq!(search(&conn, "trapper", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(search(&conn, "sculptor", &[], 10, 0).unwrap().total, 1);
         assert_eq!(
             entry.preview_path.as_deref(),
             Some("/appdata/previews/abc.png")
         );
 
-        // clearing the override reverts to the scanner name
-        update_model_user_meta(&conn, "/lib/newt", None, None, None, None, None).unwrap();
+        // clearing the override reverts to the scanner name and designer
+        update_model_user_meta(&conn, "/lib/newt", None, None, None, None, None, None, None).unwrap();
         let page = search(&conn, "newt", &[], 10, 0).unwrap();
         assert_eq!(page.entries[0].name, "Giant Newt");
+        assert_eq!(page.entries[0].designer.as_deref(), Some("DTL"), "reverts to release designer");
+        assert!(page.entries[0].sculptor.is_none());
         // ...but the preview set separately is untouched by a metadata save
         assert_eq!(
             page.entries[0].preview_path.as_deref(),
             Some("/appdata/previews/abc.png")
         );
 
-        assert!(update_model_user_meta(&conn, "/nope", None, None, None, None, None).is_err());
+        assert!(
+            update_model_user_meta(&conn, "/nope", None, None, None, None, None, None, None)
+                .is_err()
+        );
         assert!(set_model_preview(&conn, "/nope", "/x.png").is_err());
     }
 
@@ -1832,6 +1866,8 @@ mod tests {
             &conn,
             "/lib/newt",
             Some("Shiny Newt".into()),
+            None,
+            None,
             None,
             None,
             None,

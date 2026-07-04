@@ -65,6 +65,10 @@ pub struct CatalogEntry {
     pub support_status: Option<String>,
     pub release_date: Option<String>,
     pub custom_name: Option<String>,
+    /// The studio/brand. Scanned from the release for release models, and
+    /// user-overridable per model. sculptor (the individual artist) has no
+    /// folder signal, so it comes only from the user or an imported manifest.
+    pub sculptor: Option<String>,
     /// Set only on members synthesized from file→pose assignments: a stable
     /// `{dir_path}\u{1f}{pose}` handle ("...\u{1f}" for the residual
     /// unassigned member). None means a whole-folder member — its dir_path
