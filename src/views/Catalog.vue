@@ -273,10 +273,23 @@
         </div>
       </section>
 
+      <!-- Drag handle to widen the drawer at the list's expense — long file
+           paths and the details grid want more room than a fixed width -->
+      <div
+        v-if="selectedGroup"
+        class="w-1.5 shrink-0 cursor-col-resize rounded-full bg-base-content/5 hover:bg-primary/40 transition-colors"
+        title="Drag to resize"
+        @mousedown.prevent="startDrawerResize"
+      ></div>
+
       <!-- Detail drawer: keyed on the GROUP so switching cards swaps the
            content in place — keying on the loaded entry unmounted the whole
            drawer during the members fetch and the layout flashed -->
-      <aside v-if="selectedGroup" class="w-[312px] shrink-0 overflow-y-auto">
+      <aside
+        v-if="selectedGroup"
+        :style="{ width: `${drawerWidth}px` }"
+        class="shrink-0 overflow-y-auto"
+      >
         <div
           v-if="!selected"
           class="h-40 flex items-center justify-center opacity-40"
@@ -852,6 +865,35 @@ const metaDraft = ref({
   designer: "",
   sculptor: "",
 });
+
+/* Resizable detail drawer — width persists so it survives navigation. */
+const DRAWER_MIN = 300;
+const DRAWER_MAX = 720;
+const drawerWidth = ref(
+  Math.min(
+    DRAWER_MAX,
+    Math.max(DRAWER_MIN, Number(localStorage.getItem("catalogDrawerWidth")) || 340),
+  ),
+);
+const startDrawerResize = (event: MouseEvent) => {
+  const startX = event.clientX;
+  const startWidth = drawerWidth.value;
+  const onMove = (moveEvent: MouseEvent) => {
+    // the drawer sits on the right, so dragging left widens it
+    const delta = startX - moveEvent.clientX;
+    drawerWidth.value = Math.min(
+      DRAWER_MAX,
+      Math.max(DRAWER_MIN, startWidth + delta),
+    );
+  };
+  const onUp = () => {
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    localStorage.setItem("catalogDrawerWidth", String(drawerWidth.value));
+  };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+};
 
 const visibleTags = computed(() => {
   const top = allTags.value.slice(0, 12);
