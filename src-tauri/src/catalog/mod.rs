@@ -48,6 +48,16 @@ pub struct ModelRow {
     pub group_name: Option<String>,
 }
 
+/// A per-file pose/variant assignment imported from a model.json's
+/// `file_poses` — the scanner resolves each entry to a scanned file path.
+#[derive(Debug, Clone)]
+pub struct FileVariantRow {
+    pub path: String,
+    pub variant: Option<String>,
+    pub pose: Option<String>,
+    pub support_status: Option<String>,
+}
+
 // ---- frontend-facing types ----
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
@@ -167,6 +177,10 @@ pub struct DuplicateGroup {
     pub hash: String,
     pub size_bytes: f64,
     pub paths: Vec<String>,
+    /// How many physical copies the paths actually occupy on disk. Hardlinked
+    /// paths count once, so a fully merged group reports 1 ("shared", nothing
+    /// to reclaim) and reclaimable space is size_bytes × (distinct_copies − 1).
+    pub distinct_copies: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

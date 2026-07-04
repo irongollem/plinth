@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use super::{FileRow, ModelRow, IMAGE_EXTENSIONS, MODEL_EXTENSIONS};
+use super::{FileRow, FileVariantRow, ModelRow, IMAGE_EXTENSIONS, MODEL_EXTENSIONS};
 
 /// A `model.json` sidecar as the scanner reads it: the classic StlModel
 /// fields plus the rich 3pk metadata (all optional, so a plain sidecar still
@@ -41,12 +41,29 @@ struct ModelJson {
     sculptor: Option<String>,
     #[serde(default)]
     release_name: Option<String>,
+    /// Per-file variant/pose split, restored into file_variants on scan.
+    #[serde(default)]
+    file_poses: Vec<FilePoseJson>,
+}
+
+#[derive(Deserialize)]
+struct FilePoseJson {
+    /// File name relative to the model dir (matched by basename in its subtree).
+    name: String,
+    #[serde(default)]
+    variant: Option<String>,
+    #[serde(default)]
+    pose: Option<String>,
+    #[serde(default)]
+    support_status: Option<String>,
 }
 
 pub struct ScanOutcome {
     pub files: Vec<FileRow>,
     pub models: Vec<ModelRow>,
     pub metadata_tags: Vec<(String, String)>,
+    /// Per-file pose/variant assignments imported from model.json file_poses.
+    pub metadata_file_variants: Vec<FileVariantRow>,
 }
 
 /// Per-directory accumulator built during the walk.
@@ -179,6 +196,7 @@ pub fn scan(
     // Assemble one model per directory that directly holds model files
     let mut models = Vec::new();
     let mut metadata_tags = Vec::new();
+    let mut metadata_file_variants = Vec::new();
     for (dir_path, info) in &dirs {
         if info.model_files == 0 {
             continue;
@@ -276,12 +294,39 @@ pub fn scan(
             sculptor: meta_field(|m| m.sculptor.clone()),
             group_name: Some(group_name),
         });
+
+        // Restore per-file poses: resolve each file_poses entry to a scanned
+        // file (by basename within the model dir subtree) and seed it. The DB
+        // import is INSERT OR IGNORE, so a user's own split always wins.
+        if let Some(meta) = info.metadata.as_ref() {
+            let subtree = format!("{}{}", dir_path, std::path::MAIN_SEPARATOR);
+            for fp in &meta.file_poses {
+                let has_facet = fp.variant.as_deref().is_some_and(|s| !s.is_empty())
+                    || fp.pose.as_deref().is_some_and(|s| !s.is_empty());
+                if !has_facet {
+                    continue;
+                }
+                let base = fp.name.rsplit(['/', '\\']).next().unwrap_or(&fp.name);
+                if let Some(file) = files
+                    .iter()
+                    .find(|f| f.file_name == base && f.path.starts_with(&subtree))
+                {
+                    metadata_file_variants.push(FileVariantRow {
+                        path: file.path.clone(),
+                        variant: fp.variant.clone(),
+                        pose: fp.pose.clone(),
+                        support_status: fp.support_status.clone(),
+                    });
+                }
+            }
+        }
     }
 
     Ok(ScanOutcome {
         files,
         models,
         metadata_tags,
+        metadata_file_variants,
     })
 }
 
@@ -747,6 +792,47 @@ mod tests {
         assert_eq!(m.sculptor.as_deref(), Some("A. Artist"));
         assert_eq!(m.release_name.as_deref(), Some("Order of the Unicorn"));
         assert_eq!(m.release_date.as_deref(), Some("2026-05"));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn imports_file_poses_from_model_json() {
+        // a dump folder's split, carried in model.json, resolves each entry to
+        // a scanned file path (by basename) so it can seed file_variants
+        let root = std::env::temp_dir().join(format!("stlpack_fileposes_{}", std::process::id()));
+        let dir = root.join("knights");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("sword_a.stl"), b"s").unwrap();
+        fs::write(dir.join("bow_b.stl"), b"b").unwrap();
+        fs::write(dir.join("base.stl"), b"x").unwrap();
+        fs::write(
+            dir.join("model.json"),
+            r#"{"name":"Knights","file_poses":[
+                {"name":"sword_a.stl","variant":"sword","pose":"1"},
+                {"name":"bow_b.stl","variant":"bow","pose":"2","support_status":"unsupported"},
+                {"name":"base.stl"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let outcome = scan(&root, &cancel, &[], |_, _| {}).unwrap();
+        // base.stl carries no facet, so it's skipped; the other two resolve
+        assert_eq!(outcome.metadata_file_variants.len(), 2);
+        let sword = outcome
+            .metadata_file_variants
+            .iter()
+            .find(|f| f.variant.as_deref() == Some("sword"))
+            .unwrap();
+        assert!(sword.path.ends_with("sword_a.stl"));
+        assert_eq!(sword.pose.as_deref(), Some("1"));
+        let bow = outcome
+            .metadata_file_variants
+            .iter()
+            .find(|f| f.variant.as_deref() == Some("bow"))
+            .unwrap();
+        assert_eq!(bow.support_status.as_deref(), Some("unsupported"));
 
         fs::remove_dir_all(&root).ok();
     }

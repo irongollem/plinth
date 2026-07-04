@@ -10,10 +10,35 @@ use super::DuplicateGroup;
 
 const PARTIAL_HASH_BYTES: usize = 128 * 1024;
 
+/// Opaque physical-file identity: "device:inode" on Unix, volume:index on
+/// Windows. Two paths sharing it are one file on disk (hardlinks), which is
+/// how a merged duplicate group is told apart from a reclaimable one.
+pub fn file_identity(path: &Path) -> Option<String> {
+    file_id::get_file_id(path).ok().map(|id| match id {
+        file_id::FileId::Inode {
+            device_id,
+            inode_number,
+        } => format!("{}:{}", device_id, inode_number),
+        file_id::FileId::LowRes {
+            volume_serial_number,
+            file_index,
+        } => format!("{}:{}", volume_serial_number, file_index),
+        file_id::FileId::HighRes {
+            volume_serial_number,
+            file_id,
+        } => format!("{}:{}", volume_serial_number, file_id),
+    })
+}
+
 /// Staged duplicate detection:
 /// 1. same-size candidates come free from the index,
 /// 2. partial (first 128 KiB) BLAKE3 hashes weed out most collisions,
 /// 3. full-file hashes confirm — and are persisted so re-runs are cheap.
+///
+/// Every candidate's physical identity is refreshed along the way (a stat,
+/// nearly free next to hashing): merges and external file swaps change
+/// identity without touching content, so a stale value would misreport
+/// what's reclaimable.
 pub fn find_duplicates(
     conn: &Connection,
     cancel: &AtomicBool,
@@ -22,6 +47,7 @@ pub fn find_duplicates(
     let candidates = db::duplicate_size_candidates(conn)?;
     let total_candidates: u32 = candidates.iter().map(|(_, paths)| paths.len() as u32).sum();
     let mut processed: u32 = 0;
+    let mut identities: Vec<(String, String)> = Vec::new();
 
     for (size, paths) in candidates {
         if cancel.load(Ordering::SeqCst) {
@@ -41,6 +67,9 @@ pub fn find_duplicates(
             }
             if cancel.load(Ordering::SeqCst) {
                 return Err(AppError::UserCancelled("Duplicate scan cancelled".into()));
+            }
+            if let Some(identity) = file_identity(Path::new(&path)) {
+                identities.push((path.clone(), identity));
             }
             // A stored full hash makes both stages unnecessary
             if db::known_hash(conn, &path).is_some() {
@@ -79,6 +108,7 @@ pub fn find_duplicates(
         }
     }
     on_progress(total_candidates, total_candidates);
+    db::store_identities(conn, &identities)?;
 
     db::duplicate_groups(conn)
 }
@@ -157,16 +187,58 @@ mod tests {
             group_name: None,
         }];
         db::test_init(&conn);
-        db::replace_catalog(&mut conn, &rows, &models, &[]).unwrap();
+        db::replace_catalog(&mut conn, &rows, &models, &[], &[]).unwrap();
 
         let cancel = AtomicBool::new(false);
         let groups = find_duplicates(&conn, &cancel, |_, _| {}).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].paths.len(), 2);
+        // a and b are separate files on disk: both copies are real
+        assert_eq!(groups[0].distinct_copies, 2);
         assert!(groups[0]
             .paths
             .iter()
             .all(|p| p.ends_with("a.stl") || p.ends_with("b.stl")));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hardlinked_copies_count_as_one_physical_copy() {
+        let dir = std::env::temp_dir().join(format!("stlpack_link_test_{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.stl");
+        let b = dir.join("b.stl"); // hardlink of a: same bytes, same inode
+        let c = dir.join("c.stl"); // plain copy: same bytes, own inode
+        fs::write(&a, b"shared-base-part").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+        fs::write(&c, b"shared-base-part").unwrap();
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        let rows: Vec<FileRow> = [&a, &b, &c]
+            .iter()
+            .map(|p| FileRow {
+                path: p.to_string_lossy().into_owned(),
+                dir_path: dir.to_string_lossy().into_owned(),
+                file_name: p.file_name().unwrap().to_string_lossy().into_owned(),
+                extension: "stl".into(),
+                size_bytes: 16,
+                modified_at: 1,
+            })
+            .collect();
+        db::test_init(&conn);
+        db::replace_catalog(&mut conn, &rows, &[], &[], &[]).unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let groups = find_duplicates(&conn, &cancel, |_, _| {}).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].paths.len(), 3);
+        // Three names, but a+b share one inode: only c is a reclaimable copy
+        assert_eq!(groups[0].distinct_copies, 2);
+        // Headline stats report disk usage, not the sum of names: 3×16 minus
+        // the 16 bytes the hardlink doesn't actually occupy
+        assert_eq!(db::stats(&conn).unwrap().total_size_bytes, 32.0);
 
         fs::remove_dir_all(&dir).ok();
     }

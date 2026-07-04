@@ -115,6 +115,7 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
                 &outcome.files,
                 &outcome.models,
                 &outcome.metadata_tags,
+                &outcome.metadata_file_variants,
             )?;
             Ok((outcome.files.len() as u32, outcome.models.len() as u32))
         })();

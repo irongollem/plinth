@@ -4,7 +4,7 @@ use std::path::Path;
 
 use super::{
     CatalogEntry, CatalogFile, CatalogGroup, CatalogStats, DuplicateGroup, ExtensionStat, FileRow,
-    FileVariant, ModelRow, ReleaseSummary,
+    FileVariant, FileVariantRow, ModelRow, ReleaseSummary,
 };
 
 const SCHEMA_VERSION: i64 = 5;
@@ -43,6 +43,11 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             size_bytes  INTEGER NOT NULL,
             modified_at INTEGER NOT NULL,
             content_hash TEXT,
+            -- Opaque physical-file id ("device:inode" on Unix, volume:index
+            -- on Windows), captured during duplicate scans. Paths sharing it
+            -- are hardlinks — one copy on disk — so equal-hash groups with
+            -- one distinct identity are already deduplicated, not reclaimable.
+            file_identity TEXT,
             indexed_at  INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_files_dir ON files(dir_path);
@@ -206,6 +211,16 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
         &["designer", "sculptor", "release_name", "variant"],
     )?;
     add_text_columns("file_variants", &["variant"])?;
+    add_text_columns("files", &["file_identity"])?;
+    // Outside the base batch: on a pre-existing db the column only exists
+    // after the migration above, and indexing a missing column is an error
+    // even under IF NOT EXISTS.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_files_identity ON files(file_identity)
+         WHERE file_identity IS NOT NULL",
+        [],
+    )
+    .map_err(|e| AppError::ConfigError(format!("Failed to index file identities: {}", e)))?;
 
     if version >= SCHEMA_VERSION {
         return Ok(());
@@ -254,17 +269,18 @@ pub fn replace_catalog(
     files: &[FileRow],
     models: &[ModelRow],
     metadata_tags: &[(String, String)],
+    metadata_file_variants: &[FileVariantRow],
 ) -> Result<(), AppError> {
     let map_err =
         |e: rusqlite::Error| AppError::ConfigError(format!("Catalog write failed: {}", e));
     let tx = conn.transaction().map_err(map_err)?;
     {
-        // Preserve known content hashes across the rebuild — hashing is the
-        // expensive part of duplicate detection
+        // Preserve known content hashes (hashing is the expensive part of
+        // duplicate detection) and file identities across the rebuild
         tx.execute_batch(
             "CREATE TEMP TABLE IF NOT EXISTS old_hashes AS
-                 SELECT path, size_bytes, modified_at, content_hash
-                 FROM files WHERE content_hash IS NOT NULL;",
+                 SELECT path, size_bytes, modified_at, content_hash, file_identity
+                 FROM files WHERE content_hash IS NOT NULL OR file_identity IS NOT NULL;",
         )
         .map_err(map_err)?;
 
@@ -294,10 +310,11 @@ pub fn replace_catalog(
         }
         drop(insert_file);
 
-        // Restore hashes for files that didn't change
+        // Restore hashes and identities for files that didn't change
         tx.execute(
-            "UPDATE files SET content_hash = (
-                 SELECT oh.content_hash FROM old_hashes oh
+            "UPDATE files SET
+                 (content_hash, file_identity) = (
+                 SELECT oh.content_hash, oh.file_identity FROM old_hashes oh
                  WHERE oh.path = files.path
                    AND oh.size_bytes = files.size_bytes
                    AND oh.modified_at = files.modified_at
@@ -377,6 +394,23 @@ pub fn replace_catalog(
             [],
         )
         .map_err(map_err)?;
+        // Seed file-pose splits carried in model.json (the 3pk read side).
+        // OR IGNORE: a user's own assignment (same path PK) always wins, and
+        // metadata rows survive the rescan above just like user ones.
+        {
+            let mut import = tx
+                .prepare(
+                    "INSERT OR IGNORE INTO file_variants
+                         (path, dir_path, variant, pose, support_status)
+                     SELECT ?1, dir_path, ?2, ?3, ?4 FROM files WHERE path = ?1",
+                )
+                .map_err(map_err)?;
+            for fv in metadata_file_variants {
+                import
+                    .execute(params![fv.path, fv.variant, fv.pose, fv.support_status])
+                    .map_err(map_err)?;
+            }
+        }
         tx.execute(
             "DELETE FROM group_renames
              WHERE lower(source_group) NOT IN
@@ -1023,6 +1057,22 @@ pub fn stats(conn: &Connection) -> Result<CatalogStats, AppError> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(map_err)?;
+    // Hardlinked paths (same file_identity) occupy the disk once, however
+    // many names they carry — subtract the extra names so the headline size
+    // reports actual disk usage. Only duplicate-scan candidates carry an
+    // identity, so this subquery stays small at any library size.
+    let shared_savings: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(size_bytes * (n - 1)), 0) FROM (
+                 SELECT MAX(size_bytes) AS size_bytes, COUNT(*) AS n FROM files
+                 WHERE file_identity IS NOT NULL
+                 GROUP BY file_identity HAVING COUNT(*) > 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(map_err)?;
+    let total_size = total_size - shared_savings;
     let total_models: u32 = conn
         .query_row("SELECT COUNT(*) FROM models", [], |row| row.get(0))
         .map_err(map_err)?;
@@ -1108,16 +1158,41 @@ pub fn store_hash(conn: &Connection, path: &str, hash: &str) -> Result<(), AppEr
     Ok(())
 }
 
-/// Assemble confirmed duplicate groups from stored hashes.
+/// Batch-write physical-file identities in one transaction — a duplicate
+/// scan refreshes every candidate, and per-row autocommits would turn
+/// thousands of cheap stats into thousands of fsyncs.
+pub fn store_identities(conn: &Connection, entries: &[(String, String)]) -> Result<(), AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Failed to store identities: {}", e));
+    let tx = conn.unchecked_transaction().map_err(map_err)?;
+    {
+        let mut stmt = tx
+            .prepare("UPDATE files SET file_identity = ?2 WHERE path = ?1")
+            .map_err(map_err)?;
+        for (path, identity) in entries {
+            stmt.execute(params![path, identity]).map_err(map_err)?;
+        }
+    }
+    tx.commit().map_err(map_err)?;
+    Ok(())
+}
+
+/// Assemble confirmed duplicate groups from stored hashes. Paths that are
+/// hardlinks of each other share a file_identity and cost the disk only one
+/// copy, so reclaimable space is driven by DISTINCT identities, not path
+/// count. A missing identity falls back to the path — i.e. it's assumed to
+/// be its own copy — so unscanned rows never hide reclaimable bytes.
 pub fn duplicate_groups(conn: &Connection) -> Result<Vec<DuplicateGroup>, AppError> {
     let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Dup grouping failed: {}", e));
     let mut stmt = conn
         .prepare(
-            "SELECT content_hash, size_bytes, group_concat(path, char(31))
+            "SELECT content_hash, size_bytes, group_concat(path, char(31)),
+                    COUNT(DISTINCT COALESCE(file_identity, path))
              FROM files
              WHERE content_hash IS NOT NULL
              GROUP BY content_hash HAVING COUNT(*) > 1
-             ORDER BY size_bytes * (COUNT(*) - 1) DESC",
+             ORDER BY size_bytes * (COUNT(DISTINCT COALESCE(file_identity, path)) - 1) DESC,
+                      size_bytes DESC",
         )
         .map_err(map_err)?;
     let groups = stmt
@@ -1127,6 +1202,7 @@ pub fn duplicate_groups(conn: &Connection) -> Result<Vec<DuplicateGroup>, AppErr
                 hash: row.get(0)?,
                 size_bytes: row.get::<_, i64>(1)? as f64,
                 paths: joined.split('\u{1f}').map(String::from).collect(),
+                distinct_copies: row.get(3)?,
             })
         })
         .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
@@ -1567,7 +1643,7 @@ mod tests {
     fn fts_prefix_search_finds_models() {
         let mut conn = test_conn();
         let (files, models, tags) = sample_rows();
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
 
         // prefix match on name
         let page = search(&conn, "new", &[], 10, 0).unwrap();
@@ -1596,14 +1672,14 @@ mod tests {
     fn user_tags_survive_rescan_and_metadata_tags_refresh() {
         let mut conn = test_conn();
         let (files, models, tags) = sample_rows();
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
 
         add_tag(&conn, "/lib/newt", "painted").unwrap();
         // searchable immediately
         assert_eq!(search(&conn, "painted", &[], 10, 0).unwrap().total, 1);
 
         // rescan with metadata tags gone: user tag survives, metadata tag drops
-        replace_catalog(&mut conn, &files, &models, &[]).unwrap();
+        replace_catalog(&mut conn, &files, &models, &[], &[]).unwrap();
         let page = search(&conn, "", &["painted".to_string()], 10, 0).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(
@@ -1623,7 +1699,14 @@ mod tests {
             .into_iter()
             .filter(|m| m.dir_path == "/lib/bugbear")
             .collect();
-        replace_catalog(&mut conn, &only_bugbear_files, &only_bugbear_models, &[]).unwrap();
+        replace_catalog(
+            &mut conn,
+            &only_bugbear_files,
+            &only_bugbear_models,
+            &[],
+            &[],
+        )
+        .unwrap();
         let remaining: u32 = conn
             .query_row("SELECT COUNT(*) FROM model_tags", [], |r| r.get(0))
             .unwrap();
@@ -1634,10 +1717,10 @@ mod tests {
     fn hashes_survive_rescan_when_file_unchanged() {
         let mut conn = test_conn();
         let (files, models, tags) = sample_rows();
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
         store_hash(&conn, "/lib/newt/GiantNewt_v02.stl", "abc123").unwrap();
 
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
         assert_eq!(
             known_hash(&conn, "/lib/newt/GiantNewt_v02.stl"),
             Some("abc123".to_string())
@@ -1646,7 +1729,7 @@ mod tests {
         // changed mtime invalidates the stored hash
         let mut changed = files.clone();
         changed[0].modified_at = 999;
-        replace_catalog(&mut conn, &changed, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &changed, &models, &tags, &[]).unwrap();
         assert_eq!(known_hash(&conn, "/lib/newt/GiantNewt_v02.stl"), None);
     }
 
@@ -1656,7 +1739,7 @@ mod tests {
         let (mut files, models, tags) = sample_rows();
         // make the two files the same size -> duplicate candidates
         files[1].size_bytes = 2048;
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
 
         let stats = stats(&conn).unwrap();
         assert_eq!(stats.total_files, 2);
@@ -1680,7 +1763,7 @@ mod tests {
         let (mut files, models, tags) = sample_rows();
         // two identical-content files -> one duplicate group
         files[1].size_bytes = 2048;
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
         store_hash(&conn, &files[0].path, "same").unwrap();
         store_hash(&conn, &files[1].path, "same").unwrap();
         assert_eq!(duplicate_groups(&conn).unwrap().len(), 1);
@@ -1704,7 +1787,7 @@ mod tests {
     fn move_model_repoints_index_and_keeps_tags_through_rescan() {
         let mut conn = test_conn();
         let (files, models, tags) = sample_rows();
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
         add_tag(&conn, "/lib/newt", "painted").unwrap();
 
         move_model(&mut conn, "/lib/newt", "/lib/amphibians/newt").unwrap();
@@ -1729,7 +1812,7 @@ mod tests {
         files[0].path = "/lib/amphibians/newt/GiantNewt_v02.stl".into();
         files[0].dir_path = "/lib/amphibians/newt".into();
         models[0].dir_path = "/lib/amphibians/newt".into();
-        replace_catalog(&mut conn, &files, &models, &[]).unwrap();
+        replace_catalog(&mut conn, &files, &models, &[], &[]).unwrap();
         assert_eq!(
             search(&conn, "", &["painted".to_string()], 10, 0)
                 .unwrap()
@@ -1739,10 +1822,41 @@ mod tests {
     }
 
     #[test]
+    fn imported_file_poses_seed_but_never_clobber_a_user_split() {
+        let path = "/lib/newt/GiantNewt_v02.stl";
+        let seed = |variant: &str, pose: &str| {
+            vec![FileVariantRow {
+                path: path.into(),
+                variant: Some(variant.into()),
+                pose: Some(pose.into()),
+                support_status: None,
+            }]
+        };
+        let (files, models, tags) = sample_rows();
+
+        // fresh catalog: the model.json split is imported
+        let mut conn = test_conn();
+        replace_catalog(&mut conn, &files, &models, &tags, &seed("sword", "1")).unwrap();
+        let fv = get_file_variants(&conn, "/lib/newt").unwrap();
+        assert_eq!(fv.len(), 1);
+        assert_eq!(fv[0].variant.as_deref(), Some("sword"));
+        assert_eq!(fv[0].pose.as_deref(), Some("1"));
+
+        // but once the user has their own split, a rescan importing a
+        // different one leaves theirs untouched (INSERT OR IGNORE on path)
+        set_file_variants(&mut conn, &[path.into()], None, Some("Z".into()), None).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &seed("bow", "9")).unwrap();
+        let fv = get_file_variants(&conn, "/lib/newt").unwrap();
+        assert_eq!(fv.len(), 1);
+        assert_eq!(fv[0].pose.as_deref(), Some("Z"), "the user's split wins");
+        assert!(fv[0].variant.is_none());
+    }
+
+    #[test]
     fn file_variants_round_trip_survive_rescan_and_prune() {
         let mut conn = test_conn();
         let (files, models, tags) = sample_rows();
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
 
         // assign the newt's file to pose B; an unknown path is silently
         // skipped (no file row to hang dir_path off of)
@@ -1784,13 +1898,13 @@ mod tests {
         assert!(variants[0].variant.is_none(), "variant cleared on reassign");
 
         // a rescan that still lists the file keeps the assignment
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
         assert_eq!(get_file_variants(&conn, "/lib/newt").unwrap().len(), 1);
 
         // but a rescan where the file is gone from disk prunes it
         let pruned_files = vec![files[1].clone()];
         let pruned_models = vec![models[1].clone()];
-        replace_catalog(&mut conn, &pruned_files, &pruned_models, &[]).unwrap();
+        replace_catalog(&mut conn, &pruned_files, &pruned_models, &[], &[]).unwrap();
         assert!(get_file_variants(&conn, "/lib/newt").unwrap().is_empty());
 
         // and clearing drops the assignment explicitly
@@ -1834,7 +1948,7 @@ mod tests {
             sculptor: None,
             group_name: Some("mob".into()),
         }];
-        replace_catalog(&mut conn, &files, &models, &[]).unwrap();
+        replace_catalog(&mut conn, &files, &models, &[], &[]).unwrap();
 
         // before any split: one whole-folder member, all files, no key
         let members = group_members(&conn, "mob").unwrap();
@@ -1933,7 +2047,7 @@ mod tests {
             sculptor: None,
             group_name: Some("mob".into()),
         }];
-        replace_catalog(&mut conn, &files, &models, &[]).unwrap();
+        replace_catalog(&mut conn, &files, &models, &[], &[]).unwrap();
         set_file_variants(
             &mut conn,
             &["/dump/mob/a.stl".into()],
@@ -1990,7 +2104,7 @@ mod tests {
         );
 
         // per-variant previews survive a rescan, like the other user metadata
-        replace_catalog(&mut conn, &files, &models, &[]).unwrap();
+        replace_catalog(&mut conn, &files, &models, &[], &[]).unwrap();
         set_file_variants(
             &mut conn,
             &["/dump/mob/a.stl".into()],
@@ -2010,7 +2124,7 @@ mod tests {
     fn user_meta_edits_survive_rescan_and_reject_unknown_models() {
         let mut conn = test_conn();
         let (files, models, tags) = sample_rows();
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
 
         update_model_user_meta(
             &conn,
@@ -2029,7 +2143,7 @@ mod tests {
         set_model_preview(&conn, "/lib/newt", "/appdata/previews/abc.png").unwrap();
 
         // the whole point of model_user_meta: a full rescan keeps user edits
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
         let page = search(&conn, "repose", &[], 10, 0).unwrap();
         assert_eq!(page.total, 1, "custom name is searchable after rescan");
         let entry = &page.entries[0];
@@ -2134,7 +2248,7 @@ mod tests {
         init_schema(&conn).unwrap();
 
         let (files, models, tags) = sample_rows();
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
         let page = search_groups(&conn, "", &[], 10, 0).unwrap();
         assert_eq!(page.total, 2, "grouped search works after self-heal");
     }
@@ -2168,7 +2282,7 @@ mod tests {
             variant("supported", "A"),
             variant("supported", "B"),
         ];
-        replace_catalog(&mut conn, &[], &models, &[]).unwrap();
+        replace_catalog(&mut conn, &[], &models, &[], &[]).unwrap();
 
         let page = search_groups(&conn, "", &[], 10, 0).unwrap();
         assert_eq!(page.total, 1, "four variants, one card");
@@ -2207,7 +2321,7 @@ mod tests {
     fn group_renames_survive_rescans_and_merge_when_named_alike() {
         let mut conn = test_conn();
         let (files, models, tags) = sample_rows();
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
 
         rename_group(&conn, "Giant Newt", "Stone Guardian").unwrap();
         let page = search_groups(&conn, "", &[], 10, 0).unwrap();
@@ -2222,7 +2336,7 @@ mod tests {
         assert_eq!(group_members(&conn, "stone guardian").unwrap().len(), 1);
 
         // a rescan keeps the rename (keyed on the scanner's group name)
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
         assert_eq!(
             search_groups(&conn, "guardian", &[], 10, 0).unwrap().total,
             1
@@ -2247,7 +2361,7 @@ mod tests {
     fn combine_groups_merges_selected_under_one_name() {
         let mut conn = test_conn();
         let (files, models, tags) = sample_rows();
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
 
         combine_groups(
             &mut conn,
@@ -2274,7 +2388,7 @@ mod tests {
     fn user_meta_follows_a_model_move() {
         let mut conn = test_conn();
         let (files, models, tags) = sample_rows();
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
         update_model_user_meta(
             &conn,
             "/lib/newt",
@@ -2303,7 +2417,7 @@ mod tests {
         let (files, models, tags) = sample_rows();
         // sample_rows' bugbear model has no release_name (heuristic, no
         // metadata) — only the newt's "Critterfolk" should surface
-        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
 
         let releases = list_releases(&conn).unwrap();
         assert_eq!(releases.len(), 1);
