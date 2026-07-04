@@ -102,6 +102,17 @@ pub struct CatalogFile {
     pub size_bytes: f64,
 }
 
+/// A user's per-file pose assignment for a "dump everything in one folder"
+/// model. Purely metadata (keyed by path, rescan-safe): the file stays put
+/// on disk, but the catalog fans the folder out into one member per pose.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct FileVariant {
+    pub path: String,
+    pub dir_path: String,
+    pub pose: Option<String>,
+    pub support_status: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
 pub struct ExtensionStat {
     pub extension: String,

@@ -3,8 +3,8 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 
 use super::{
-    CatalogEntry, CatalogFile, CatalogGroup, CatalogStats, DuplicateGroup, ExtensionStat, FileRow,
-    ModelRow, ReleaseSummary,
+    CatalogEntry, CatalogFile, CatalogGroup, CatalogStats, DuplicateGroup, ExtensionStat,
+    FileRow, FileVariant, ModelRow, ReleaseSummary,
 };
 
 const SCHEMA_VERSION: i64 = 4;
@@ -107,6 +107,19 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             source_group TEXT PRIMARY KEY COLLATE NOCASE,
             display_name TEXT NOT NULL
         );
+
+        -- Per-file pose/support assignment for libraries that dump every
+        -- pose into one folder. Metadata only (keyed by path, like
+        -- model_user_meta): the file never moves, but a dir carrying these
+        -- rows fans out into one member per pose at read time. dir_path is
+        -- denormalized from files so the read path can group without a join.
+        CREATE TABLE IF NOT EXISTS file_variants (
+            path           TEXT PRIMARY KEY,
+            dir_path       TEXT NOT NULL,
+            pose           TEXT,
+            support_status TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_file_variants_dir ON file_variants(dir_path);
         "#,
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to init catalog schema: {}", e)))?;
@@ -291,6 +304,14 @@ pub fn replace_catalog(
         tx.execute(
             "DELETE FROM model_user_meta
              WHERE dir_path NOT IN (SELECT dir_path FROM models)",
+            [],
+        )
+        .map_err(map_err)?;
+        // File-pose assignments are keyed by path; drop any whose file is
+        // gone from disk so a curated split doesn't outlive its files.
+        tx.execute(
+            "DELETE FROM file_variants
+             WHERE path NOT IN (SELECT path FROM files)",
             [],
         )
         .map_err(map_err)?;
@@ -937,6 +958,71 @@ pub fn set_model_preview(
     Ok(())
 }
 
+/// Assign a set of files to a pose bucket (and optional per-file support),
+/// so a single dump folder can be split into pose members without touching
+/// disk. dir_path is pulled from the files table, so unknown paths are
+/// silently skipped rather than orphaning a row. A None pose clears the
+/// pose while keeping the row — pass it through clear_file_variants to drop
+/// the assignment entirely. Returns how many known files were assigned.
+pub fn set_file_variants(
+    conn: &mut Connection,
+    paths: &[String],
+    pose: Option<String>,
+    support_status: Option<String>,
+) -> Result<u32, AppError> {
+    let map = |e: rusqlite::Error| AppError::ConfigError(format!("Failed to assign files: {}", e));
+    let tx = conn.transaction().map_err(map)?;
+    let mut assigned = 0u32;
+    {
+        let mut stmt = tx
+            .prepare(
+                "INSERT INTO file_variants (path, dir_path, pose, support_status)
+                 SELECT ?1, dir_path, ?2, ?3 FROM files WHERE path = ?1
+                 ON CONFLICT(path) DO UPDATE SET
+                     pose = excluded.pose,
+                     support_status = excluded.support_status",
+            )
+            .map_err(map)?;
+        for path in paths {
+            assigned += stmt.execute(params![path, pose, support_status]).map_err(map)? as u32;
+        }
+    }
+    tx.commit().map_err(map)?;
+    Ok(assigned)
+}
+
+/// Drop pose assignments for the given files, reverting them to plain
+/// members of their folder.
+pub fn clear_file_variants(conn: &Connection, paths: &[String]) -> Result<(), AppError> {
+    for path in paths {
+        conn.execute("DELETE FROM file_variants WHERE path = ?1", params![path])
+            .map_err(|e| AppError::ConfigError(format!("Failed to clear assignment: {}", e)))?;
+    }
+    Ok(())
+}
+
+/// Every file-pose assignment under one model folder, for the split UI.
+pub fn get_file_variants(conn: &Connection, dir_path: &str) -> Result<Vec<FileVariant>, AppError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, dir_path, pose, support_status
+             FROM file_variants WHERE dir_path = ?1 ORDER BY path",
+        )
+        .map_err(|e| AppError::ConfigError(format!("Failed to read assignments: {}", e)))?;
+    let rows = stmt
+        .query_map(params![dir_path], |row| {
+            Ok(FileVariant {
+                path: row.get(0)?,
+                dir_path: row.get(1)?,
+                pose: row.get(2)?,
+                support_status: row.get(3)?,
+            })
+        })
+        .map_err(|e| AppError::ConfigError(format!("Failed to read assignments: {}", e)))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| AppError::ConfigError(format!("Failed to read assignments: {}", e)))
+}
+
 /// Prune file rows after an on-disk delete. Duplicate groups and stats
 /// both derive from `files`, so this is what makes a dedup delete visible
 /// immediately instead of only after the next full rescan. Per-model
@@ -1282,6 +1368,55 @@ mod tests {
                 .total,
             1
         );
+    }
+
+    #[test]
+    fn file_variants_round_trip_survive_rescan_and_prune() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+
+        // assign the newt's file to pose B; an unknown path is silently
+        // skipped (no file row to hang dir_path off of)
+        let assigned = set_file_variants(
+            &mut conn,
+            &[
+                "/lib/newt/GiantNewt_v02.stl".into(),
+                "/lib/newt/does-not-exist.stl".into(),
+            ],
+            Some("B".into()),
+            Some("unsupported".into()),
+        )
+        .unwrap();
+        assert_eq!(assigned, 1, "only the known file is assigned");
+
+        let variants = get_file_variants(&conn, "/lib/newt").unwrap();
+        assert_eq!(variants.len(), 1);
+        assert_eq!(variants[0].pose.as_deref(), Some("B"));
+        assert_eq!(variants[0].support_status.as_deref(), Some("unsupported"));
+        assert_eq!(variants[0].dir_path, "/lib/newt", "dir_path denormalized from files");
+
+        // reassigning updates in place rather than duplicating
+        set_file_variants(&mut conn, &["/lib/newt/GiantNewt_v02.stl".into()], Some("C".into()), None)
+            .unwrap();
+        let variants = get_file_variants(&conn, "/lib/newt").unwrap();
+        assert_eq!(variants.len(), 1);
+        assert_eq!(variants[0].pose.as_deref(), Some("C"));
+
+        // a rescan that still lists the file keeps the assignment
+        replace_catalog(&mut conn, &files, &models, &tags).unwrap();
+        assert_eq!(get_file_variants(&conn, "/lib/newt").unwrap().len(), 1);
+
+        // but a rescan where the file is gone from disk prunes it
+        let pruned_files = vec![files[1].clone()];
+        let pruned_models = vec![models[1].clone()];
+        replace_catalog(&mut conn, &pruned_files, &pruned_models, &[]).unwrap();
+        assert!(get_file_variants(&conn, "/lib/newt").unwrap().is_empty());
+
+        // and clearing drops the assignment explicitly
+        set_file_variants(&mut conn, &[files[1].path.clone()], Some("A".into()), None).unwrap();
+        clear_file_variants(&conn, &[files[1].path.clone()]).unwrap();
+        assert!(get_file_variants(&conn, "/lib/bugbear").unwrap().is_empty());
     }
 
     #[test]

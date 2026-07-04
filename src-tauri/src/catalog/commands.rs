@@ -17,7 +17,8 @@ use uuid::Uuid;
 
 use super::{
     db, dups, scanner, BatchOutcome, CatalogEntry, CatalogFile, CatalogGroupResult,
-    CatalogSearchResult, CatalogStats, DuplicateGroup, MoveOperation, ReleaseSummary, TagCount,
+    CatalogSearchResult, CatalogStats, DuplicateGroup, FileVariant, MoveOperation, ReleaseSummary,
+    TagCount,
 };
 
 /// Scan and duplicate jobs share one registry; both cancel through
@@ -427,6 +428,52 @@ pub async fn update_model_metadata(
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Metadata update failed: {}", e)))?
+}
+
+/// Assign files to a pose (with optional per-file support) so a dump
+/// folder can be split into pose members. Metadata only — nothing moves on
+/// disk. Returns the number of known files assigned.
+#[tauri::command]
+#[specta::specta]
+pub async fn assign_files_to_pose(
+    app_handle: AppHandle,
+    paths: Vec<String>,
+    pose: Option<String>,
+    support_status: Option<String>,
+) -> Result<u32, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = open_db(&app_handle)?;
+        db::set_file_variants(&mut conn, &paths, pose, support_status)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Assign task failed: {}", e)))?
+}
+
+/// Revert files to plain members of their folder.
+#[tauri::command]
+#[specta::specta]
+pub async fn clear_file_pose(app_handle: AppHandle, paths: Vec<String>) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::clear_file_variants(&conn, &paths)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Clear task failed: {}", e)))?
+}
+
+/// The pose assignments under a folder, for the split UI.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_file_variants(
+    app_handle: AppHandle,
+    dir_path: String,
+) -> Result<Vec<FileVariant>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::get_file_variants(&conn, &dir_path)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Assignment read task failed: {}", e)))?
 }
 
 /// Copy an image into the app's previews dir and point the model at it.
