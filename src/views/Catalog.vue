@@ -98,6 +98,15 @@
           Cancel
         </button>
       </div>
+      <button
+        type="button"
+        class="btn btn-sm"
+        :disabled="!catalogRoot || isScanning"
+        title="Restructure folders on disk to match the curated catalog — you review every move first"
+        @click="openNormalize"
+      >
+        Clean up…
+      </button>
       <span class="flex-1"></span>
       <span class="font-mono text-[11px] text-base-content/40">
         {{ total.toLocaleString() }} result{{ total === 1 ? "" : "s" }}
@@ -1047,6 +1056,177 @@
         </div>
       </div>
     </ModalView>
+
+    <!-- Normalizer: review-first cleanup of the on-disk structure -->
+    <ModalView :is-open="showNormalize" @close="showNormalize = false">
+      <div
+        class="w-170 max-w-[90vw] bg-base-100 rounded-box p-4 flex flex-col gap-3"
+      >
+        <div>
+          <div class="font-bold text-[15px]">Clean up library</div>
+          <p class="text-[11px] text-base-content/50 mt-0.5">
+            Moves folders into
+            <span class="font-mono"
+              >designer / release / model / Supported·Unsupported</span
+            >
+            and writes each model's metadata beside its files. Nothing moves
+            until you approve the list below.
+            <template v-if="designerFilter">
+              Planning only for <b>{{ designerFilter }}</b> (the toolbar
+              filter).</template
+            >
+          </p>
+        </div>
+
+        <div
+          v-if="normalizePlanning"
+          class="h-24 flex items-center justify-center gap-2 opacity-60 text-sm"
+        >
+          <span class="loading loading-spinner loading-sm"></span>
+          Planning moves…
+        </div>
+
+        <template v-else-if="normalizePlanData">
+          <div class="font-mono text-[10.5px] text-base-content/50">
+            {{ normalizePlanData.groups.length }} model{{
+              normalizePlanData.groups.length === 1 ? "" : "s"
+            }}
+            to restructure · {{ normalizePlanData.clean_groups }} already clean
+            <template v-if="normalizePlanData.skipped.length">
+              · {{ normalizePlanData.skipped.length }} skipped</template
+            >
+          </div>
+
+          <div
+            v-if="!normalizePlanData.groups.length"
+            class="py-6 text-center text-sm opacity-50"
+          >
+            Everything already matches the canonical layout 🎉
+          </div>
+
+          <ul v-else class="flex flex-col gap-1 max-h-80 overflow-y-auto pr-1">
+            <li
+              v-for="group in normalizePlanData.groups"
+              :key="group.group_name"
+              class="border border-base-content/10 rounded-lg px-2.5 py-1.5"
+            >
+              <div class="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  class="checkbox checkbox-xs"
+                  :checked="normalizeChecked.includes(group.group_name)"
+                  @change="toggleNormalizeGroup(group.group_name)"
+                />
+                <span class="font-medium text-[12.5px] truncate">{{
+                  group.group_name
+                }}</span>
+                <span
+                  class="font-mono text-[10px] text-base-content/40 truncate"
+                  >{{ group.designer }}</span
+                >
+                <span class="flex-1"></span>
+                <button
+                  type="button"
+                  class="link font-mono text-[10px] text-base-content/50"
+                  @click="
+                    expandedPlanGroup =
+                      expandedPlanGroup === group.group_name
+                        ? null
+                        : group.group_name
+                  "
+                >
+                  {{ group.ops.length }} move{{
+                    group.ops.length === 1 ? "" : "s"
+                  }}
+                </button>
+              </div>
+              <div
+                class="font-mono text-[10px] text-base-content/40 truncate pl-6"
+                :title="group.target_dir"
+              >
+                → {{ group.target_dir }}
+              </div>
+              <div
+                v-for="note in group.notes"
+                :key="note"
+                class="text-[10px] text-warning pl-6"
+              >
+                ⚠ {{ note }}
+              </div>
+              <ul
+                v-if="expandedPlanGroup === group.group_name"
+                class="pl-6 pt-1 flex flex-col gap-0.5"
+              >
+                <li
+                  v-for="op in group.ops"
+                  :key="op.from + op.to"
+                  class="font-mono text-[9.5px] text-base-content/50 truncate"
+                  :title="`${op.from} → ${op.to}`"
+                >
+                  {{ op.kind === "pose" ? "tag" : op.kind }}
+                  {{ opLabel(op.from, op.to) }}
+                </li>
+              </ul>
+            </li>
+          </ul>
+
+          <div
+            v-if="normalizePlanData.skipped.length"
+            class="flex flex-col gap-0.5 max-h-24 overflow-y-auto"
+          >
+            <div
+              v-for="skip in normalizePlanData.skipped"
+              :key="skip.group_name"
+              class="font-mono text-[10px] text-base-content/40 truncate"
+              :title="skip.reason"
+            >
+              skipped {{ skip.group_name }} — {{ skip.reason }}
+            </div>
+          </div>
+        </template>
+
+        <div
+          v-if="normalizeIssues.length"
+          class="alert alert-warning text-[11px] py-2 max-h-32 overflow-y-auto whitespace-pre-wrap"
+        >
+          {{ normalizeIssues.join("\n") }}
+        </div>
+
+        <div class="flex items-center gap-2">
+          <template v-if="normalizeBusy">
+            <progress
+              class="progress progress-primary flex-1"
+              :value="normalizeDone"
+              :max="normalizeTotal"
+            ></progress>
+            <span class="font-mono text-[10.5px] text-base-content/50">
+              {{ normalizeDone }} / {{ normalizeTotal }}
+            </span>
+          </template>
+          <template v-else>
+            <span class="flex-1"></span>
+            <button
+              type="button"
+              class="btn btn-sm"
+              @click="showNormalize = false"
+            >
+              Close
+            </button>
+            <button
+              v-if="normalizePlanData?.groups.length"
+              type="button"
+              class="btn btn-sm btn-primary"
+              :disabled="!normalizeChecked.length"
+              @click="applyNormalizePlan"
+            >
+              Move {{ normalizeChecked.length }} model{{
+                normalizeChecked.length === 1 ? "" : "s"
+              }}
+            </button>
+          </template>
+        </div>
+      </div>
+    </ModalView>
   </main>
 </template>
 
@@ -1062,6 +1242,7 @@ import {
   type CatalogStats,
   type DesignerCount,
   type DuplicateGroup,
+  type NormalizePlan,
   type TagCount,
   commands,
 } from "../bindings";
@@ -1834,6 +2015,122 @@ const reveal = async (path: string) => {
     await revealItemInDir(path);
   } catch (error) {
     toastStore.reportError("Failed to reveal file", error);
+  }
+};
+
+/* ---- normalizer: make the disk match the curated catalog ---- */
+// Everything is planned read-only first and shown as a reviewable move
+// list; nothing touches the NAS until "Move" is clicked. Ops are applied
+// in chunks so big batches show progress instead of a silent hang.
+const showNormalize = ref(false);
+const normalizePlanData = ref<NormalizePlan | null>(null);
+const normalizePlanning = ref(false);
+const normalizeChecked = ref<string[]>([]);
+const normalizeBusy = ref(false);
+const normalizeDone = ref(0);
+const normalizeTotal = ref(0);
+const normalizeIssues = ref<string[]>([]);
+const expandedPlanGroup = ref<string | null>(null);
+
+const openNormalize = async () => {
+  if (!catalogRoot.value) {
+    toastStore.addToast("Choose a catalog folder first", "info");
+    return;
+  }
+  showNormalize.value = true;
+  normalizePlanData.value = null;
+  normalizePlanning.value = true;
+  normalizeIssues.value = [];
+  normalizeDone.value = 0;
+  normalizeTotal.value = 0;
+  // the dry run respects the toolbar's designer facet, so a NAS cleanup
+  // can proceed one designer at a time
+  const result = await commands.planNormalize(
+    catalogRoot.value,
+    designerFilter.value || null,
+  );
+  normalizePlanning.value = false;
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to plan the cleanup", result.error);
+    showNormalize.value = false;
+    return;
+  }
+  normalizePlanData.value = result.data;
+  normalizeChecked.value = result.data.groups.map((g) => g.group_name);
+};
+
+const toggleNormalizeGroup = (name: string) => {
+  normalizeChecked.value = normalizeChecked.value.includes(name)
+    ? normalizeChecked.value.filter((n) => n !== name)
+    : [...normalizeChecked.value, name];
+};
+
+const opLabel = (from: string, to: string) => {
+  // show the shared prefix only once — the interesting part is what changes
+  const fromParts = from.split(/[/\\]/);
+  const toParts = to.split(/[/\\]/);
+  let shared = 0;
+  while (
+    shared < fromParts.length - 1 &&
+    shared < toParts.length - 1 &&
+    fromParts[shared] === toParts[shared]
+  ) {
+    shared++;
+  }
+  return `${fromParts.slice(shared).join("/")} → ${toParts.slice(shared).join("/")}`;
+};
+
+const applyNormalizePlan = async () => {
+  const plan = normalizePlanData.value;
+  if (!plan || normalizeBusy.value) return;
+  const chosen = plan.groups.filter((g) =>
+    normalizeChecked.value.includes(g.group_name),
+  );
+  const ops = chosen.flatMap((g) => g.ops);
+  if (!ops.length) return;
+  normalizeBusy.value = true;
+  normalizeTotal.value = ops.length;
+  normalizeDone.value = 0;
+  normalizeIssues.value = [];
+  try {
+    const CHUNK = 100;
+    // Sequential on purpose: moves must land in plan order (a folder
+    // rename precedes the file moves inside it), and the chunking exists
+    // to surface progress — parallelizing would break both.
+    for (let i = 0; i < ops.length; i += CHUNK) {
+      // oxlint-disable-next-line no-await-in-loop
+      const result = await commands.applyNormalize(ops.slice(i, i + CHUNK));
+      if (result.status !== "ok") {
+        toastStore.reportError("Cleanup stopped", result.error);
+        return;
+      }
+      normalizeIssues.value.push(...result.data.errors);
+      normalizeDone.value = Math.min(ops.length, i + CHUNK);
+    }
+    const finalize = await commands.finalizeNormalize(
+      catalogRoot.value,
+      chosen.map((g) => g.group_name),
+      chosen.flatMap((g) => g.old_dirs),
+    );
+    if (finalize.status === "ok") {
+      normalizeIssues.value.push(...finalize.data);
+    } else {
+      toastStore.reportError("Cleanup bookkeeping failed", finalize.error);
+    }
+    toastStore.addToast(
+      `Cleaned up ${chosen.length} model${chosen.length === 1 ? "" : "s"}`,
+      "success",
+    );
+    // the rescan re-reads the fresh model.json sidecars — completion also
+    // refreshes search/stats via the existing scanCompletedCount watcher
+    await scan();
+    if (!normalizeIssues.value.length) {
+      showNormalize.value = false;
+    } else {
+      normalizePlanData.value = null;
+    }
+  } finally {
+    normalizeBusy.value = false;
   }
 };
 
