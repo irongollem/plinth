@@ -276,7 +276,8 @@ pub fn scan(
             uuid,
             file_count: info.model_files,
             total_size_bytes: info.model_bytes,
-            variant: meta_field(|m| m.variant.clone()),
+            variant: meta_field(|m| m.variant.clone())
+                .or_else(|| inferred.as_ref().and_then(|i| i.variant.clone())),
             pose: meta_field(|m| m.pose.clone())
                 .or_else(|| inferred.as_ref().and_then(|i| i.pose.clone())),
             scale: meta_field(|m| m.scale.clone()),
@@ -380,6 +381,9 @@ struct InferredModel {
     /// The base name without the pose suffix — variants of one model share
     /// it, which is what groups "galeb duhr A/B/C" onto one catalog card.
     group_name: String,
+    /// The facet between support and pose (weapon/mount), read from a
+    /// `Model/Support/Variant/Pose` tree — see the demotion rule below.
+    variant: Option<String>,
     pose: Option<String>,
     support_status: Option<String>,
     release_date: Option<String>,
@@ -397,10 +401,15 @@ struct InferredModel {
 /// segments told us as metadata instead of throwing it away.
 fn infer_model_identity(root: &Path, dir_path: &str) -> InferredModel {
     let mut pose: Option<String> = None;
+    let mut variant: Option<String> = None;
     let mut support_status: Option<String> = None;
     let mut release_date: Option<String> = None;
     let mut base_name: Option<String> = None;
     let mut base_dir: Option<String> = None;
+    let mut variant_dir: Option<String> = None;
+    // True when the name candidate sat ABOVE an already-found pose — the
+    // `…/Spear/A` shape. That's the precondition for the demotion below.
+    let mut name_above_pose = false;
 
     let mut current = Some(Path::new(dir_path));
     while let Some(dir) = current {
@@ -416,6 +425,20 @@ fn infer_model_identity(root: &Path, dir_path: &str) -> InferredModel {
         }
         if let Some(status) = support_from_segment(&segment) {
             support_status.get_or_insert_with(|| status.to_string());
+            // Demotion: in `Butterfly Cavalry/Supported/Spear/A` the climb
+            // reads A (pose) then Spear (name candidate) then this support
+            // segment — but a "name" wedged between a pose below and support
+            // above is a weapon/mount facet, not the model. Demote it to
+            // variant and keep climbing for the real name. The knights' flat
+            // `Supported/A/Spear` shape is untouched: there the name is the
+            // leaf itself, found before any pose, so name_above_pose stays
+            // false and "Spear" remains the group (combine handles those).
+            if name_above_pose && variant.is_none() {
+                variant = base_name.take().map(|name| {
+                    variant_dir = base_dir.take();
+                    name
+                });
+            }
         } else if base_name.is_none() {
             // Pose markers only count BELOW the name: once a real name is
             // found, a short ancestor dir is a collection, not a variant
@@ -430,11 +453,20 @@ fn infer_model_identity(root: &Path, dir_path: &str) -> InferredModel {
                 if let Some(p) = trailing {
                     pose.get_or_insert(p);
                 }
+                name_above_pose = pose.is_some();
                 base_name = Some(base);
                 base_dir = Some(dir.to_string_lossy().into_owned());
             }
         }
         current = dir.parent();
+    }
+
+    // A demotion that never found a real name above the support tier (hit
+    // the scan root first) is undone — better the old leaf-derived name
+    // than an empty one.
+    if base_name.is_none() && variant.is_some() {
+        base_name = variant.take();
+        base_dir = variant_dir.take();
     }
 
     // nothing but packaging all the way up: keep the old leaf-dir name
@@ -446,14 +478,21 @@ fn infer_model_identity(root: &Path, dir_path: &str) -> InferredModel {
                 .unwrap_or_else(|| dir_path.to_string()),
         )
     });
-    let name = match &pose {
-        Some(p) if base_name.is_some() => format!("{} {}", group_name, p),
-        _ => group_name.clone(),
+    // Member display name carries the distinguishing facets: variant first
+    // ("Butterfly Cavalry Spear A"), pose last — matching the tier order.
+    let name = if base_name.is_some() {
+        let mut parts = vec![group_name.clone()];
+        parts.extend(variant.clone());
+        parts.extend(pose.clone());
+        parts.join(" ")
+    } else {
+        group_name.clone()
     };
 
     InferredModel {
         name,
         group_name,
+        variant,
         pose,
         support_status,
         release_date,
@@ -919,6 +958,36 @@ mod tests {
         assert_eq!(inferred.support_status.as_deref(), Some("supported"));
         let inferred = infer_model_identity(root, "/lib/dryad dragon/unsupported chitu");
         assert_eq!(inferred.support_status.as_deref(), Some("unsupported"));
+    }
+
+    #[test]
+    fn a_name_between_support_and_pose_is_a_variant_not_a_model() {
+        let root = Path::new("/lib");
+
+        // Model / Support / Variant / Pose (DTL's cavalry shape): "Spear" is
+        // a weapon facet of Butterfly Cavalry, not a model called Spear —
+        // grouping it as one merged every spear-armed model in the library
+        let inferred =
+            infer_model_identity(root, "/lib/unicorn_pt.1/Butterfly Cavalry/Supported/Spear/A");
+        assert_eq!(inferred.group_name, "Butterfly Cavalry");
+        assert_eq!(inferred.variant.as_deref(), Some("Spear"));
+        assert_eq!(inferred.pose.as_deref(), Some("A"));
+        assert_eq!(inferred.support_status.as_deref(), Some("supported"));
+        assert_eq!(inferred.name, "Butterfly Cavalry Spear A");
+
+        // The flat release-root shape (Support / Pose / Weapon) does NOT
+        // demote: the name is the leaf, found before any pose, so combines
+        // keyed on these weapon groups keep working
+        let inferred = infer_model_identity(root, "/lib/unicorn_pt.1/Supported/A/Spear");
+        assert_eq!(inferred.group_name, "Spear");
+        assert!(inferred.variant.is_none());
+
+        // A demotion with nothing nameable above the support tier is undone
+        // (scan root reached): better the leaf-derived name than none
+        let inferred = infer_model_identity(root, "/lib/Supported/Spear/A");
+        assert_eq!(inferred.group_name, "Spear");
+        assert!(inferred.variant.is_none());
+        assert_eq!(inferred.pose.as_deref(), Some("A"));
     }
 
     #[test]
