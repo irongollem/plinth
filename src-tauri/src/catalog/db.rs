@@ -1868,6 +1868,117 @@ pub fn move_model(conn: &mut Connection, from: &str, to: &str) -> Result<(), App
     Ok(())
 }
 
+/// Repoint every indexed path under `from` (a directory) to live under
+/// `to` — the normalizer's whole-tree cousin of move_model. Covers the
+/// tables move_model predates: file_variants, variant_previews (whose
+/// variant_key embeds the dir path ahead of a \u{1f} separator) and
+/// group_covers. PK columns update OR IGNORE + sweep so a collision can't
+/// abort the batch. FTS rows for moved dirs are dropped here and rebuilt
+/// once at finalize — per-row refresh during a thousand-move batch would
+/// be pure waste.
+pub fn move_tree_index(conn: &mut Connection, from: &str, to: &str) -> Result<(), AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Catalog tree move failed: {}", e));
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let tx = conn.transaction().map_err(map_err)?;
+    {
+        // (table, column, part_of_primary_key)
+        let columns: &[(&str, &str, bool)] = &[
+            ("files", "path", true),
+            ("files", "dir_path", false),
+            ("models", "dir_path", true),
+            ("models", "preview_path", false),
+            ("model_tags", "dir_path", true),
+            ("model_user_meta", "dir_path", true),
+            ("model_user_meta", "preview_path", false),
+            ("file_variants", "path", true),
+            ("file_variants", "dir_path", false),
+            ("variant_previews", "variant_key", true),
+            ("variant_previews", "dir_path", false),
+            ("variant_previews", "preview_path", false),
+            ("group_covers", "dir_path", false),
+            ("group_covers", "variant_key", false),
+        ];
+        for (table, column, is_pk) in columns {
+            let verb = if *is_pk { "UPDATE OR IGNORE" } else { "UPDATE" };
+            // substr comparison instead of LIKE: paths may contain % or _.
+            // char(31) is the variant_key separator — a dir prefix can be
+            // followed by either a path separator or that marker.
+            let predicate = format!(
+                "{c} = ?1 OR substr({c}, 1, length(?1) + 1) = ?1 || ?3
+                       OR substr({c}, 1, length(?1) + 1) = ?1 || char(31)",
+                c = column
+            );
+            tx.execute(
+                &format!(
+                    "{verb} {table} SET {c} = ?2 || substr({c}, length(?1) + 1) WHERE {p}",
+                    verb = verb,
+                    table = table,
+                    c = column,
+                    p = predicate
+                ),
+                params![from, to, sep],
+            )
+            .map_err(map_err)?;
+            if *is_pk {
+                // whatever still matches collided with an existing row
+                // (?2 is unused by the predicate but keeps the indexes aligned)
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE {p}", table = table, p = predicate),
+                    params![from, to, sep],
+                )
+                .map_err(map_err)?;
+            }
+        }
+        tx.execute(
+            "DELETE FROM models_fts
+             WHERE dir_path = ?1 OR substr(dir_path, 1, length(?1) + 1) = ?1 || ?2",
+            params![from, sep],
+        )
+        .map_err(map_err)?;
+    }
+    tx.commit().map_err(map_err)
+}
+
+/// Repoint one file's index rows after a per-file move/rename.
+pub fn move_file_index(conn: &mut Connection, from: &str, to: &str) -> Result<(), AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Catalog file move failed: {}", e));
+    let to_path = std::path::Path::new(to);
+    let dir = to_path
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = to_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tx = conn.transaction().map_err(map_err)?;
+    {
+        tx.execute(
+            "UPDATE OR IGNORE files SET path = ?2, dir_path = ?3, file_name = ?4 WHERE path = ?1",
+            params![from, to, dir, name],
+        )
+        .map_err(map_err)?;
+        tx.execute("DELETE FROM files WHERE path = ?1", [from])
+            .map_err(map_err)?;
+        tx.execute(
+            "UPDATE OR IGNORE file_variants SET path = ?2, dir_path = ?3 WHERE path = ?1",
+            params![from, to, dir],
+        )
+        .map_err(map_err)?;
+        tx.execute("DELETE FROM file_variants WHERE path = ?1", [from])
+            .map_err(map_err)?;
+    }
+    tx.commit().map_err(map_err)
+}
+
+/// Rebuild the FTS index from scratch — the batch-move closer.
+pub fn rebuild_search_index(conn: &Connection) -> Result<(), AppError> {
+    rebuild_fts(conn)
+        .map_err(|e| AppError::ConfigError(format!("Search index rebuild failed: {}", e)))
+}
+
 /// Schema init for in-memory test databases in sibling modules.
 #[cfg(test)]
 pub(crate) fn test_init(conn: &Connection) {

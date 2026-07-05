@@ -1,6 +1,8 @@
 pub mod commands;
 pub mod db;
 pub mod dups;
+pub mod layout;
+pub mod normalize;
 pub mod scanner;
 
 use serde::{Deserialize, Serialize};
@@ -136,6 +138,48 @@ pub struct CatalogGroupResult {
 pub struct DesignerCount {
     pub designer: String,
     pub model_count: u32,
+}
+
+/// One planned normalizer action. `kind`: "dir" renames a whole folder
+/// (hardlink-safe), "file" moves/renames one file, "pose" only records
+/// file-level pose metadata (no filesystem side). `pose` rides along on
+/// file ops when a pose-dir merge bakes the pose into the file name.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct NormalizeOp {
+    pub from: String,
+    pub to: String,
+    pub kind: String,
+    pub pose: Option<String>,
+}
+
+/// Everything the normalizer wants to do to ONE model group — shown to the
+/// user as a reviewable diff before anything moves.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct NormalizeGroupPlan {
+    pub group_name: String,
+    pub designer: String,
+    pub target_dir: String,
+    pub ops: Vec<NormalizeOp>,
+    /// Source dirs to sweep (if emptied) after the moves.
+    pub old_dirs: Vec<String>,
+    /// Human-readable caveats (name clashes, folders left in place).
+    pub notes: Vec<String>,
+    pub clean: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct NormalizeSkip {
+    pub group_name: String,
+    pub reason: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct NormalizePlan {
+    /// Groups with work to do (already-clean groups are only counted).
+    pub groups: Vec<NormalizeGroupPlan>,
+    pub skipped: Vec<NormalizeSkip>,
+    pub total_ops: u32,
+    pub clean_groups: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

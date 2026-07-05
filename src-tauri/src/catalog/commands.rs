@@ -16,9 +16,9 @@ use tauri_specta::Event;
 use uuid::Uuid;
 
 use super::{
-    db, dups, scanner, BatchOutcome, CatalogEntry, CatalogFile, CatalogGroupResult,
+    db, dups, normalize, scanner, BatchOutcome, CatalogEntry, CatalogFile, CatalogGroupResult,
     CatalogSearchResult, CatalogStats, DesignerCount, DuplicateGroup, FileVariant, ModelMetaUpdate,
-    MoveOperation, ReleaseSummary, TagCount,
+    MoveOperation, NormalizeOp, NormalizePlan, ReleaseSummary, TagCount,
 };
 
 /// Scan and duplicate jobs share one registry; both cancel through
@@ -776,6 +776,57 @@ pub async fn supports_file_links(path: String) -> Result<bool, AppError> {
     tauri::async_runtime::spawn_blocking(move || Ok(dups::supports_links(Path::new(&path))))
         .await
         .map_err(|e| AppError::ConfigError(format!("Probe task failed: {}", e)))?
+}
+
+/// Dry-run the normalizer: what would move where to make the disk match
+/// the curated catalog. Read-only — nothing happens until apply.
+#[tauri::command]
+#[specta::specta]
+pub async fn plan_normalize(
+    app_handle: AppHandle,
+    root: String,
+    designer: Option<String>,
+) -> Result<NormalizePlan, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        normalize::plan(&conn, Path::new(&root), designer.as_deref())
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Normalize plan task failed: {}", e)))?
+}
+
+/// Execute approved normalizer moves. The frontend sends these in chunks
+/// so a big NAS batch shows progress and stays cancellable between calls.
+#[tauri::command]
+#[specta::specta]
+pub async fn apply_normalize(
+    app_handle: AppHandle,
+    ops: Vec<NormalizeOp>,
+) -> Result<BatchOutcome, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = open_db(&app_handle)?;
+        normalize::apply_ops(&mut conn, &ops)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Normalize apply task failed: {}", e)))?
+}
+
+/// After the moves: write authoritative model.json sidecars, sweep emptied
+/// dirs, rebuild search. Returns human-readable warnings.
+#[tauri::command]
+#[specta::specta]
+pub async fn finalize_normalize(
+    app_handle: AppHandle,
+    root: String,
+    group_names: Vec<String>,
+    old_dirs: Vec<String>,
+) -> Result<Vec<String>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        normalize::finalize(&conn, Path::new(&root), &group_names, &old_dirs)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Normalize finalize task failed: {}", e)))?
 }
 
 #[tauri::command]
