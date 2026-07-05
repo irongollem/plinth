@@ -162,6 +162,41 @@ fn files_in_dir(conn: &Connection, dir: &str) -> Result<Vec<FileRowLite>, AppErr
     Ok(rows)
 }
 
+/// Every indexed file rooted at `dir` OR nested anywhere beneath it —
+/// `files_in_dir`'s recursive cousin. Some designers ship a preview beside
+/// an "Images"/"renders" sibling folder rather than directly at the model
+/// root; an exact-dir lookup would never see it.
+fn files_under_tree(conn: &Connection, dir: &str) -> Result<Vec<FileRowLite>, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Normalize file query failed: {}", e));
+    let sep = MAIN_SEPARATOR.to_string();
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, file_name FROM files
+             WHERE dir_path = ?1 OR substr(dir_path, 1, length(?1) + 1) = ?1 || ?2
+             ORDER BY path",
+        )
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map(rusqlite::params![dir, sep], |row| {
+            Ok(FileRowLite {
+                path: row.get(0)?,
+                file_name: row.get(1)?,
+            })
+        })
+        .map_err(map_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
+fn is_image_file(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| super::IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+}
+
 /// The same bytes in two places? Hardlinked names are trivially identical
 /// (one inode); otherwise size then a full BLAKE3 compare settles it. Only
 /// ever called for name CLASHES, so the hashing cost stays negligible.
@@ -539,7 +574,7 @@ pub fn apply_ops(conn: &mut Connection, ops: &[NormalizeOp]) -> Result<BatchOutc
                 errors.push(format!("Failed to remove duplicate {}: {}", op.from, e));
                 continue;
             }
-            match super::db::remove_files(conn, &[op.from.clone()]) {
+            match super::db::remove_files(conn, std::slice::from_ref(&op.from)) {
                 Ok(()) => succeeded += 1,
                 Err(e) => errors.push(format!(
                     "Removed duplicate {} but failed to update the catalog (rescan to fix): {}",
@@ -645,18 +680,27 @@ pub fn finalize(
         );
         let model_dir_str = model_dir.to_string_lossy().into_owned();
 
-        // images at the model root are referenced relatively from each leaf
-        let root_images: Vec<String> = files_in_dir(conn, &model_dir_str)?
+        // Images anywhere under the model dir — the root itself, or a
+        // sibling folder like "Images"/"renders" some designers ship
+        // beside Supported/Unsupported — are candidate fallback previews.
+        // Excludes anything already inside a member's own leaf: that image
+        // is that member's OWN preview (own_images below), not a shared one.
+        let member_dirs: HashSet<&str> = members.iter().map(|m| m.dir.as_str()).collect();
+        let root_images: Vec<String> = files_under_tree(conn, &model_dir_str)?
             .into_iter()
+            .filter(|f| is_image_file(&f.file_name))
             .filter(|f| {
-                Path::new(&f.file_name)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| {
-                        super::IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str())
-                    })
+                let file_dir = Path::new(&f.path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                !member_dirs.iter().any(|m| is_under(&file_dir, m))
             })
-            .map(|f| f.file_name)
+            .map(|f| {
+                f.path[model_dir_str.len()..]
+                    .trim_start_matches(MAIN_SEPARATOR)
+                    .to_string()
+            })
             .collect();
 
         for member in &members {
@@ -741,15 +785,12 @@ fn write_member_json(
         })
         .collect();
 
-    // image references: own images first, else the model-root ones a level up
+    // image references: own images first, else a root/sibling one found by
+    // finalize — reached via "../" x (this leaf's depth below model_dir),
+    // since root_images entries are already model_dir-relative subpaths
     let own_images: Vec<String> = files_in_dir(conn, &member.dir)?
         .into_iter()
-        .filter(|f| {
-            Path::new(&f.file_name)
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| super::IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
-        })
+        .filter(|f| is_image_file(&f.file_name))
         .map(|f| f.file_name)
         .collect();
     let images: Vec<String> = if !own_images.is_empty() {
@@ -1109,6 +1150,77 @@ mod tests {
         assert!(warnings.is_empty(), "{:?}", warnings);
         // the emptied part folders are gone
         assert!(!root.join("unicorn").exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn preview_in_a_sibling_images_folder_is_not_lost() {
+        // Some designers ship a promo thumbnail beside Supported/Unsupported
+        // in its own "Images" folder rather than directly at the model
+        // root. Before the fix, finalize's root-image lookup was an EXACT
+        // dir match, so it never saw a nested sibling folder — the
+        // authoritative model.json ended up with no images at all, and the
+        // scanner (which trusts model.json completely once it exists) lost
+        // the preview on the very next rescan.
+        let root = std::env::temp_dir().join(format!("plinth_norm_img_{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let old = root.join("Collector of Names");
+        let sup = old.join("Supported");
+        let unsup = old.join("Unsupported");
+        let images = old.join("Images");
+        touch(&sup.join("names.lys"));
+        touch(&unsup.join("names.stl"));
+        touch(&images.join("Product Thumbnail - Collector of Names.jpg"));
+
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::test_init(&conn);
+        let mut sup_row = model_row(&sup, "Collector of Names supported", "Collector of Names");
+        sup_row.support_status = Some("supported".into());
+        let mut unsup_row = model_row(&unsup, "Collector of Names", "Collector of Names");
+        unsup_row.support_status = Some("unsupported".into());
+        let files = vec![
+            file_row(&sup.join("names.lys"), &sup),
+            file_row(&unsup.join("names.stl"), &unsup),
+            file_row(
+                &images.join("Product Thumbnail - Collector of Names.jpg"),
+                &images,
+            ),
+        ];
+        db::replace_catalog(&mut conn, &files, &[sup_row, unsup_row], &[], &[]).unwrap();
+
+        let plan = plan(&conn, &root, None, None).unwrap();
+        let group = &plan.groups[0];
+        let outcome = apply_ops(&mut conn, &group.ops).unwrap();
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+
+        let target = root.join("Bestiarum/2026-07 Dread Swamp/Collector of Names");
+        // the Images folder rides along with the wholesale move, untouched
+        assert!(target
+            .join("Images/Product Thumbnail - Collector of Names.jpg")
+            .is_file());
+
+        let warnings = finalize(
+            &conn,
+            &root,
+            &["Collector of Names".to_string()],
+            &group.old_dirs,
+        )
+        .unwrap();
+        assert!(warnings.is_empty(), "{:?}", warnings);
+
+        for leaf in ["Supported", "Unsupported"] {
+            let meta: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(target.join(leaf).join("model.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                meta["images"][0],
+                "../Images/Product Thumbnail - Collector of Names.jpg",
+                "{} lost its preview reference",
+                leaf
+            );
+        }
 
         fs::remove_dir_all(&root).ok();
     }
