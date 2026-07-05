@@ -18,7 +18,8 @@ use catalog::commands::{
     update_model_metadata,
 };
 use file::commands::{
-    add_model, cancel_compression, create_release, finalize_release, open_with_default_app,
+    add_model, cancel_compression, create_release, finalize_release, import_release,
+    open_with_default_app,
 };
 use models::events::{CompressionStatus, DuplicateStatus, RenderStatus, ScanStatus};
 use render::commands::{cancel_render, detect_blender, start_render};
@@ -54,6 +55,7 @@ fn create_specta_builder() -> Builder {
             finalize_release,
             cancel_compression,
             open_with_default_app,
+            import_release,
             settings::get_settings,
             settings::set_settings,
             detect_blender,

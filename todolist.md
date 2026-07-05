@@ -41,18 +41,18 @@ the remaining half and depends on the release-builder flow settling first.
 
 - [x] Enrich what `add_model` writes to `model.json`: `StlModel` carries the full curation (variant/pose/scale/support/designer/sculptor/release_name/release_date + `file_poses`), `addToDraftRelease` stages it from the catalog (incl. per-file assignments filtered to the member's own files), `add_model` passes it through untouched, and `pack_manifest` maps it onto `ManifestModel`/`ManifestFile` (with release-level fallbacks for designer/date/name). `ManifestModel` gained the additive `variant` field.
 - [x] Container `manifest.json` in `release.3pk`: one component per group with a BLAKE3 archive checksum + per-file checksums, built at pack time (`file/pack_manifest.rs`, sequenced components → manifest → 3pk in `compression_jobs`) with the Phase-4 checksum-dedup folded in. Emits null for the fields `model.json` doesn't carry yet — filled by the enrichment bullet above.
-- [ ] Wire the finalize flow to emit the manifest and verify round-trip: pack → scan on a clean profile → curation restored.
+- [x] Wire the finalize flow to emit the manifest and verify round-trip: finalize packs manifest.json into release.3pk; `import_release` verifies checksums, extracts with dedup rematerialized, and the scanner restores curation from the sidecars. Tested end-to-end (pack → import → tree + curation intact; tampered archive refused).
 
 ### Modular Package Strategy Implementation
 
 - [ ] Create a modular compression system that packages each group separately
 - [ ] Create update detection system that compares local files with metadata checksums
 - [ ] Add selective download functionality to only retrieve changed/new components
-- [ ] Design reconstruction tool UI for end users to assemble downloaded components
+- [x] Reconstruction v1: opening/dropping a release.3pk imports it — confirm dialog → library dir (catalog root default) → checksum-verified extraction → auto-scan restores curation. (Selective per-component UI still open below.)
 - [ ] Implement preview generation for .3dpak files (thumbnail/icon)
 - [ ] Create documentation for creators explaining the modular release strategy
 - [ ] Add bandwidth estimation and progress indicators for partial downloads
-- [ ] Implement integrity verification for downloaded components
+- [x] Implement integrity verification for downloaded components (import_release refuses any component whose archive bytes don't match the manifest's blake3)
 - [ ] Create a manifest generator that builds the .3dpak file from component ZIPs
 
 ## Done
