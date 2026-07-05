@@ -212,11 +212,17 @@ pub fn scan(
             .or_else(|| descendant_image(&dirs, dir_path));
         let (name, description, uuid, source, preview, inferred) = match &info.metadata {
             Some(meta) => {
-                // model.json image paths are relative to the model dir
+                // model.json image paths are relative to the model dir —
+                // and often climb ("../render.png" from a build folder up
+                // to the model root). The joined path must be NORMALIZED:
+                // the asset protocol refuses raw `..` segments (traversal
+                // guard), so a stored ".../Supported/../render.png" is a
+                // preview that silently never loads even though is_file()
+                // happily said yes.
                 let preview = meta
                     .images
                     .first()
-                    .map(|rel| Path::new(dir_path).join(rel))
+                    .map(|rel| normalize_join(Path::new(dir_path), rel))
                     .filter(|p| p.is_file())
                     .map(|p| p.to_string_lossy().into_owned())
                     .or(own_image);
@@ -329,6 +335,24 @@ pub fn scan(
         metadata_tags,
         metadata_file_variants,
     })
+}
+
+/// Join `rel` onto `base` and lexically resolve `.`/`..` segments so the
+/// stored path is clean. Purely lexical on purpose: fs::canonicalize would
+/// also resolve symlinks, silently rewriting NAS mount paths into whatever
+/// the server exports.
+fn normalize_join(base: &Path, rel: &str) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for comp in base.join(rel).components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// First image found in any subdirectory of `dir_path`. BTreeMap keys are
@@ -831,6 +855,47 @@ mod tests {
         assert_eq!(m.sculptor.as_deref(), Some("A. Artist"));
         assert_eq!(m.release_name.as_deref(), Some("Order of the Unicorn"));
         assert_eq!(m.release_date.as_deref(), Some("2026-05"));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn relative_image_refs_normalize_to_clean_paths() {
+        // The normalizer's sidecars reference the model-root render from a
+        // build folder as "../render.png". Storing the joined path RAW kept
+        // the ".." segment — and the asset protocol refuses traversal
+        // segments, so every such preview silently failed to load in the
+        // UI (broken card image after each cleanup) while is_file() and
+        // the DB row both looked perfectly healthy.
+        let root = std::env::temp_dir().join(format!("stlpack_relimg_{}", std::process::id()));
+        let sup = root.join("ashtok/Supported");
+        fs::create_dir_all(&sup).unwrap();
+        fs::write(sup.join("ashtok.stl"), b"solid").unwrap();
+        fs::write(root.join("ashtok/render.png"), b"png").unwrap();
+        fs::write(
+            sup.join("model.json"),
+            r#"{"name":"Ashtok","images":["../render.png"]}"#,
+        )
+        .unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let outcome = scan(&root, &cancel, &[], |_, _| {}).unwrap();
+        let m = outcome
+            .models
+            .iter()
+            .find(|m| m.name == "Ashtok")
+            .expect("metadata model");
+        let preview = m.preview_path.as_deref().expect("preview resolved");
+        assert!(
+            !preview.contains(".."),
+            "preview path must be normalized: {}",
+            preview
+        );
+        assert_eq!(
+            preview,
+            root.join("ashtok/render.png").to_string_lossy(),
+            "must point at the real file"
+        );
 
         fs::remove_dir_all(&root).ok();
     }
