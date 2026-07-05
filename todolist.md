@@ -10,7 +10,7 @@
 - [ ] Batch render mode: manifest of many minis in ONE Blender launch (see raw/HANDOVER.md, biggest speed win for terabyte-scale cataloging)
 - [ ] Store chosen rotation in model metadata (`model.json`) so catalog re-renders don't need repositioning
 - [ ] Scale reference figure / true-scale rendering (handover roadmap; current look normalizes size)
-- [ ] Sidecar JSON per render (dimensions mm, parts, rotation) for future catalog search
+- [ ] Measured geometry into model.json (NOT a separate sidecar): dimensions mm, part count, chosen rotation — computed at render/parse time, stored in the same model.json the 3pk manifest and scanner already round-trip, so it becomes searchable catalog metadata for free
 - [x] Promo overlay compositing: branding (logo image + title/credit text) now bakes into the output PNG after Blender finishes — the webview composites on a canvas (same font engine as the preview = guaranteed WYSIWYG; no bundled fonts, no Rust glyph layout), Rust writes it back atomically with PNG-magic + exists guards. Ink color auto-picks dark/light by sampling the pixels under the text.
 - [ ] render_mini.py uses `use_nodes` (deprecated, removal in Blender 6.0) — needs a tweak when 6.x lands
 - [ ] Parse STLs in a Web Worker: mergeVertices on million-triangle minis still freezes the main thread during load (the overlay paints now, but a worker would keep the UI fully responsive)
