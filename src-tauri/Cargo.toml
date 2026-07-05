@@ -28,10 +28,14 @@ smartcrop2 = "0.4.0"
 specta = "2.0.0-rc.22"
 specta-typescript = "0.0.9"
 tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-opener = "2"
+# Plugin crates MUST stay in step with their @tauri-apps/plugin-* JS package —
+# the two sides share an IPC wire format that drifts across minors. A skew is
+# silent and nasty: dialog crate 2.2 + JS 2.7 showed confirm() dialogs whose
+# every answer resolved false. Exact-pin the proven pairs; bump both together.
+tauri-plugin-opener = "=2.2.6" # JS pinned 2.2.7; newer crate breaks reveal
 tauri-plugin-store = "2.2.0"
 tauri-plugin-fs = "2"
-tauri-plugin-dialog = "2"
+tauri-plugin-dialog = "=2.7.1" # JS 2.7.1; older crate answers confirm() as bool, JS expects button label
 tauri-plugin-os = "2"
 tauri-specta = { version = "2.0.0-rc.21", features = ["typescript", "derive"] }
 tokio = { version = "1.44.2", features = [
