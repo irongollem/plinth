@@ -143,6 +143,35 @@ struct FileRowLite {
     file_name: String,
 }
 
+/// Rebuild `computed` segment by segment from `root`, adopting the exact
+/// casing of any directory that already exists along the way. Metadata
+/// carries display case (an old sidecar said "AELVES - THE FARWOOD"; the
+/// disk says "Aelves - The Farwood") — fighting the difference produces
+/// ghost renames that never converge on case-insensitive volumes, and
+/// would fork a SECOND tree on case-sensitive ones (the NAS). Existing
+/// dirs win; metadata case only ever names dirs that don't exist yet.
+fn adopt_disk_casing(root: &Path, computed: &Path) -> PathBuf {
+    let Ok(rel) = computed.strip_prefix(root) else {
+        return computed.to_path_buf();
+    };
+    let mut out = root.to_path_buf();
+    for comp in rel.components() {
+        let want = comp.as_os_str().to_string_lossy().into_owned();
+        let existing = std::fs::read_dir(&out).ok().and_then(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.file_name())
+                .find(|n| n.to_string_lossy().eq_ignore_ascii_case(&want))
+        });
+        match existing {
+            Some(name) => out.push(name),
+            None => out.push(comp),
+        }
+    }
+    out
+}
+
 fn is_image_file(name: &str) -> bool {
     Path::new(name)
         .extension()
@@ -360,12 +389,15 @@ pub fn plan(
         };
         let release = first_some(members, |r| r.release.as_ref());
         let date = first_some(members, |r| r.date.as_ref());
-        let model_dir = layout::model_dir(
+        let model_dir = adopt_disk_casing(
             root,
-            &designer,
-            release.as_deref(),
-            date.as_deref(),
-            &display,
+            &layout::model_dir(
+                root,
+                &designer,
+                release.as_deref(),
+                date.as_deref(),
+                &display,
+            ),
         );
         let model_dir_str = model_dir.to_string_lossy().into_owned();
 
@@ -767,12 +799,17 @@ pub fn finalize(
         let release = first_some(&refs, |r| r.release.as_ref());
         let date = first_some(&refs, |r| r.date.as_ref());
         let display = members[0].gname.clone();
-        let model_dir = layout::model_dir(
+        // adopt existing casing here too, or the image walk misses the
+        // real dir on case-sensitive volumes
+        let model_dir = adopt_disk_casing(
             root,
-            &designer,
-            release.as_deref(),
-            date.as_deref(),
-            &display,
+            &layout::model_dir(
+                root,
+                &designer,
+                release.as_deref(),
+                date.as_deref(),
+                &display,
+            ),
         );
         let model_dir_str = model_dir.to_string_lossy().into_owned();
 
@@ -1377,6 +1414,42 @@ mod tests {
                 leaf
             );
         }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn metadata_casing_defers_to_existing_dirs() {
+        // An old sidecar said release "AELVES - THE FARWOOD"; the folder on
+        // disk says "2026-05 Aelves - The Farwood". Deriving the target from
+        // metadata case-sensitively made the group permanently 'dirty' with
+        // ghost moves into a path that IS the same dir on macOS — and would
+        // fork a second tree on the case-sensitive NAS. Existing dirs win;
+        // metadata case only names dirs that don't exist yet.
+        let root = std::env::temp_dir().join(format!("plinth_norm_case_{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let sup = root.join("Dragon Trappers/2026-05 Aelves - The Farwood/Centaurs/Supported");
+        fs::create_dir_all(&sup).unwrap();
+        fs::write(sup.join("centaur.lys"), b"x").unwrap();
+
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::test_init(&conn);
+        let mut row = model_row(&sup, "Centaurs", "Centaurs");
+        row.designer = Some("Dragon Trappers".into());
+        row.release_name = Some("AELVES - THE FARWOOD".into());
+        row.release_date = Some("2026-05".into());
+        row.support_status = Some("supported".into());
+        let files = vec![file_row(&sup.join("centaur.lys"), &sup)];
+        db::replace_catalog(&mut conn, &files, &[row], &[], &[]).unwrap();
+
+        let plan = plan(&conn, &root, None, None).unwrap();
+        assert_eq!(
+            plan.groups.len(),
+            0,
+            "ghost moves planned: {:?}",
+            plan.groups
+        );
+        assert_eq!(plan.clean_groups, 1);
 
         fs::remove_dir_all(&root).ok();
     }
