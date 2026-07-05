@@ -1,128 +1,171 @@
-# Plinth Cataloger — Feature Spec & Architecture
+# Plinth Cataloger — Architecture
 
-Plinth grows from a release bundler into a disk-scale 3D model manager.
+Plinth grew from a release bundler into a disk-scale 3D model manager.
 The cataloger indexes terabytes of STLs, makes them searchable in
-milliseconds, and becomes the hub the other features (render, bundle,
-unbundle) hang off.
+milliseconds, and is the hub the other features (render, bundle,
+import) hang off.
 
-## Feature list
+This documents what is **built**. Open work lives in `todolist.md` —
+the single source of truth for the roadmap; nothing is planned here.
 
-### v1 (this iteration)
+## What the catalog does today
 
-- **Index the entire disk** — pick a catalog root, scan it in the
+- **Index the entire disk** — pick a catalog root, scan in the
   background with progress/cancel (same job pattern as compression and
   rendering). Model files recognized: stl, obj, 3mf, lys, chitubox,
-  blend, gcode. Full rescan is idempotent and preserves user-added data.
-- **Read our metadata** — `model.json` / `release.json` sidecars written
-  by the bundler are imported: names, descriptions, tags, designer,
-  release, image previews. Folders without metadata are cataloged
-  heuristically (directory = model, dir name = model name, first image =
-  preview).
-- **Preview** — every model card shows its best image (metadata image or
-  first image in the folder); the detail pane can open the live 3D
-  viewport (the Render tab's StlViewport) on any STL, no Blender needed.
-- **Tag system** — tags from metadata are imported automatically;
-  user tags can be added/removed in the UI and survive rescans (keyed by
-  folder, not by scan-generated ids). Tag filter chips in search.
-- **Fast search** — SQLite FTS5 over name/description/tags/path with
-  prefix matching ("bug" finds Bugbear), combined with tag filters,
-  paginated grid results.
-- **Print (v1)** — a Print button on a model reveals its folder in
-  Finder/Explorer so you can drag files into your slicer.
-- **Disk stats** — total models/files/bytes, breakdown per extension,
-  last scan time.
-- **Duplicate detection** — same-size prefilter, then staged content
-  hashing (first 128 KiB, then full BLAKE3 only on candidates), grouped
-  report with paths and wasted bytes. Hashes are stored so repeat runs
-  are cheap.
+  blend, gcode. A full rescan is idempotent and preserves user-added
+  data (tags, metadata overrides, renames, pose assignments).
+- **Logical models (groups)** — variant dirs sharing a scanner group
+  (supported/unsupported builds, poses A/B/C) collapse into ONE card
+  with aggregate counts. Cards can be renamed, combined, and split;
+  renames are stored against scanner-level source groups so they
+  survive rescans.
+- **Poses as metadata, not folders** — a "dump everything in one
+  folder" model can be split by assigning files to variant/pose
+  buckets (`file_variants`); the folder then fans out into one member
+  per pose at query time. Files never move on disk for this.
+- **Search + facets** — FTS5 (prefix matching) over
+  name/description/tags/designer/sculptor/release/path, tag chips, an
+  exact designer facet, and designer › release grouping (releases A–Z
+  or newest-first, parsed from the M/YYYY release date in SQL).
+- **Metadata round-trip** — `model.json` / `release.json` sidecars are
+  read on scan and written on pack, so curation travels with a release
+  from one user's catalog to the next (see the contract below and
+  docs/3PK.md).
+- **Print** — the PRINT button opens a file picker (pre-sliced
+  .lys/.chitu scenes pre-selected over raw geometry) and hands the
+  ticked files to the OS-associated slicer; a `reveal-folder` setting
+  keeps the old reveal-in-Finder flow for multi-slicer users.
+- **Duplicates: share, don't delete** — same-size prefilter, staged
+  BLAKE3 hashing, then "merge — free X MB" hardlinks duplicates so
+  every variant keeps a working file (inode-aware: already-shared
+  groups report 0 reclaimable). Link support is probed per volume with
+  a real test link — never assumed (NAS/SMB/exFAT). Delete remains for
+  link-less volumes.
+- **3pk import** — opening/dropping a release.3pk verifies checksums,
+  extracts with dedup rematerialized, and auto-scans so the release's
+  curation lands in the catalog.
+- **Render integration** — any member's STLs open in the Render studio;
+  the finished promo (with branding baked in) becomes that member's
+  preview, per pose (`variant_previews`) or per card (`group_covers`).
 
-### v2 / roadmap (deliberately not in this iteration)
+## The `model.json` contract (interchange format)
 
-- **Send to slicer** — detect installed slicers (Lychee, Chitubox,
-  PrusaSlicer, Cura) and open the file directly (`open -a` /
-  registered handler). Falls back to v1 reveal.
-- **Active duplicate prevention** — hash on import (Add STL flow) and
-  warn "this file already exists in release X" before copying.
-- **Incremental scanning & watch mode** — mtime/size short-circuit for
-  unchanged files; filesystem watcher keeps the index live.
-- **Multi-root catalogs** — several disks/folders in one index.
-- **Batch promo rendering** — one Blender launch renders thumbnails for
-  every un-previewed model in the catalog (manifest mode from the
-  render handover); stored rotation per model.
-- **Collections & favorites** — arbitrary groupings ("Painted", "Next
-  print"), print history.
-- **Unbundle integration** — .3dpak archives listed in the catalog and
-  extractable in place.
-- **Health checks** — corrupt/zero-byte STL detection, orphaned
-  metadata, empty dirs, cleanup suggestions.
-- **Promo overlay compositing** — the Render studio's branding panel
-  (logo watermark + text overlay: position/font/size) is built and
-  previews live over the viewport, but isn't baked into the output PNG
-  yet. Needs a font-rendering approach + a Rust-side compositing design
-  (the `image` crate + a font rasterizer), so it also works in future
-  batch renders. Save both the clean and the overlaid variant.
+One `model.json` per model dir. Everything except `name` is optional —
+a minimal sidecar still parses, unknown fields are ignored. This is the
+read side of metadata portability: whatever a release was packed with
+is restored on scan (source of truth: `ModelJson` in
+`catalog/scanner.rs`, written from `StlModel` on pack).
 
-## Architecture
+```jsonc
+{
+  "id": "uuid", // stable identity across moves
+  "name": "Bog Hag",
+  "description": "…",
+  "tags": ["swamp", "hag"],
+  "images": ["preview.png"], // relative to the model dir
+  "variant": "sword", // build variant of the same sculpt
+  "pose": "A",
+  "scale": "32mm",
+  "support_status": "supported", // or "unsupported"
+  "release_date": "7/2026", // M/YYYY, as the release builder writes it
+  "designer": "Bestiarum", // studio/brand
+  "sculptor": "…", // individual artist (user/manifest only)
+  "release_name": "Dread Swamp",
+  "file_poses": [
+    // per-file split of a dump folder;
+    {
+      // restored into file_variants on scan
+      "name": "hag_arm_L.stl", // basename, matched within the dir's subtree
+      "variant": "sword",
+      "pose": "A",
+      "support_status": "supported",
+    },
+  ],
+}
+```
 
-### Storage: SQLite (rusqlite, bundled) at `app_data_dir/catalog.db`
+A `release.json` above the model dirs contributes release-level
+fallbacks (name, designer, date) to every model beneath it.
+
+## Storage: SQLite (rusqlite, bundled) at `app_data_dir/catalog.db`
 
 One file, zero admin, WAL mode so scans (writes) and searches (reads)
-run concurrently, FTS5 built in. Scale sanity: millions of file rows is
-comfortable SQLite territory.
+run concurrently, FTS5 built in. Millions of file rows is comfortable
+SQLite territory.
 
-Schema (v1):
+Schema (v5):
 
 ```sql
 files(path PK, dir_path, file_name, extension, size_bytes, modified_at,
-      content_hash NULL, indexed_at)
+      content_hash NULL,      -- staged BLAKE3, persisted so re-runs are cheap
+      file_identity NULL,     -- "device:inode" — hardlink awareness
+      indexed_at)
 models(dir_path PK, name, description, designer, release_name,
-       preview_path, source 'metadata'|'heuristic', uuid, indexed_at)
+       preview_path, source 'metadata'|'heuristic', uuid, file_count,
+       total_size_bytes, pose, scale, support_status, release_date,
+       variant, sculptor, group_name, indexed_at)
+model_user_meta(dir_path PK, custom_name, pose, scale, support_status,
+       release_date, designer, sculptor, release_name, variant)
 model_tags(dir_path, tag, source 'metadata'|'user', PK(dir_path, tag))
-models_fts(name, description, tags, dir_path)  -- FTS5, rebuilt per scan
-meta(key PK, value)                            -- schema_version, last_scan
+group_renames(source_group PK, display_name)  -- rename/combine, rescan-safe
+file_variants(path PK, dir_path, variant, pose, support_status)
+variant_previews(variant_key PK, dir_path, preview_path)  -- per-pose render
+group_covers(group_name PK, dir_path, variant_key)  -- user-picked card image
+models_fts(name, description, tags, designer, sculptor, release, dir_path)
+meta(key PK, value)  -- schema_version, last_scan
 ```
 
-Keying models/tags by `dir_path` (not autoincrement ids) is what lets a
-full rescan wipe and rebuild `files`/`models` while `source='user'` tag
-rows survive untouched.
+The dividing line that makes rescans safe: `files`/`models` are wiped
+and rebuilt by every scan; everything the **user** created
+(`model_user_meta`, user tags, `group_renames`, `file_variants`,
+`variant_previews`, `group_covers`) is keyed by path/dir/group-name and
+survives untouched. Reads resolve user overrides over scanner values
+(`COALESCE(u.x, m.x)`) everywhere.
 
-### Scanner: background job, same shape as compression/render
+Base CREATEs run on every open (only versioned migrations are gated) —
+a version stamp must never be able to hide a missing table or column;
+that failure mode locked users out of the catalog once.
 
-`start_catalog_scan` returns a job id immediately; a `scan-status` event
-stream (Started/Progress/Completed/Failed/Cancelled) drives the UI;
-cancellation via AtomicBool. The walk collects rows in memory, then a
-single transaction replaces the catalog (delete-then-insert is simpler
-and faster than row-wise upserts at v1 scale; incremental is roadmap).
-`model.json` files are parsed during the walk; images resolve to
-absolute paths at import time.
+## Scanner: background job, same shape as compression/render
 
-### Search: FTS5 with a LIKE fallback path
+`start_catalog_scan` returns a job id immediately; a `scan-status`
+event stream (Started/Progress/Completed/Failed/Cancelled) drives the
+UI; cancellation via AtomicBool. The walk collects rows in memory, then
+one transaction replaces the catalog. During the walk: `model.json` /
+`release.json` are parsed (metadata wins over heuristics), support
+status is inferred from presupported-only formats (.lys/.chitu) or
+file names, poses/variants from folder structure, and the designer is
+matched against the user-editable lexicon in settings
+(`known_designers`).
 
-Query is tokenized, each token quoted with a trailing `*` for prefix
-match. Tag filters intersect via `model_tags`. Results are pages of
-`CatalogEntry { dir_path, name, description, designer, release_name,
-preview_path, tags, file_count, total_size_kb }`.
+## Search: FTS5 + facets, grouped
 
-### Duplicates: staged hashing
+Query tokens are quoted with a trailing `*` for prefix match. Tag
+filters intersect via `model_tags`; the designer facet matches exactly
+(case-insensitive). `search_catalog_groups` returns one row per
+logical model with a caller-chosen sort (`name`, `designer`,
+`designer_date`) — sorting stays in SQL so grouping holds across
+pagination; the frontend only draws section headers where the designer
+or release changes between consecutive rows. `group_members` fans a
+group out into its variant/pose members for the detail drawer.
 
-1. `GROUP BY size_bytes HAVING count > 1` (free, from the index)
-2. hash first 128 KiB of candidates (BLAKE3)
-3. full-file hash only where partials collide
-   Hashes persist into `files.content_hash`, so the expensive step
-   amortizes. Runs as a background job with progress (hashing terabytes of
-   same-size candidates can take minutes).
+## Frontend: Catalog tab
 
-### Frontend: Catalog tab
+- Toolbar: search, designer facet, group/sort mode, list/grid toggle,
+  root picker + Scan/Cancel with progress.
+- Card grid or list, both selectable for batch move/combine.
+- Detail drawer (resizable): preview or inline 3D (opt-in per member —
+  never latched, big parses freeze the main thread), support/variant/
+  pose navigation tiers, file list with pose-assignment tooling, tag
+  editor, metadata editor (edits propagate to support twins), PRINT /
+  3D / RENDER actions.
+- Stats bar + duplicates panel (merge/delete, link-support gated).
 
-- Toolbar: root picker (persisted in settings as `catalog_root`),
-  Scan/Cancel with progress, search box, tag chips.
-- Paginated card grid (preview, name, designer, tags).
-- Detail drawer: preview, 3D view (StlViewport), file list with sizes,
-  tag editor, Print (reveal in file manager), Render shortcut.
-- Stats bar + Duplicates panel.
+## What deliberately stays out of the Rust layer
 
-### What deliberately stays out of the Rust layer
-
-Preview _images_ come from disk paths served over the asset protocol;
-the 3D preview reuses the existing StlViewport; promo rendering stays in
-the Render tab. The catalog only stores paths.
+Preview images come from disk paths served over the asset protocol;
+the 3D preview reuses StlViewport; promo rendering and branding
+compositing stay in the Render tab (the webview composites overlays —
+same font engine as the preview). The catalog stores paths, never file
+bodies.
