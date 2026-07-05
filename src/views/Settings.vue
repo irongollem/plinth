@@ -230,6 +230,7 @@ const settings = ref<Settings>({
   catalog_root: null,
   known_designers: null,
   print_action: null,
+  release_field_defaults: null,
 });
 
 // Unset means the default behavior: hand files straight to the slicer

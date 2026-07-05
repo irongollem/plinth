@@ -20,6 +20,10 @@ pub struct Settings {
     /// hand the files to the OS-default slicer app) or "reveal-folder"
     /// (the drag-it-yourself flow for people juggling several slicers).
     pub print_action: Option<String>,
+    /// Release-builder fields the user asked to keep across drafts (the
+    /// "remember" checkboxes), keyed by field id — e.g. "designer" so
+    /// creators don't retype their own name every release.
+    pub release_field_defaults: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

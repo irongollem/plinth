@@ -16,6 +16,7 @@ pub(crate) static SETTINGS_CACHE: Lazy<Mutex<Settings>> = Lazy::new(|| {
         catalog_root: None,
         known_designers: None,
         print_action: None,
+        release_field_defaults: None,
     })
 });
 
@@ -94,6 +95,10 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         .get("print_action")
         .and_then(|v| v.as_str().map(String::from));
 
+    let release_field_defaults = store
+        .get("release_field_defaults")
+        .and_then(|v| serde_json::from_value(v).ok());
+
     // Seed the lexicon on first load so the UI has something to show and the
     // scanner has something to match; the user's saved list wins thereafter.
     let known_designers = store
@@ -117,6 +122,7 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         catalog_root,
         known_designers: Some(known_designers),
         print_action,
+        release_field_defaults,
     };
 
     {
@@ -190,6 +196,11 @@ pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(
         &store,
         "print_action",
         settings.print_action.as_deref().map(|v| json!(v)),
+    );
+    set_or_delete(
+        &store,
+        "release_field_defaults",
+        settings.release_field_defaults.as_ref().map(|v| json!(v)),
     );
 
     store.save().map_err(|e| e.to_string())?;
