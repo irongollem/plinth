@@ -11,7 +11,10 @@ import TextArea from "../components/TextArea.vue";
 import TextInput from "../components/TextInput.vue";
 import MonthYearInput from "../components/MonthYearInput.vue";
 import { useCompressionStatus } from "../composables/useCompressionStatus";
-import type { SelectedFile } from "../composables/useFileSelect";
+import {
+  filesFromPaths,
+  type SelectedFile,
+} from "../composables/useFileSelect";
 import { useOS } from "../composables/useOS";
 import {
   type DraftReleaseModel,
@@ -48,12 +51,21 @@ onMounted(async () => {
 });
 
 /* ---------------------------- step 1: release info ---------------------------- */
+/** MonthYearInput format ("M/YYYY") — new releases default to this month. */
+const currentMonthYear = () =>
+  `${new Date().getMonth() + 1}/${new Date().getFullYear()}`;
+
+/* Field values the user checked "remember" on (persisted in settings),
+   keyed by field id. Today that's just the designer name. */
+const fieldDefaults = ref<Partial<Record<string, string>>>({});
+const rememberDesigner = ref(false);
+
 const openOnSave = ref(false);
 const releaseForm = ref<Release>({
   name: "",
   designer: "",
   description: "",
-  date: "",
+  date: currentMonthYear(),
   version: "1.0.0",
   model_references: [],
   groups: [],
@@ -75,9 +87,9 @@ const formComplete = computed(
 const clearReleaseForm = () => {
   releaseForm.value = {
     name: "",
-    designer: "",
+    designer: fieldDefaults.value.designer ?? "",
     description: "",
-    date: "",
+    date: currentMonthYear(),
     version: "1.0.0",
     model_references: [],
     groups: [],
@@ -87,6 +99,75 @@ const clearReleaseForm = () => {
   };
   extraFiles.value = [];
   releaseImages.value = [];
+};
+
+/* Recover/continue: the staged models live in the store (which snapshots
+   itself), but details typed here would die with the window — mirror them
+   to localStorage so a restart resumes mid-form. */
+const FORM_STORAGE_KEY = "plinth.releaseFormDraft";
+watch(
+  [releaseForm, extraFiles, releaseImages],
+  () => {
+    localStorage.setItem(
+      FORM_STORAGE_KEY,
+      JSON.stringify({
+        v: 1,
+        form: releaseForm.value,
+        extraPaths: extraFiles.value.map((file) => file.path),
+        imagePaths: releaseImages.value.map((file) => file.path),
+      }),
+    );
+  },
+  { deep: true },
+);
+
+onMounted(async () => {
+  const settings = await commands.getSettings();
+  if (settings.status === "ok") {
+    fieldDefaults.value = settings.data.release_field_defaults ?? {};
+    rememberDesigner.value = "designer" in fieldDefaults.value;
+  }
+
+  // Details already committed to the store (restored draft) win; otherwise
+  // fall back to the last unsaved form snapshot.
+  if (release.value) {
+    releaseForm.value = { ...release.value };
+  } else {
+    try {
+      const raw = localStorage.getItem(FORM_STORAGE_KEY);
+      const saved = raw ? JSON.parse(raw) : null;
+      if (saved?.v === 1) {
+        releaseForm.value = saved.form;
+        // Rebuilt from paths: SelectedFile carries a preview method that
+        // doesn't survive JSON; files deleted since simply drop out
+        extraFiles.value = await filesFromPaths(saved.extraPaths ?? []);
+        releaseImages.value = await filesFromPaths(saved.imagePaths ?? []);
+      }
+    } catch {
+      localStorage.removeItem(FORM_STORAGE_KEY);
+    }
+  }
+  if (!releaseForm.value.designer) {
+    releaseForm.value.designer = fieldDefaults.value.designer ?? "";
+  }
+  if (!releaseForm.value.date) releaseForm.value.date = currentMonthYear();
+});
+
+/** Sync the remembered designer with the checkbox at save time. */
+const persistFieldDefaults = async () => {
+  const current = await commands.getSettings();
+  if (current.status !== "ok") return;
+  const defaults = { ...current.data.release_field_defaults };
+  if (rememberDesigner.value && releaseForm.value.designer) {
+    defaults.designer = releaseForm.value.designer;
+  } else {
+    delete defaults.designer;
+  }
+  fieldDefaults.value = defaults;
+  await commands.setSettings({
+    ...current.data,
+    release_field_defaults: Object.keys(defaults).length ? defaults : null,
+  });
 };
 
 const startNewDraft = () => {
@@ -101,6 +182,7 @@ const saveReleaseInfo = async () => {
   }
   isSavingInfo.value = true;
   try {
+    await persistFieldDefaults();
     releasesStore.updateRelease(releaseForm.value);
     releasesStore.setReleaseStep(3);
   } catch (error) {
@@ -368,13 +450,25 @@ const cancelCompression = async () => {
             Name and describe the collection now that you can see what is in it.
           </p>
           <div class="grid grid-cols-2 gap-3">
-            <TextInput
-              id="designer"
-              label="Designer"
-              placeholder="Name of the designer..."
-              v-model="releaseForm.designer"
-              required
-            />
+            <div class="flex flex-col gap-1.5">
+              <TextInput
+                id="designer"
+                label="Designer"
+                placeholder="Name of the designer..."
+                v-model="releaseForm.designer"
+                required
+              />
+              <label
+                class="flex items-center gap-1.5 text-[11px] text-base-content/60 cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  class="checkbox checkbox-xs"
+                  v-model="rememberDesigner"
+                />
+                Remember for future releases
+              </label>
+            </div>
             <MonthYearInput
               id="releaseDate"
               label="Release date"

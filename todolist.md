@@ -16,10 +16,10 @@
 - [ ] Parse STLs in a Web Worker: mergeVertices on million-triangle minis still freezes the main thread during load (the overlay paints now, but a worker would keep the UI fully responsive)
 
 - [ ] ARCHITECTURE: Currently we are only storing the paths in the json, but in doing so also reduce the info available in the UI. The data in the UI should be complete. From creation dont throw away the data too soon and when revisiting compose the UI info from the json PLUS the underlying jsons.
-- [ ] Add checkboxes to release fields to store the field data permanently like settings (so creators dont have to type in their own name every time for example)
+- [x] Add checkboxes to release fields to store the field data permanently like settings (so creators dont have to type in their own name every time for example) — "Remember for future releases" on Designer; stored in settings as `release_field_defaults` (a map, so more fields are one-liners)
 - [ ] use TAR+Zstd for local compression and cataloging
-- [ ] default releasedate current?
-- [ ] recover/continue mode (quick so testing becomes less tedious!)
+- [x] default releasedate current? — MonthYear form field now defaults to the current month
+- [x] recover/continue mode (quick so testing becomes less tedious!) — draft (staged models + step + release) snapshots to localStorage from the store; unsaved details form mirrors separately; both restore on launch with a toast
 - [ ] Combine safety: group_renames match scanner group names globally — combining a generically-named group ("Spear") can capture same-named groups from other releases. Scope renames (e.g. per release subtree) or warn when a source name is ambiguous
 
 ### Duplicate handling — share, don't delete (hardlink dedup)

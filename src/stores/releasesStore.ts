@@ -1,5 +1,5 @@
 import { acceptHMRUpdate, defineStore } from "pinia";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import type {
   ModelLocation,
   ModelReference,
@@ -22,6 +22,19 @@ export type Tab = "catalog" | "releases" | "render" | "settings";
 
 /** The release-builder flow: Models (including renders) -> Details -> Pack. */
 export type ReleaseStep = 1 | 2 | 3;
+
+/* Recover/continue: the draft survives an app restart. Everything staged is
+   plain data (absolute source paths — nothing is copied until pack), so a
+   localStorage snapshot is enough to pick up where a crash or quit left off. */
+const DRAFT_STORAGE_KEY = "plinth.releaseDraft";
+
+type PersistedDraft = {
+  v: 1;
+  release?: Release;
+  models: DraftReleaseModel[];
+  releaseDir?: string;
+  releaseStep: ReleaseStep;
+};
 
 export const useReleasesStore = defineStore("releases", () => {
   const toastStore = useToastStore();
@@ -160,6 +173,45 @@ export const useReleasesStore = defineStore("releases", () => {
         models.value.map((model) => model.group).filter(Boolean) as string[],
       ),
     ),
+  );
+
+  // Restore a draft from the previous session before the watcher below
+  // starts writing, so an empty first render can't wipe the snapshot.
+  try {
+    const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
+    const draft: PersistedDraft | null = raw ? JSON.parse(raw) : null;
+    if (draft?.v === 1 && (draft.models.length || draft.release)) {
+      models.value = draft.models;
+      release.value = draft.release;
+      releaseDir.value = draft.releaseDir;
+      releaseStep.value = draft.releaseStep ?? 1;
+      toastStore.addToast(
+        `Restored your draft release (${draft.models.length} staged models)`,
+        "info",
+      );
+    }
+  } catch {
+    // A corrupt snapshot only costs the draft — never block startup on it
+    localStorage.removeItem(DRAFT_STORAGE_KEY);
+  }
+
+  watch(
+    [release, models, releaseDir, releaseStep],
+    () => {
+      if (!models.value.length && !release.value) {
+        localStorage.removeItem(DRAFT_STORAGE_KEY);
+        return;
+      }
+      const draft: PersistedDraft = {
+        v: 1,
+        release: release.value,
+        models: models.value,
+        releaseDir: releaseDir.value,
+        releaseStep: releaseStep.value,
+      };
+      localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+    },
+    { deep: true },
   );
 
   return {
