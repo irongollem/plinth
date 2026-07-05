@@ -1122,6 +1122,18 @@ const toggleDups = () => {
 // members (variant_key null).
 const memberKey = (entry: CatalogEntry) => entry.variant_key ?? entry.dir_path;
 
+// 3D preview is opt-in PER MEMBER. Leaving it latched meant every pose or
+// model click immediately parsed multi-million-triangle STLs on the main
+// thread — browsing became a chain of UI freezes with no way to turn the
+// viewer off mid-load. Selection changes drop back to the image; the user
+// re-opens 3D deliberately. (Moving the parse into a Worker is tracked in
+// the todolist; this removes the accidental triggers.)
+watch(selected, (next, prev) => {
+  const nextKey = next ? memberKey(next) : null;
+  const prevKey = prev ? memberKey(prev) : null;
+  if (nextKey !== prevKey) show3d.value = false;
+});
+
 const selectEntry = async (entry: CatalogEntry) => {
   selected.value = entry;
   files.value = [];
