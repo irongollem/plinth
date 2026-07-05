@@ -513,26 +513,44 @@ pub async fn update_model_metadata(
             meta.pose.clone(),
             meta.scale.clone(),
             meta.support_status,
-            meta.release_date,
-            meta.designer,
-            meta.sculptor,
-            meta.release_name,
+            meta.release_date.clone(),
+            meta.designer.clone(),
+            meta.sculptor.clone(),
+            meta.release_name.clone(),
             meta.variant.clone(),
         )?;
-        if meta.variant.is_none() && meta.pose.is_none() && meta.scale.is_none() {
-            return Ok(0);
-        }
-        let twins = db::support_twins(&conn, &dir_path)?;
-        for twin in &twins {
-            db::update_model_facets(
+        // designer/sculptor/release are facts about the MODEL — they apply
+        // to every member of the group, not just the one being edited
+        let mut touched = 0u32;
+        if meta.designer.is_some()
+            || meta.sculptor.is_some()
+            || meta.release_name.is_some()
+            || meta.release_date.is_some()
+        {
+            touched += db::propagate_group_meta(
                 &conn,
-                twin,
-                meta.variant.as_deref(),
-                meta.pose.as_deref(),
-                meta.scale.as_deref(),
+                &dir_path,
+                meta.designer.as_deref(),
+                meta.sculptor.as_deref(),
+                meta.release_name.as_deref(),
+                meta.release_date.as_deref(),
             )?;
         }
-        Ok(twins.len() as u32)
+        // the per-sculpt facets still sync only to the support twins
+        if meta.variant.is_some() || meta.pose.is_some() || meta.scale.is_some() {
+            let twins = db::support_twins(&conn, &dir_path)?;
+            for twin in &twins {
+                db::update_model_facets(
+                    &conn,
+                    twin,
+                    meta.variant.as_deref(),
+                    meta.pose.as_deref(),
+                    meta.scale.as_deref(),
+                )?;
+            }
+            touched = touched.max(twins.len() as u32);
+        }
+        Ok(touched)
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Metadata update failed: {}", e)))?

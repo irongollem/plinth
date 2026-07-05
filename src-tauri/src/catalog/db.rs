@@ -1896,6 +1896,59 @@ pub fn move_model(conn: &mut Connection, from: &str, to: &str) -> Result<(), App
     Ok(())
 }
 
+/// Apply the GROUP-level facts — designer, sculptor, release name/date —
+/// to every other member of the group `dir_path` belongs to. A release is
+/// a property of the MODEL, not of one build/pose folder: editing it in
+/// the drawer must never leave sibling members claiming something else
+/// (or nothing). Only Some values propagate; a member's existing override
+/// is never cleared from here. Returns how many siblings were touched.
+pub fn propagate_group_meta(
+    conn: &Connection,
+    dir_path: &str,
+    designer: Option<&str>,
+    sculptor: Option<&str>,
+    release_name: Option<&str>,
+    release_date: Option<&str>,
+) -> Result<u32, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Group meta propagation failed: {}", e));
+    let mut stmt = conn
+        .prepare(
+            "SELECT m.dir_path FROM models m
+             LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)
+             WHERE lower(COALESCE(r.display_name, m.group_name, m.name)) =
+                   (SELECT lower(COALESCE(r2.display_name, m2.group_name, m2.name))
+                    FROM models m2
+                    LEFT JOIN group_renames r2
+                        ON r2.source_group = COALESCE(m2.group_name, m2.name)
+                    WHERE m2.dir_path = ?1)
+               AND m.dir_path <> ?1",
+        )
+        .map_err(map_err)?;
+    let siblings: Vec<String> = stmt
+        .query_map([dir_path], |row| row.get(0))
+        .and_then(|rows| rows.collect())
+        .map_err(map_err)?;
+
+    for sibling in &siblings {
+        conn.execute(
+            "INSERT INTO model_user_meta
+                 (dir_path, designer, sculptor, release_name, release_date)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(dir_path) DO UPDATE SET
+                 designer     = COALESCE(?2, model_user_meta.designer),
+                 sculptor     = COALESCE(?3, model_user_meta.sculptor),
+                 release_name = COALESCE(?4, model_user_meta.release_name),
+                 release_date = COALESCE(?5, model_user_meta.release_date)",
+            params![sibling, designer, sculptor, release_name, release_date],
+        )
+        .map_err(map_err)?;
+        // designer and release feed the FTS text — keep search in step
+        refresh_fts_row(conn, sibling).map_err(map_err)?;
+    }
+    Ok(siblings.len() as u32)
+}
+
 /// Repoint every indexed path under `from` (a directory) to live under
 /// `to` — the normalizer's whole-tree cousin of move_model. Covers the
 /// tables move_model predates: file_variants, variant_previews (whose
@@ -2475,6 +2528,95 @@ mod tests {
         // clearing every assignment collapses back to the whole-folder member
         clear_file_variants(&conn, &["/dump/mob/a.stl".into(), "/dump/mob/b.stl".into()]).unwrap();
         assert_eq!(group_members(&conn, "mob").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn group_meta_propagates_to_every_member() {
+        // Release/designer are facts about the MODEL: editing them on the
+        // selected member must reach every sibling in the group — poses
+        // and variants showing an empty release beside a filled-in primary
+        // was the drawer lying about its own model.
+        let mut conn = test_conn();
+        let member = |dir: &str, group: &str| ModelRow {
+            dir_path: dir.into(),
+            name: group.into(),
+            description: None,
+            designer: None,
+            release_name: None,
+            preview_path: None,
+            source: "metadata".into(),
+            uuid: None,
+            file_count: 1,
+            total_size_bytes: 10,
+            pose: None,
+            scale: None,
+            support_status: None,
+            release_date: None,
+            variant: None,
+            sculptor: None,
+            group_name: Some(group.into()),
+        };
+        let models = vec![
+            member("/lib/LK/Supported", "Little Knights"),
+            member("/lib/LK/Unsupported", "Little Knights"),
+            member("/lib/Peryton", "Peryton"),
+        ];
+        replace_catalog(&mut conn, &[], &models, &[], &[]).unwrap();
+        // the sibling already carries a sculptor override — None fields
+        // must never clobber it
+        update_model_user_meta(
+            &conn,
+            "/lib/LK/Unsupported",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("A. Artist".into()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let touched = propagate_group_meta(
+            &conn,
+            "/lib/LK/Supported",
+            Some("Dragon Trapper's Lodge"),
+            None,
+            Some("Order of the Unicorn"),
+            Some("2026-05"),
+        )
+        .unwrap();
+        assert_eq!(touched, 1, "one sibling in the group");
+
+        let (designer, release, date, sculptor): (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT designer, release_name, release_date, sculptor
+                 FROM model_user_meta WHERE dir_path = '/lib/LK/Unsupported'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(designer.as_deref(), Some("Dragon Trapper's Lodge"));
+        assert_eq!(release.as_deref(), Some("Order of the Unicorn"));
+        assert_eq!(date.as_deref(), Some("2026-05"));
+        assert_eq!(sculptor.as_deref(), Some("A. Artist"), "None must not clobber");
+
+        // the foreign group is untouched
+        let foreign: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM model_user_meta WHERE dir_path = '/lib/Peryton'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(foreign, 0);
     }
 
     #[test]
