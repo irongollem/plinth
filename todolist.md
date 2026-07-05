@@ -20,7 +20,6 @@
 - [ ] use TAR+Zstd for local compression and cataloging
 - [ ] default releasedate current?
 - [ ] recover/continue mode (quick so testing becomes less tedious!)
-- [ ] Catalog: let the user pick which member's image is the GROUP card's main image when several variants have previews (today the card just takes the first member's preview; wanted 2026-07-05)
 - [ ] Combine safety: group_renames match scanner group names globally — combining a generically-named group ("Spear") can capture same-named groups from other releases. Scope renames (e.g. per release subtree) or warn when a source name is ambiguous
 
 ### Duplicate handling — share, don't delete (hardlink dedup)
