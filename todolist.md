@@ -20,6 +20,8 @@
 - [ ] use TAR+Zstd for local compression and cataloging
 - [ ] default releasedate current?
 - [ ] recover/continue mode (quick so testing becomes less tedious!)
+- [ ] Catalog: let the user pick which member's image is the GROUP card's main image when several variants have previews (today the card just takes the first member's preview; wanted 2026-07-05)
+- [ ] Combine safety: group_renames match scanner group names globally — combining a generically-named group ("Spear") can capture same-named groups from other releases. Scope renames (e.g. per release subtree) or warn when a source name is ambiguous
 
 ### Duplicate handling — share, don't delete (hardlink dedup)
 
@@ -28,7 +30,7 @@ Duplicates across variants (e.g. one base STL repeated in 5 weapon variants) sho
 - [x] Phase 1 — inode-aware catalog: `files.file_identity` (opaque "device:inode"/volume:index string via `file-id` crate, refreshed each dup scan); `duplicate_groups()` reports `distinct_copies` so same-inode groups read as shared (reclaimable 0); `stats()` subtracts hardlink savings
 - [x] Phase 2 — "merge — free X" beside "delete copies": full-hash verify both sides (refuses files that diverged since the scan), hardlink keeper → hidden temp in dup's dir, atomic rename over dup, identities refreshed in place. Per-volume probe (`supports_file_links` makes a real test link — ground truth for NAS/SMB/exFAT) gates the buttons; link-less volumes get delete-only + plain-language hint. "merge all" batches every group
 - [x] Phase 3 — print-to-slicer: `print_action` setting, default `open-in-slicer` (`openPath` per file → OS-default slicer; pre-sliced .lys/.chitu beat raw stl/obj/3mf when present) vs `reveal-folder` (the old flow, for multi-slicer users); toggle in Settings
-- [ ] Phase 4 — 3pk checksum dedup: component archives store each unique blake3 blob once; manifest lists all names against the same checksum (fold into v1 spec + docs/3PK.md while there are no external readers); import materializes first name, hardlinks the rest where the destination volume supports it, else copies
+- [x] Phase 4 — 3pk checksum dedup: `compress_files` stores each unique blake3 blob once (size-prefiltered, one read for unique-size files) and returns per-entry checksums; manifest lists every name against its checksum with `component.dedup` marking elision (spec'd in docs/3PK.md); `manifest::extract_component_archive` rematerializes elided names (hardlink where supported, else copy) — wired into pack, awaiting the reconstruction UI on the import side
 - [ ] Phase 5 (only if real users are stuck on link-less volumes) — virtual sharing tier: catalog-pointer fallback, viable once print resolves paths in-app; Finder browsing is the only remaining gap
 - [ ] Cleanup-tooling contract: same-volume `rename()` preserves links; deleting a variant folder only drops one name; cross-volume moves split shared inodes — cleaner must re-merge on the destination side
 
@@ -39,7 +41,7 @@ The format (`manifest::Manifest` structs + BLAKE3) and the scanner-side reader
 the remaining half and depends on the release-builder flow settling first.
 
 - [ ] Enrich what `add_model` writes to `model.json`: carry the catalog metadata (variant/pose/scale/support/designer/sculptor/release_name + `file_poses`) through the release-builder staging → `add_model` → sidecar, so a packed release actually contains the curation the reader restores. Needs `StlModel` (and the frontend `DraftReleaseModel`) extended, and the staging in Catalog.vue `addToDraftRelease` to pull designer/sculptor/release_name + `file_variants`.
-- [ ] Container `manifest.json` in `release.3pk`: one component per group with a BLAKE3 archive checksum + per-file checksums, built at pack time (in `compression_jobs` after archives exist). Fold in the Phase-4 checksum-dedup (store each unique blob once, list all names against one checksum) while there are no external readers.
+- [x] Container `manifest.json` in `release.3pk`: one component per group with a BLAKE3 archive checksum + per-file checksums, built at pack time (`file/pack_manifest.rs`, sequenced components → manifest → 3pk in `compression_jobs`) with the Phase-4 checksum-dedup folded in. Emits null for the fields `model.json` doesn't carry yet — filled by the enrichment bullet above.
 - [ ] Wire the finalize flow to emit the manifest and verify round-trip: pack → scan on a clean profile → curation restored.
 
 ### Modular Package Strategy Implementation

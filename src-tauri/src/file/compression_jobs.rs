@@ -27,12 +27,14 @@ const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Integer percentage with u64 math: total can be 0 (a release of only
 /// sub-1KiB files truncates to 0 KiB) and `part * 100` overflows u32 past
-/// ~41 GiB.
+/// ~41 GiB. Capped at 100: manifest.json is generated mid-job, after the
+/// totals were counted, so the processed side can legitimately run one
+/// small file past the estimate.
 fn percent(part: u32, total: u32) -> u32 {
     if total == 0 {
         100
     } else {
-        ((part as u64 * 100) / total as u64) as u32
+        (((part as u64 * 100) / total as u64) as u32).min(100)
     }
 }
 
@@ -141,10 +143,13 @@ pub async fn perform_compression(
         total_size_kb,
     )));
 
+    let app_version = app_handle.package_info().version.to_string();
     run_compression_tasks(
         progress_tracker,
+        &release_dir_path,
         &target_dir_path,
         &extension,
+        &app_version,
         &group_and_model_dirs,
         &files_for_3pk,
         &files_for_zip,
@@ -166,10 +171,13 @@ pub async fn perform_compression(
     Ok((total_files, total_size_kb, target_dir_path))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_compression_tasks(
     progress_tracker: Arc<Mutex<ProgressTracker>>,
+    release_dir_path: &Path,
     target_dir_path: &Path,
     extension: &str,
+    app_version: &str,
     group_and_model_dirs: &[PathBuf],
     files_for_3pk: &[PathBuf],
     files_for_zip: &[PathBuf],
@@ -179,9 +187,10 @@ async fn run_compression_tasks(
     let max_threads = get_optimal_thread_count() as usize;
     let semaphore = Arc::new(Semaphore::new(max_threads));
 
-    let mut compression_tasks = Vec::new();
-
-    // One archive per group/model directory
+    // Stage 1 — component archives, in parallel. They must FINISH before the
+    // manifest exists: its component checksums are of the final archive
+    // bytes, and its per-file lists come from what each archive stored.
+    let mut component_tasks = Vec::new();
     for path in group_and_model_dirs {
         let dir_name = path
             .file_name()
@@ -190,29 +199,56 @@ async fn run_compression_tasks(
             .into_owned();
         let archive_path = target_dir_path.join(format!("{}.{}", dir_name, extension));
 
-        compression_tasks.push(spawn_compression_task(
-            vec![path.clone()],
-            archive_path,
-            Arc::clone(&progress_tracker),
-            Arc::clone(&semaphore),
-            Arc::clone(&cancel_token),
+        component_tasks.push((
+            dir_name,
+            archive_path.clone(),
+            spawn_compression_task(
+                vec![path.clone()],
+                archive_path,
+                Arc::clone(&progress_tracker),
+                Arc::clone(&semaphore),
+                Arc::clone(&cancel_token),
+            ),
         ));
     }
+    let mut components = Vec::with_capacity(component_tasks.len());
+    for (name, archive_path, task) in component_tasks {
+        let entries = task
+            .await
+            .map_err(|e| AppError::IoError(format!("Task join error: {}", e)))??;
+        components.push(super::pack_manifest::PackedComponent {
+            name,
+            archive_path,
+            entries,
+        });
+    }
 
-    // Compress release.3pk
+    // Stage 2 — the manifest, written into the release dir so it rides
+    // inside release.3pk with the rest of the release-level files
+    let mut files_for_3pk = files_for_3pk.to_vec();
+    if !components.is_empty() {
+        let manifest =
+            super::pack_manifest::build_manifest(release_dir_path, &components, app_version)?;
+        let manifest_path = release_dir_path.join("manifest.json");
+        fs::write(&manifest_path, manifest.to_json()?)
+            .map_err(|e| AppError::IoError(format!("Failed to write manifest: {}", e)))?;
+        files_for_3pk.push(manifest_path);
+    }
+
+    // Stage 3 — release.3pk (manifest + images + jsons) and the legacy
+    // loose-file release.zip, in parallel
+    let mut container_tasks = Vec::new();
     if !files_for_3pk.is_empty() {
-        compression_tasks.push(spawn_compression_task(
-            files_for_3pk.to_vec(),
+        container_tasks.push(spawn_compression_task(
+            files_for_3pk,
             target_dir_path.join("release.3pk"),
             Arc::clone(&progress_tracker),
             Arc::clone(&semaphore),
             Arc::clone(&cancel_token),
         ));
     }
-
-    // Compress release.zip
     if !files_for_zip.is_empty() {
-        compression_tasks.push(spawn_compression_task(
+        container_tasks.push(spawn_compression_task(
             files_for_zip.to_vec(),
             target_dir_path.join(format!("release.{}", extension)),
             Arc::clone(&progress_tracker),
@@ -220,9 +256,7 @@ async fn run_compression_tasks(
             Arc::clone(&cancel_token),
         ));
     }
-
-    // Wait for all compression tasks to complete
-    for task in compression_tasks {
+    for task in container_tasks {
         task.await
             .map_err(|e| AppError::IoError(format!("Task join error: {}", e)))??;
     }
@@ -236,7 +270,7 @@ fn spawn_compression_task(
     progress_tracker: Arc<Mutex<ProgressTracker>>,
     semaphore: Arc<Semaphore>,
     cancel_token: Arc<AtomicBool>,
-) -> tokio::task::JoinHandle<Result<(), AppError>> {
+) -> tokio::task::JoinHandle<Result<Vec<compressors::ArchiveFileEntry>, AppError>> {
     tokio::spawn(async move {
         // Acquire a permit from the semaphore
         let _permit = semaphore
@@ -250,7 +284,7 @@ fn spawn_compression_task(
             ));
         }
 
-        tokio::task::spawn_blocking(move || -> Result<(), AppError> {
+        tokio::task::spawn_blocking(move || -> Result<Vec<compressors::ArchiveFileEntry>, AppError> {
             let output_file = File::create(&output_path).map_err(|e| {
                 AppError::IoError(format!(
                     "Failed to create archive file '{}': {}",

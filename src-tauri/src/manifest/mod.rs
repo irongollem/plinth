@@ -48,6 +48,12 @@ pub struct Component {
     /// `blake3:<hex>` of the archive bytes — drives update detection.
     pub checksum: String,
     pub size_bytes: u64,
+    /// True when the archive stores duplicate contents once: some manifest
+    /// file names are then absent from the archive and must be
+    /// rematerialized from a sibling with the same checksum on extract
+    /// (see extract_component_archive). Additive field — absent reads false.
+    #[serde(default)]
+    pub dedup: bool,
     pub models: Vec<ManifestModel>,
 }
 
@@ -114,6 +120,57 @@ impl Manifest {
     }
 }
 
+/// Extract a component archive and rematerialize the names a deduplicated
+/// archive elided: any manifest-listed file missing after extraction is
+/// recreated from an extracted sibling with the same checksum — hardlinked
+/// where the destination volume supports it (the extracted release lands
+/// already deduplicated, mirroring the catalog's merge), copied otherwise.
+/// Works unchanged on non-dedup archives: nothing is missing, nothing to do.
+pub fn extract_component_archive(
+    archive_path: &Path,
+    dest_dir: &Path,
+    files: &[ManifestFile],
+) -> Result<(), AppError> {
+    let file = std::fs::File::open(archive_path)
+        .map_err(|e| AppError::IoError(format!("Failed to open {}: {}", archive_path.display(), e)))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| AppError::InvalidInput(format!("Not a readable archive: {}", e)))?;
+    archive
+        .extract(dest_dir)
+        .map_err(|e| AppError::IoError(format!("Extraction failed: {}", e)))?;
+
+    // First extracted path per checksum = the donor for elided twins
+    let mut by_checksum: std::collections::HashMap<&str, std::path::PathBuf> =
+        std::collections::HashMap::new();
+    for entry in files {
+        let path = dest_dir.join(&entry.name);
+        if path.is_file() {
+            by_checksum.entry(entry.checksum.as_str()).or_insert(path);
+        }
+    }
+    for entry in files {
+        let path = dest_dir.join(&entry.name);
+        if path.exists() {
+            continue;
+        }
+        let Some(donor) = by_checksum.get(entry.checksum.as_str()) else {
+            return Err(AppError::InvalidInput(format!(
+                "Archive is missing '{}' and no file with its checksum exists to restore it",
+                entry.name
+            )));
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| AppError::IoError(format!("Failed to create dirs: {}", e)))?;
+        }
+        if std::fs::hard_link(donor, &path).is_err() {
+            std::fs::copy(donor, &path)
+                .map_err(|e| AppError::IoError(format!("Failed to restore {}: {}", entry.name, e)))?;
+        }
+    }
+    Ok(())
+}
+
 /// BLAKE3 of a file's bytes, encoded `blake3:<hex>`. Streams so a multi-GB
 /// component archive never lands fully in memory. Reuses the hasher the
 /// duplicate-detector already ships.
@@ -154,6 +211,7 @@ mod tests {
                 archive: "galeb duhr.zip".into(),
                 checksum: "blake3:abc".into(),
                 size_bytes: 123,
+                dedup: false,
                 models: vec![ManifestModel {
                     id: Some("uuid".into()),
                     name: "galeb duhr".into(),
@@ -203,6 +261,56 @@ mod tests {
         let mut manifest = sample();
         manifest.version = 999;
         assert!(!manifest.is_readable());
+    }
+
+    #[test]
+    fn deduplicated_archive_round_trips_every_manifest_name() {
+        let dir = std::env::temp_dir().join(format!("stlpack_3pk_rt_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("src/knight/variant_b")).unwrap();
+        std::fs::write(dir.join("src/knight/base.stl"), b"shared-base-bytes!").unwrap();
+        std::fs::write(
+            dir.join("src/knight/variant_b/base.stl"),
+            b"shared-base-bytes!",
+        )
+        .unwrap();
+        std::fs::write(dir.join("src/knight/body.stl"), b"unique-body-bytes!").unwrap();
+
+        // Pack (one of the two identical bases is elided)…
+        let archive_path = dir.join("knight.zip");
+        let archive = std::fs::File::create(&archive_path).unwrap();
+        let entries = crate::file::compressors::compress_files(
+            &[dir.join("src/knight")],
+            archive,
+            None::<fn(u32) -> bool>,
+        )
+        .unwrap();
+        assert!(entries.iter().any(|e| !e.stored), "dedup actually happened");
+
+        // …the manifest lists every name with its checksum…
+        let files: Vec<ManifestFile> = entries
+            .iter()
+            .map(|e| ManifestFile {
+                name: e.name.clone(),
+                checksum: e.checksum.clone(),
+                size_bytes: e.size_bytes,
+                pose: None,
+                support_status: None,
+            })
+            .collect();
+
+        // …and extraction rematerializes the elided name with equal bytes
+        let out = dir.join("out");
+        extract_component_archive(&archive_path, &out, &files).unwrap();
+        for name in ["base.stl", "variant_b/base.stl", "body.stl"] {
+            assert!(out.join(name).is_file(), "{} restored", name);
+        }
+        assert_eq!(
+            std::fs::read(out.join("base.stl")).unwrap(),
+            std::fs::read(out.join("variant_b/base.stl")).unwrap()
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

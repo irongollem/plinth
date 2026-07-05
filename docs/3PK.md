@@ -60,6 +60,7 @@ option; v1 is deliberately modular.
       "archive": "galeb duhr.zip", // sibling file, relative to the release dir
       "checksum": "blake3:9f86d0…", // of the archive bytes — drives update detection
       "size_bytes": 896812345,
+      "dedup": true, // archive stores duplicate contents once (see Deduplication)
 
       "models": [
         {
@@ -128,6 +129,27 @@ of making pose _metadata_ rather than folder structure.
   changed hash, so a client re-fetches only what moved.
 - **File `checksum`** (recommended): hash of each model file's content,
   for granular integrity and cross-release dedup.
+
+## Deduplication
+
+A component archive MAY store each unique file content **once**. Creators
+routinely repeat a base or body STL across weapon/pose variants; shipping
+those bytes five times helps no one. The rules:
+
+- The manifest lists **every** file name, each with its content checksum.
+  Identical files simply share a checksum.
+- The archive stores the bytes for each checksum at (at least) one of its
+  names; other names with the same checksum may be absent from the archive.
+- A component that elided anything sets `"dedup": true` (additive field;
+  absent reads as false) so tooling knows plain unzipping is not enough.
+- On extraction, a manifest name missing from the archive is
+  **rematerialized** from an extracted file with the same checksum —
+  hardlinked where the destination filesystem supports it (the release
+  lands on disk already deduplicated), copied otherwise. Either way every
+  listed name exists afterwards.
+
+Non-dedup readers/writers interoperate: a v1 archive without elision is
+just the degenerate case where every checksum is stored under every name.
 
 ## Write path (packer)
 
