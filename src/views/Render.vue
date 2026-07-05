@@ -242,12 +242,12 @@
         </button>
       </div>
 
-      <!-- BRANDING — UI only, not yet baked into the render -->
+      <!-- BRANDING — baked into the output PNG after Blender finishes -->
       <div class="flex flex-col gap-2 border-t border-base-content/10 pt-3">
         <div class="flex items-center gap-1.5">
           <span
             class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-            >BRANDING — OVERLAY PREVIEW ONLY (NOT YET BAKED INTO RENDERS)</span
+            >BRANDING — BAKED INTO THE RENDER</span
           >
         </div>
         <div class="flex items-center gap-2">
@@ -274,6 +274,26 @@
               {{ pos.toUpperCase() }}
             </button>
           </div>
+        </div>
+        <div v-if="branding.logoOn" class="flex items-center gap-2">
+          <button type="button" class="btn btn-xs" @click="chooseLogo">
+            Logo image…
+          </button>
+          <span
+            class="flex-1 truncate font-mono text-[10.5px]"
+            :class="branding.logoPath ? 'text-base-content/60' : 'text-warning'"
+            :title="branding.logoPath"
+          >
+            {{ logoFileName || "none chosen — logo won't be baked" }}
+          </span>
+          <button
+            v-if="branding.logoPath"
+            type="button"
+            class="btn btn-xs btn-ghost"
+            @click="branding.logoPath = ''"
+          >
+            ✕
+          </button>
         </div>
         <div class="flex items-center gap-2">
           <input
@@ -445,13 +465,24 @@
         @loaded="onLoaded"
         @error="onViewportError"
       />
-      <!-- Branding overlay preview (position-only — not composited into the file) -->
+      <!-- Branding overlay preview — the same spec the bake composites -->
       <div
         v-if="branding.logoOn && parts.length"
-        class="absolute w-13 h-13 rounded-lg border-2 border-dashed border-base-content/40 flex items-center justify-center font-mono text-[8px] tracking-[0.08em] text-base-content/40 pointer-events-none"
+        class="absolute w-13 h-13 flex items-center justify-center pointer-events-none"
+        :class="
+          branding.logoPath
+            ? ''
+            : 'rounded-lg border-2 border-dashed border-base-content/40 font-mono text-[8px] tracking-[0.08em] text-base-content/40'
+        "
         :style="logoPosStyle"
       >
-        LOGO
+        <img
+          v-if="branding.logoPath"
+          :src="convertFileSrc(branding.logoPath)"
+          alt=""
+          class="max-w-full max-h-full object-contain"
+        />
+        <template v-else>LOGO</template>
       </div>
       <div
         v-if="branding.textOn && parts.length"
@@ -520,14 +551,16 @@ import ProgressBar from "../components/ProgressBar.vue";
 // NOT `import type`: the component is used in the template, which
 // biome's useImportType can't see (rule disabled for .vue in biome.json)
 import StlViewport from "../components/StlViewport.vue";
-import { filesFromPaths } from "../composables/useFileSelect";
+import { filesFromPaths, useFileSelect } from "../composables/useFileSelect";
 import type { SelectedFile } from "../composables/useFileSelect";
 import { useRenderStatus } from "../composables/useRenderStatus";
+import { drawOverlay } from "../utils/promoOverlay";
 import { useReleasesStore } from "../stores/releasesStore.ts";
 import { useToastStore } from "../stores/toastStore.ts";
 
 const toastStore = useToastStore();
 const releasesStore = useReleasesStore();
+const { selectFiles } = useFileSelect();
 const {
   isRendering,
   percent,
@@ -625,6 +658,10 @@ watch(partPaths, (next, prev) => {
 // happened
 watch(resultPath, async (path) => {
   if (!path) return;
+  // Bake FIRST: everything downstream (the takeover view, the catalog
+  // preview, step 2 of the release) must see the branded file, not a
+  // pristine render that silently changes underneath them a beat later
+  await bakeBranding(path);
   showResult.value = true;
   if (requestedOutputPath && path !== requestedOutputPath) {
     const savedAs = path.split(/[/\\]/).pop();
@@ -694,6 +731,7 @@ const fontOptions: { value: string; label: string; css: string }[] = [
 const BRANDING_DEFAULTS = {
   logoOn: true,
   logoPos: "tr" as CornerPos,
+  logoPath: "",
   textOn: true,
   textPos: "bl" as TextPos,
   title: "",
@@ -702,6 +740,136 @@ const BRANDING_DEFAULTS = {
   size: 20,
 };
 const branding = reactive({ ...BRANDING_DEFAULTS });
+
+const logoFileName = computed(
+  () => branding.logoPath.split(/[/\\]/).pop() ?? "",
+);
+
+const chooseLogo = async () => {
+  const files = await selectFiles({
+    multiple: false,
+    accept: ".png,.jpg,.jpeg,.webp",
+    title: "Choose logo image",
+  });
+  if (files?.length) branding.logoPath = files[0].path;
+};
+
+/* ------------------------- branding bake ------------------------- */
+// Bumped after every bake: the result <img> URL must change or the
+// webview happily keeps showing its cached, unbranded bytes
+const bakeStamp = ref(0);
+
+const loadImage = (dataUrl: string) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image();
+    img.addEventListener("load", () => resolve(img), { once: true });
+    img.addEventListener(
+      "error",
+      () => reject(new Error("Failed to decode image")),
+      { once: true },
+    );
+    img.src = dataUrl;
+  });
+
+/** Composite the branding overlay onto the finished render, in place. */
+const bakeBranding = async (path: string) => {
+  const wantsLogo = branding.logoOn && !!branding.logoPath;
+  const wantsText =
+    branding.textOn && !!(branding.title.trim() || branding.credit.trim());
+  if (!wantsLogo && !wantsText) {
+    // Logo toggle on but no image chosen deserves a nudge, not silence
+    if (branding.logoOn && !branding.logoPath && !wantsText) {
+      toastStore.addToast(
+        "Branding skipped — choose a logo image or add overlay text",
+        "info",
+      );
+    }
+    return;
+  }
+  try {
+    // Data-URL detour via Rust: asset:-protocol images would taint the
+    // canvas and make toBlob() throw a SecurityError
+    const baseResult = await commands.readImageBase64(path);
+    if (baseResult.status !== "ok") {
+      toastStore.reportError("Branding bake failed", baseResult.error);
+      return;
+    }
+    const baseImage = await loadImage(baseResult.data);
+
+    let logoImage: HTMLImageElement | null = null;
+    if (wantsLogo) {
+      const logoResult = await commands.readImageBase64(branding.logoPath);
+      if (logoResult.status === "ok") {
+        logoImage = await loadImage(logoResult.data);
+      } else {
+        toastStore.reportError("Logo not baked", logoResult.error);
+      }
+    }
+
+    const spec = {
+      logoOn: wantsLogo && !!logoImage,
+      logoPos: branding.logoPos,
+      textOn: branding.textOn,
+      textPos: branding.textPos,
+      title: branding.title,
+      credit: branding.credit,
+      fontCss: fontCss.value,
+      size: branding.size,
+    };
+
+    // Make sure the real fonts are in before drawing — otherwise the
+    // canvas silently substitutes whatever is loaded at that instant
+    await Promise.all([
+      document.fonts.load(`700 32px ${fontCss.value}`),
+      document.fonts.load("500 16px 'IBM Plex Mono', monospace"),
+    ]).catch(() => {
+      /* offline: canvas falls back exactly like the preview does */
+    });
+
+    const canvas = document.createElement("canvas");
+    canvas.width = baseImage.naturalWidth;
+    canvas.height = baseImage.naturalHeight;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.drawImage(baseImage, 0, 0);
+    drawOverlay(ctx, canvas.width, canvas.height, spec, logoImage);
+
+    const dataUrl: string = await new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          reject(new Error("Canvas export produced no image"));
+          return;
+        }
+        const reader = new FileReader();
+        reader.addEventListener(
+          "load",
+          () => resolve(reader.result as string),
+          { once: true },
+        );
+        reader.addEventListener(
+          "error",
+          () => reject(new Error("Failed to read image data")),
+          { once: true },
+        );
+        reader.readAsDataURL(blob);
+      }, "image/png");
+    });
+
+    const writeResult = await commands.writePngBase64(path, dataUrl);
+    if (writeResult.status !== "ok") {
+      toastStore.reportError("Branding bake failed", writeResult.error);
+      return;
+    }
+    bakeStamp.value++;
+    toastStore.addToast("Branding baked into the render", "success");
+  } catch (error) {
+    // The unbranded render on disk is still intact — say so
+    toastStore.reportError(
+      "Branding bake failed — the plain render is untouched",
+      error,
+    );
+  }
+};
 
 /* ------------------------- sticky settings ------------------------- */
 // Studio knobs persist across restarts so a dialed-in look isn't lost.
@@ -851,7 +1019,7 @@ const defaultOutputPath = computed(() =>
 
 const resultUrl = computed(() =>
   resultPath.value
-    ? `${convertFileSrc(resultPath.value)}?v=${elapsedSeconds.value}`
+    ? `${convertFileSrc(resultPath.value)}?v=${elapsedSeconds.value}-${bakeStamp.value}`
     : null,
 );
 

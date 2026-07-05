@@ -23,7 +23,9 @@ use file::commands::{
     open_with_default_app,
 };
 use models::events::{CompressionStatus, DuplicateStatus, RenderStatus, ScanStatus};
-use render::commands::{cancel_render, detect_blender, start_render};
+use render::commands::{
+    cancel_render, detect_blender, read_image_base64, start_render, write_png_base64,
+};
 use std::env;
 use std::sync::Mutex;
 use tauri::{Emitter, Listener, Manager};
@@ -62,6 +64,8 @@ fn create_specta_builder() -> Builder {
             detect_blender,
             start_render,
             cancel_render,
+            read_image_base64,
+            write_png_base64,
             get_pending_3dpak,
             start_catalog_scan,
             start_duplicate_scan,

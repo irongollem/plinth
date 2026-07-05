@@ -121,6 +121,76 @@ fn unique_path(path: PathBuf) -> PathBuf {
     unreachable!("ran out of integers before file names")
 }
 
+/// Read an image as a data URL for the branding bake. The webview draws
+/// the finished render (plus logo) onto a canvas — but images loaded via
+/// the asset: protocol are cross-origin and TAINT the canvas, making
+/// toBlob() throw. Data URLs don't, so the bytes take this detour.
+#[tauri::command]
+#[specta::specta]
+pub async fn read_image_base64(path: String) -> Result<String, AppError> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = std::fs::read(&path)
+            .map_err(|e| AppError::IoError(format!("Failed to read image {}: {}", path, e)))?;
+        let mime = match Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("jpg") | Some("jpeg") => "image/jpeg",
+            Some("webp") => "image/webp",
+            Some("gif") => "image/gif",
+            Some("svg") => "image/svg+xml",
+            _ => "image/png",
+        };
+        Ok(format!("data:{};base64,{}", mime, STANDARD.encode(&bytes)))
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Image read task failed: {}", e)))?
+}
+
+/// Overwrite an existing render with the branding-composited PNG the
+/// webview produced. Three guards keep a bad bake from eating a good
+/// render: the target must already exist (this only ever re-writes a
+/// finished render), the bytes must carry the PNG magic (a blank/failed
+/// canvas export dies here, not on disk), and the write goes through
+/// temp + rename so a crash can't leave a half-written file.
+#[tauri::command]
+#[specta::specta]
+pub async fn write_png_base64(path: String, data: String) -> Result<(), AppError> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = PathBuf::from(&path);
+        if !target.is_file() {
+            return Err(AppError::NotFoundError(format!(
+                "Refusing to write composited image: {} does not exist",
+                path
+            )));
+        }
+        // Accept a full data URL or bare base64 — everything after the
+        // last comma is the payload either way
+        let payload = data.rsplit(',').next().unwrap_or(&data);
+        let bytes = STANDARD
+            .decode(payload)
+            .map_err(|e| AppError::InvalidInput(format!("Invalid image data: {}", e)))?;
+        if !bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+            return Err(AppError::InvalidInput(
+                "Composited data is not a PNG — keeping the original render".to_string(),
+            ));
+        }
+        let tmp = target.with_extension("png.tmp");
+        std::fs::write(&tmp, &bytes)
+            .map_err(|e| AppError::IoError(format!("Failed to write composited image: {}", e)))?;
+        std::fs::rename(&tmp, &target).map_err(|e| {
+            std::fs::remove_file(&tmp).ok();
+            AppError::IoError(format!("Failed to replace render with composite: {}", e))
+        })
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Image write task failed: {}", e)))?
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn cancel_render(job_id: String) -> Result<(), AppError> {
