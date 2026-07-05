@@ -439,6 +439,10 @@ pub fn plan(
                     .all(|d| group_dirs.contains(d)) // no foreign models beneath
         });
 
+        // kept past the match: phase-2 must map leaf paths BACK through
+        // the phase-1 move to ask the disk what will exist after it lands
+        let base_move: Option<String> = wholesale.map(str::to_string);
+
         // where each member dir sits AFTER phase 1
         let cur: Vec<String> = match wholesale {
             Some(b) => {
@@ -489,27 +493,46 @@ pub fn plan(
         }
 
         for (leaf, idxs) in &buckets {
-            // A leaf that already exists ON DISK is normal, not an error:
-            // an earlier cleanup of the same designer/release created it,
-            // or a nested pose dir lives inside it. Nothing may dir-rename
-            // onto it — everything merges INTO it per-file, colliding
-            // against what's already there.
+            // A leaf that already exists — or WILL exist the moment the
+            // wholesale move lands (its pre-image inside the old base is on
+            // disk: Dark Wardens/Supported traveled along with B->M) — is
+            // normal, not an error. Nothing may dir-rename onto it;
+            // everything merges INTO it per-file, colliding against
+            // whatever it already holds.
             let occupant = idxs
                 .iter()
                 .copied()
                 .find(|&i| cur[i].eq_ignore_ascii_case(leaf));
-            let leaf_on_disk = Path::new(leaf).exists();
+            // the leaf's location BEFORE phase 1, when a wholesale move is
+            // planned — that's where the disk can be asked at plan time
+            let pre_image = base_move.as_deref().and_then(|b| {
+                leaf.strip_prefix(model_dir_str.as_str())
+                    .map(|suffix| format!("{}{}", b, suffix))
+            });
+            let leaf_now = Path::new(leaf).exists();
+            let leaf_on_disk = leaf_now
+                || pre_image
+                    .as_deref()
+                    .is_some_and(|p| Path::new(p).exists());
             let leaf_exists_foreign = leaf_on_disk && occupant.is_none();
 
             // target name (lowercased) -> ORIGINAL path of the file that
             // claimed it, so clashes can be settled by comparing contents.
-            // Pre-seeded with the leaf's existing disk files so merges
+            // Pre-seeded with the leaf's existing disk files (read from the
+            // pre-image when the leaf only exists after phase 1) so merges
             // dedup/disambiguate against them too.
             let mut used_names: HashMap<String, String> = HashMap::new();
             if leaf_exists_foreign {
-                for f in disk_files(Path::new(leaf)) {
-                    if f.file_name != "model.json" && f.file_name != "release.json" {
-                        used_names.insert(f.file_name.to_lowercase(), f.path.clone());
+                let seed_source = if leaf_now {
+                    Some(leaf.to_string())
+                } else {
+                    pre_image.clone()
+                };
+                if let Some(source) = seed_source {
+                    for f in disk_files(Path::new(&source)) {
+                        if f.file_name != "model.json" && f.file_name != "release.json" {
+                            used_names.insert(f.file_name.to_lowercase(), f.path.clone());
+                        }
                     }
                 }
             }
@@ -535,10 +558,15 @@ pub fn plan(
                     .enumerate()
                     .any(|(j, other)| j != i && is_under(other, from_dir) && other != from_dir);
                 // a dir rename is legal only onto a spot that's genuinely
-                // free on disk (case-only fixes of the same dir excepted)
+                // free on disk (case-only fixes of the same dir excepted).
+                // Both nesting directions are fatal: a leaf inside the
+                // member can't receive it, and a member inside its own
+                // leaf (Supported/Clean Bases -> Supported) would rename a
+                // child onto its own parent.
                 let can_rename = !anchored
                     && !is_nested_parent
                     && !is_under(leaf, from_dir)
+                    && !is_under(from_dir, leaf)
                     && (!leaf_on_disk || from_dir.eq_ignore_ascii_case(leaf));
 
                 if is_occupant || can_rename {
@@ -1450,6 +1478,91 @@ mod tests {
             plan.groups
         );
         assert_eq!(plan.clean_groups, 1);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn wholesale_move_merges_into_dirs_that_travel_along() {
+        // The Dark Wardens incident. Wholesale-moving the base carries
+        // Supported/ (and the variant dirs) along — so those leaves EXIST
+        // the moment phase 1 lands, even though Path::exists() said no at
+        // plan time. The old plan then dir-renamed Supported/Clean Bases
+        // onto its own parent: 'Destination already exists' + 39 skipped.
+        // Leaf existence must be asked at the PRE-IMAGE path, and a member
+        // nested under its own leaf must always merge per-file (upward).
+        let root = std::env::temp_dir().join(format!("plinth_norm_pre_{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let old = root.join("trapper_tier/Dark Wardens");
+        let bases = old.join("Supported/Clean Bases");
+        let pose_a = old.join("Supported/Great Swords/Pose A");
+        let pose_b = old.join("Supported/Great Swords/Pose B");
+        // the unsupported tree is what makes the MODEL dir the common
+        // ancestor — so Supported/ itself is in the traveling set
+        let unsup = old.join("Unsupported");
+        for d in [&bases, &pose_a, &pose_b, &unsup] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::write(bases.join("base_25mm.stl"), b"base").unwrap();
+        fs::write(pose_a.join("warden.lys"), b"pose a").unwrap();
+        fs::write(pose_b.join("warden.lys"), b"pose b").unwrap();
+        fs::write(unsup.join("warden.stl"), b"raw").unwrap();
+
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::test_init(&conn);
+        let mut base_row = model_row(&bases, "Dark Wardens bases", "Dark Wardens");
+        base_row.support_status = Some("supported".into());
+        let mut row_a = model_row(&pose_a, "Dark Wardens A", "Dark Wardens");
+        row_a.support_status = Some("supported".into());
+        row_a.variant = Some("Great Swords".into());
+        row_a.pose = Some("A".into());
+        let mut row_b = model_row(&pose_b, "Dark Wardens B", "Dark Wardens");
+        row_b.support_status = Some("supported".into());
+        row_b.variant = Some("Great Swords".into());
+        row_b.pose = Some("B".into());
+        let mut unsup_row = model_row(&unsup, "Dark Wardens", "Dark Wardens");
+        unsup_row.support_status = Some("unsupported".into());
+        let files = vec![
+            file_row(&bases.join("base_25mm.stl"), &bases),
+            file_row(&pose_a.join("warden.lys"), &pose_a),
+            file_row(&pose_b.join("warden.lys"), &pose_b),
+            file_row(&unsup.join("warden.stl"), &unsup),
+        ];
+        db::replace_catalog(
+            &mut conn,
+            &files,
+            &[base_row, row_a, row_b, unsup_row],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let plan = plan(&conn, &root, None, None).unwrap();
+        let group = &plan.groups[0];
+        // exactly ONE dir op: the wholesale base move. Supported/ and
+        // Great Swords/ travel along — nothing may rename onto them
+        let dir_ops: Vec<_> = group.ops.iter().filter(|op| op.kind == "dir").collect();
+        assert_eq!(dir_ops.len(), 1, "ops: {:?}", group.ops);
+
+        let outcome = apply_ops(&mut conn, &group.ops).unwrap();
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        let target = root.join("Bestiarum/2026-07 Dread Swamp/Dark Wardens");
+        // bases merged UP into the build folder, poses into the variant
+        // folder with the clash pose-suffixed
+        assert!(target.join("Supported/base_25mm.stl").is_file());
+        assert!(target.join("Supported/Great Swords/warden.lys").is_file());
+        assert!(target.join("Supported/Great Swords/warden B.lys").is_file());
+
+        let warnings = finalize(
+            &conn,
+            &root,
+            &["Dark Wardens".to_string()],
+            &group.old_dirs,
+        )
+        .unwrap();
+        assert!(warnings.is_empty(), "{:?}", warnings);
+        assert!(!target.join("Supported/Clean Bases").exists());
+        assert!(!target.join("Supported/Great Swords/Pose A").exists());
 
         fs::remove_dir_all(&root).ok();
     }
