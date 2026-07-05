@@ -979,6 +979,74 @@
         @click="showImageModal = false"
       />
     </ModalView>
+
+    <!-- Print file picker: tick exactly what goes to the slicer -->
+    <ModalView :is-open="showPrintModal" @close="showPrintModal = false">
+      <div
+        class="w-120 max-w-[85vw] bg-base-100 rounded-box p-4 flex flex-col gap-3"
+      >
+        <div>
+          <div class="font-bold text-[15px]">Print — {{ selected?.name }}</div>
+          <p class="text-[11px] text-base-content/50 mt-0.5">
+            Ticked files open in your slicer. Pre-sliced scenes carry supports
+            and plate layout, so they're picked over raw geometry by default.
+          </p>
+        </div>
+        <ul class="flex flex-col gap-0.5 max-h-72 overflow-y-auto">
+          <li v-for="file in printCandidates" :key="file.path">
+            <label
+              class="flex items-center gap-2 cursor-pointer py-1 px-1.5 rounded hover:bg-base-200"
+            >
+              <input
+                type="checkbox"
+                class="checkbox checkbox-xs"
+                :checked="printSelection.includes(file.path)"
+                @change="togglePrintFile(file.path)"
+              />
+              <span
+                class="flex-1 truncate font-mono text-[11.5px]"
+                :title="file.path"
+                >{{ file.file_name }}</span
+              >
+              <span
+                v-if="SLICED_EXTS.includes(file.extension)"
+                class="badge badge-xs badge-primary badge-outline"
+                >pre-sliced</span
+              >
+              <span
+                class="font-mono text-[10px] text-base-content/40 w-14 text-right"
+                >{{ formatFileSize(file.size_bytes) }}</span
+              >
+            </label>
+          </li>
+        </ul>
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            class="btn btn-sm btn-ghost"
+            @click="revealFromPrintModal"
+          >
+            Reveal folder
+          </button>
+          <span class="flex-1"></span>
+          <button
+            type="button"
+            class="btn btn-sm"
+            @click="showPrintModal = false"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="btn btn-sm btn-primary"
+            :disabled="!printSelection.length || printBusy"
+            @click="sendToSlicer"
+          >
+            Send {{ printSelection.length }} to slicer
+          </button>
+        </div>
+      </div>
+    </ModalView>
   </main>
 </template>
 
@@ -1678,18 +1746,38 @@ const renderSelected = () => {
   );
 };
 
+/* ---- print: pick exactly which files go to the slicer ---- */
 // Print-ready scene files beat raw geometry: a .lys/.chitu already carries
 // supports and plate layout, so when a member has both, those are what
-// "print" should hand to the slicer.
+// the modal pre-checks.
+const SLICED_EXTS = ["lys", "chitu", "chitubox"];
+const RAW_EXTS = ["stl", "obj", "3mf"];
+
+// What the modal offers: everything a slicer could eat. Images, licences
+// and archives stay out — offering them would only invite mis-ticks.
+const printCandidates = computed(() =>
+  files.value.filter((f) =>
+    [...SLICED_EXTS, ...RAW_EXTS].includes(f.extension),
+  ),
+);
+
 const printablePaths = computed(() => {
-  const sliced = files.value.filter((f) =>
-    ["lys", "chitu", "chitubox"].includes(f.extension),
+  const sliced = printCandidates.value.filter((f) =>
+    SLICED_EXTS.includes(f.extension),
   );
-  const pool = sliced.length
-    ? sliced
-    : files.value.filter((f) => ["stl", "obj", "3mf"].includes(f.extension));
+  const pool = sliced.length ? sliced : printCandidates.value;
   return pool.map((f) => f.path);
 });
+
+const showPrintModal = ref(false);
+const printSelection = ref<string[]>([]);
+const printBusy = ref(false);
+
+const togglePrintFile = (path: string) => {
+  printSelection.value = printSelection.value.includes(path)
+    ? printSelection.value.filter((p) => p !== path)
+    : [...printSelection.value, path];
+};
 
 const printModel = async () => {
   if (!selected.value) return;
@@ -1697,27 +1785,48 @@ const printModel = async () => {
   const action =
     (settingsResult.status === "ok" && settingsResult.data.print_action) ||
     "open-in-slicer";
+  // Reveal-folder users keep the direct flow: reveal takes no file list,
+  // so a picker would be a pointless extra click for them. Same fallback
+  // when there's nothing a slicer could open.
+  if (action === "reveal-folder" || !printCandidates.value.length) {
+    await reveal(files.value[0]?.path ?? selected.value.dir_path);
+    return;
+  }
+  printSelection.value = printablePaths.value;
+  showPrintModal.value = true;
+};
+
+const sendToSlicer = async () => {
+  if (!printSelection.value.length) return;
+  printBusy.value = true;
   try {
-    if (action === "open-in-slicer" && printablePaths.value.length) {
-      // Our own command, not the opener plugin: its open_path is
-      // fire-and-forget and reports success even when the OS has no app
-      // for the file type — a print button that silently does nothing
-      const result = await commands.openWithDefaultApp(printablePaths.value);
-      if (result.status === "ok") return;
-      // No slicer owns the extension: show why, then still be useful
-      toastStore.reportError("Couldn't open in a slicer", result.error);
-      toastStore.addToast(
-        "Revealing the folder instead — associate the files with your slicer, or switch the print button to reveal-folder in Settings",
-        "info",
-      );
+    // Our own command, not the opener plugin: its open_path is
+    // fire-and-forget and reports success even when the OS has no app
+    // for the file type — a print button that silently does nothing
+    const result = await commands.openWithDefaultApp(printSelection.value);
+    if (result.status === "ok") {
+      showPrintModal.value = false;
+      return;
     }
-    // Reveal-folder flow (setting, failed hand-off, or nothing printable):
-    // open the folder with the first file selected, ready to drag
-    const target = files.value[0]?.path ?? selected.value.dir_path;
-    await revealItemInDir(target);
+    // No slicer owns the extension: show why, then still be useful —
+    // the modal stays open with Reveal folder one click away
+    toastStore.reportError("Couldn't open in a slicer", result.error);
+    toastStore.addToast(
+      "Associate the files with your slicer, or use Reveal folder below",
+      "info",
+    );
   } catch (error) {
     toastStore.reportError("Failed to send to slicer", error);
+  } finally {
+    printBusy.value = false;
   }
+};
+
+const revealFromPrintModal = async () => {
+  const target =
+    printSelection.value[0] ?? files.value[0]?.path ?? selected.value?.dir_path;
+  showPrintModal.value = false;
+  if (target) await reveal(target);
 };
 
 const reveal = async (path: string) => {

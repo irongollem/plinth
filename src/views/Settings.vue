@@ -164,9 +164,10 @@
           </button>
         </div>
         <p class="text-[10.5px] text-base-content/40">
-          Open in slicer sends the model's files straight to whatever app your
-          system opens STL files with. Reveal folder shows them in
-          Finder/Explorer instead — handy if you switch between slicers.
+          Open in slicer lets you tick which of the model's files to send to
+          whatever app your system opens them with (pre-sliced scenes are
+          pre-selected). Reveal folder shows them in Finder/Explorer instead —
+          handy if you switch between slicers.
         </p>
       </div>
 
