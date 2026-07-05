@@ -525,14 +525,6 @@
                   remove “{{ selected.source_group }}”
                 </button>
               </div>
-              <button
-                type="button"
-                class="font-mono text-[10px] text-base-content/40 hover:text-primary cursor-pointer mt-0.5 text-left"
-                title="Restructure only this model's folders to the canonical layout — you review the moves first"
-                @click="openNormalize(selectedGroup?.group_name)"
-              >
-                clean up this model's folders…
-              </button>
               <p
                 v-if="selected.designer || selected.release_name"
                 class="font-mono text-[11px] text-base-content/50 mt-0.5"
@@ -753,6 +745,33 @@
                 Save details
               </button>
             </div>
+
+            <div
+              v-if="structureClean === true"
+              class="font-semibold text-[11px] tracking-[0.03em] text-center rounded-md py-2 text-success flex items-center justify-center gap-1.5"
+              title="This model's folders already match the canonical designer/release/model layout"
+            >
+              ✓ folder structure OK
+            </div>
+            <button
+              v-else
+              type="button"
+              class="font-semibold text-[11px] tracking-[0.03em] text-center border border-dashed rounded-md py-2 cursor-pointer disabled:opacity-40 disabled:cursor-default"
+              :class="
+                structureClean === false
+                  ? 'border-warning/40 text-warning'
+                  : 'border-base-content/15 text-base-content/40'
+              "
+              :disabled="structureClean === null"
+              title="Restructure only this model's folders to the canonical layout — you review the moves first"
+              @click="openNormalize(selectedGroup?.group_name)"
+            >
+              {{
+                structureClean === null
+                  ? "checking folder structure…"
+                  : "⚠ fix folder structure…"
+              }}
+            </button>
 
             <button
               type="button"
@@ -1772,6 +1791,7 @@ const selectGroup = async (group: CatalogGroup) => {
   commands.getCatalogGroupSources(group.group_name).then((sources) => {
     if (sources.status === "ok") groupSources.value = sources.data;
   });
+  checkStructure(group.group_name);
   const result = await commands.getCatalogGroupMembers(group.group_name);
   if (result.status !== "ok") {
     toastStore.reportError("Failed to load model variants", result.error);
@@ -2048,6 +2068,29 @@ const reveal = async (path: string) => {
 };
 
 /* ---- normalizer: make the disk match the curated catalog ---- */
+// null = still checking (or not checked yet) — the drawer button shows a
+// disabled "checking…" state rather than flashing dirty-then-clean.
+const structureClean = ref<boolean | null>(null);
+
+/** Dry-run the plan for one model to decide the drawer's badge/button. */
+const checkStructure = async (groupName: string) => {
+  structureClean.value = null;
+  if (!catalogRoot.value) return;
+  const result = await commands.planNormalize(
+    catalogRoot.value,
+    null,
+    groupName,
+  );
+  // the user may have clicked to a different model while this was in
+  // flight — a stale answer must never paint over the new selection
+  if (selectedGroup.value?.group_name !== groupName) return;
+  // Fail open on an error: showing the "fix" button is harmless (the plan
+  // dialog will just fail again with the same error visible), but getting
+  // stuck on "checking…" forever would hide a real problem
+  structureClean.value =
+    result.status === "ok" ? result.data.groups.length === 0 : false;
+};
+
 // Everything is planned read-only first and shown as a reviewable move
 // list; nothing touches the NAS until "Move" is clicked. Ops are applied
 // in chunks so big batches show progress instead of a silent hang.
