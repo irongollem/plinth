@@ -786,10 +786,11 @@ pub async fn plan_normalize(
     app_handle: AppHandle,
     root: String,
     designer: Option<String>,
+    group: Option<String>,
 ) -> Result<NormalizePlan, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
-        normalize::plan(&conn, Path::new(&root), designer.as_deref())
+        normalize::plan(&conn, Path::new(&root), designer.as_deref(), group.as_deref())
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Normalize plan task failed: {}", e)))?

@@ -103,7 +103,7 @@
         class="btn btn-sm"
         :disabled="!catalogRoot || isScanning"
         title="Restructure folders on disk to match the curated catalog — you review every move first"
-        @click="openNormalize"
+        @click="openNormalize()"
       >
         Clean up…
       </button>
@@ -525,6 +525,14 @@
                   remove “{{ selected.source_group }}”
                 </button>
               </div>
+              <button
+                type="button"
+                class="font-mono text-[10px] text-base-content/40 hover:text-primary cursor-pointer mt-0.5 text-left"
+                title="Restructure only this model's folders to the canonical layout — you review the moves first"
+                @click="openNormalize(selectedGroup?.group_name)"
+              >
+                clean up this model's folders…
+              </button>
               <p
                 v-if="selected.designer || selected.release_name"
                 class="font-mono text-[11px] text-base-content/50 mt-0.5"
@@ -1071,7 +1079,11 @@
             >
             and writes each model's metadata beside its files. Nothing moves
             until you approve the list below.
-            <template v-if="designerFilter">
+            <template v-if="normalizeScope">
+              Planning only for <b>{{ normalizeScope }}</b
+              >.</template
+            >
+            <template v-else-if="designerFilter">
               Planning only for <b>{{ designerFilter }}</b> (the toolbar
               filter).</template
             >
@@ -1087,14 +1099,31 @@
         </div>
 
         <template v-else-if="normalizePlanData">
-          <div class="font-mono text-[10.5px] text-base-content/50">
-            {{ normalizePlanData.groups.length }} model{{
-              normalizePlanData.groups.length === 1 ? "" : "s"
-            }}
-            to restructure · {{ normalizePlanData.clean_groups }} already clean
-            <template v-if="normalizePlanData.skipped.length">
-              · {{ normalizePlanData.skipped.length }} skipped</template
+          <div
+            class="flex items-center gap-3 font-mono text-[10.5px] text-base-content/50"
+          >
+            <label
+              v-if="normalizePlanData.groups.length > 1"
+              class="flex items-center gap-1.5 cursor-pointer"
             >
+              <input
+                type="checkbox"
+                class="checkbox checkbox-xs"
+                :checked="allPlanChecked"
+                @change="toggleAllPlan"
+              />
+              all
+            </label>
+            <span>
+              {{ normalizePlanData.groups.length }} model{{
+                normalizePlanData.groups.length === 1 ? "" : "s"
+              }}
+              to restructure ·
+              {{ normalizePlanData.clean_groups }} already clean
+              <template v-if="normalizePlanData.skipped.length">
+                · {{ normalizePlanData.skipped.length }} skipped</template
+              >
+            </span>
           </div>
 
           <div
@@ -2031,23 +2060,28 @@ const normalizeDone = ref(0);
 const normalizeTotal = ref(0);
 const normalizeIssues = ref<string[]>([]);
 const expandedPlanGroup = ref<string | null>(null);
+// non-null = the drawer asked to clean ONE model; null = whole catalog
+const normalizeScope = ref<string | null>(null);
 
-const openNormalize = async () => {
+const openNormalize = async (group?: string) => {
   if (!catalogRoot.value) {
     toastStore.addToast("Choose a catalog folder first", "info");
     return;
   }
+  normalizeScope.value = group ?? null;
   showNormalize.value = true;
   normalizePlanData.value = null;
   normalizePlanning.value = true;
   normalizeIssues.value = [];
   normalizeDone.value = 0;
   normalizeTotal.value = 0;
-  // the dry run respects the toolbar's designer facet, so a NAS cleanup
-  // can proceed one designer at a time
+  // the dry run respects the toolbar's designer facet (whole-catalog mode
+  // only — a model cleanup must not be excluded by an unrelated filter),
+  // so a NAS cleanup can proceed one designer at a time
   const result = await commands.planNormalize(
     catalogRoot.value,
-    designerFilter.value || null,
+    group ? null : designerFilter.value || null,
+    group ?? null,
   );
   normalizePlanning.value = false;
   if (result.status !== "ok") {
@@ -2063,6 +2097,18 @@ const toggleNormalizeGroup = (name: string) => {
   normalizeChecked.value = normalizeChecked.value.includes(name)
     ? normalizeChecked.value.filter((n) => n !== name)
     : [...normalizeChecked.value, name];
+};
+
+const allPlanChecked = computed(
+  () =>
+    !!normalizePlanData.value?.groups.length &&
+    normalizeChecked.value.length === normalizePlanData.value.groups.length,
+);
+
+const toggleAllPlan = () => {
+  normalizeChecked.value = allPlanChecked.value
+    ? []
+    : (normalizePlanData.value?.groups.map((g) => g.group_name) ?? []);
 };
 
 const opLabel = (from: string, to: string) => {

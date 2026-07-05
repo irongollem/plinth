@@ -18,10 +18,12 @@
 //! cross-volume rename fails loudly and is reported, never silently
 //! degraded to copy+delete.
 
-use super::{layout, BatchOutcome, NormalizeGroupPlan, NormalizeOp, NormalizePlan, NormalizeSkip};
+use super::{
+    dups, layout, BatchOutcome, NormalizeGroupPlan, NormalizeOp, NormalizePlan, NormalizeSkip,
+};
 use crate::error::AppError;
 use rusqlite::Connection;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 
 /// One catalog member with every facet resolved user-override-first —
@@ -160,10 +162,101 @@ fn files_in_dir(conn: &Connection, dir: &str) -> Result<Vec<FileRowLite>, AppErr
     Ok(rows)
 }
 
+/// The same bytes in two places? Hardlinked names are trivially identical
+/// (one inode); otherwise size then a full BLAKE3 compare settles it. Only
+/// ever called for name CLASHES, so the hashing cost stays negligible.
+fn same_content(a: &Path, b: &Path) -> bool {
+    if let (Some(ia), Some(ib)) = (dups::file_identity(a), dups::file_identity(b)) {
+        if ia == ib {
+            return true;
+        }
+    }
+    let (Ok(ma), Ok(mb)) = (a.metadata(), b.metadata()) else {
+        return false;
+    };
+    ma.len() == mb.len()
+        && matches!(
+            (dups::hash_file(a, None), dups::hash_file(b, None)),
+            (Ok(ha), Ok(hb)) if ha == hb
+        )
+}
+
+/// "oval.stl" -> "oval 2.stl", "oval 3.stl"… first free number wins.
+fn numbered_name(name: &str, taken: &HashMap<String, String>) -> String {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, Some(ext)),
+        _ => (name, None),
+    };
+    for n in 2.. {
+        let candidate = match ext {
+            Some(ext) => format!("{} {}.{}", stem, n, ext),
+            None => format!("{} {}", stem, n),
+        };
+        if !taken.contains_key(&candidate.to_lowercase()) {
+            return candidate;
+        }
+    }
+    unreachable!("ran out of integers before file names")
+}
+
+/// Plan one file's landing spot in a merge bucket. Clash policy: a file
+/// that is byte-identical to the one already claiming the name becomes a
+/// reviewable "drop" (the copy is redundant once one lands — the unicorn-
+/// bases case, where every part folder repeats the same base STLs); files
+/// that merely SHARE a name get a numbered one instead of being skipped.
+#[allow(clippy::too_many_arguments)]
+fn place_file(
+    current: String,
+    file: &FileRowLite,
+    pose: Option<&str>,
+    leaf: &str,
+    used_names: &mut HashMap<String, String>,
+    ops: &mut Vec<NormalizeOp>,
+    notes: &mut Vec<String>,
+) {
+    let desired = layout::pose_suffixed_name(&file.file_name, pose.unwrap_or(""));
+    let mut target_name = desired.clone();
+    if let Some(kept_original) = used_names.get(&desired.to_lowercase()) {
+        if same_content(Path::new(kept_original), Path::new(&file.path)) {
+            ops.push(NormalizeOp {
+                from: current,
+                to: format!("{}{}{}", leaf, MAIN_SEPARATOR, desired),
+                kind: "drop".into(),
+                pose: None,
+            });
+            return;
+        }
+        target_name = numbered_name(&desired, used_names);
+        notes.push(format!(
+            "{} exists twice with different contents — one becomes {}",
+            desired, target_name
+        ));
+    }
+    used_names.insert(target_name.to_lowercase(), file.path.clone());
+    let to = format!("{}{}{}", leaf, MAIN_SEPARATOR, target_name);
+    if current != to {
+        ops.push(NormalizeOp {
+            from: current,
+            to,
+            kind: "file".into(),
+            pose: pose.map(String::from),
+        });
+    } else if pose.is_some() {
+        // name already carries the pose; still record it as metadata
+        ops.push(NormalizeOp {
+            from: current,
+            to,
+            kind: "pose".into(),
+            pose: pose.map(String::from),
+        });
+    }
+}
+
 pub fn plan(
     conn: &Connection,
     root: &Path,
     designer_filter: Option<&str>,
+    group_filter: Option<&str>,
 ) -> Result<NormalizePlan, AppError> {
     let root_str = root.to_string_lossy().into_owned();
     let rows = member_rows(conn, None)?;
@@ -180,6 +273,12 @@ pub fn plan(
 
     for members in groups.values() {
         let display = members[0].gname.clone();
+        // scope to one model when the drawer's per-model cleanup asked for it
+        if let Some(filter) = group_filter {
+            if !display.eq_ignore_ascii_case(filter.trim()) {
+                continue;
+            }
+        }
         let designer = first_some(members, |r| r.designer.as_ref());
         if let Some(filter) = designer_filter {
             let matches = designer
@@ -295,7 +394,9 @@ pub fn plan(
             // dir contains another member (nested) or contains the leaf
             // itself must move per-file instead.
             let mut anchored = false;
-            let mut used_names: HashSet<String> = HashSet::new();
+            // target name (lowercased) -> ORIGINAL path of the file that
+            // claimed it, so clashes can be settled by comparing contents
+            let mut used_names: HashMap<String, String> = HashMap::new();
             for &i in idxs.iter() {
                 let member = members[i];
                 let from_dir = &cur[i];
@@ -324,67 +425,42 @@ pub fn plan(
                     // anchor's files gain their pose suffix so the whole
                     // set stays distinguishable side by side
                     if merging {
-                        let pose = member.pose.clone().unwrap_or_default();
                         for f in files_in_dir(conn, &member.dir)? {
                             if f.file_name == "model.json" || f.file_name == "release.json" {
                                 continue;
                             }
-                            let new_name = layout::pose_suffixed_name(&f.file_name, &pose);
-                            if !used_names.insert(new_name.to_lowercase()) {
-                                notes.push(format!(
-                                    "name clash in {}: {} left as is",
-                                    leaf, new_name
-                                ));
-                                continue;
-                            }
-                            if new_name != f.file_name {
-                                ops.push(NormalizeOp {
-                                    from: format!("{}{}{}", leaf, MAIN_SEPARATOR, f.file_name),
-                                    to: format!("{}{}{}", leaf, MAIN_SEPARATOR, new_name),
-                                    kind: "file".into(),
-                                    pose: member.pose.clone(),
-                                });
-                            } else if member.pose.is_some() {
-                                // name already carries the pose; still
-                                // record it as file-level metadata
-                                ops.push(NormalizeOp {
-                                    from: format!("{}{}{}", leaf, MAIN_SEPARATOR, f.file_name),
-                                    to: format!("{}{}{}", leaf, MAIN_SEPARATOR, f.file_name),
-                                    kind: "pose".into(),
-                                    pose: member.pose.clone(),
-                                });
-                            }
+                            // after the anchor rename the file sits in the leaf
+                            let current = format!("{}{}{}", leaf, MAIN_SEPARATOR, f.file_name);
+                            place_file(
+                                current,
+                                &f,
+                                member.pose.as_deref(),
+                                leaf,
+                                &mut used_names,
+                                &mut ops,
+                                &mut notes,
+                            );
                         }
                     }
                     continue;
                 }
 
                 // per-file move (merge into the leaf, pose baked into names)
-                let pose = member.pose.clone().unwrap_or_default();
                 for f in files_in_dir(conn, &member.dir)? {
                     if f.file_name == "model.json" || f.file_name == "release.json" {
                         continue; // stale sidecars die with their dir
                     }
-                    let new_name = layout::pose_suffixed_name(&f.file_name, &pose);
-                    if !used_names.insert(new_name.to_lowercase()) {
-                        notes.push(format!(
-                            "name clash in {}: {} from {} skipped",
-                            leaf, new_name, member.dir
-                        ));
-                        continue;
-                    }
                     // translate the indexed path through the phase-1 move
-                    let from = format!(
-                        "{}{}",
-                        cur[i],
-                        &f.path[member.dir.len()..]
+                    let current = format!("{}{}", cur[i], &f.path[member.dir.len()..]);
+                    place_file(
+                        current,
+                        &f,
+                        member.pose.as_deref(),
+                        leaf,
+                        &mut used_names,
+                        &mut ops,
+                        &mut notes,
                     );
-                    ops.push(NormalizeOp {
-                        from,
-                        to: format!("{}{}{}", leaf, MAIN_SEPARATOR, new_name),
-                        kind: "file".into(),
-                        pose: member.pose.clone(),
-                    });
                 }
                 // nested folders under a per-file-merged member stay put
                 let nested_prefix = format!("{}{}", member.dir, MAIN_SEPARATOR);
@@ -436,6 +512,39 @@ pub fn apply_ops(conn: &mut Connection, ops: &[NormalizeOp]) -> Result<BatchOutc
                 errors.push(format!("Failed to record pose for {}: {}", op.to, e));
             } else {
                 succeeded += 1;
+            }
+            continue;
+        }
+        // "drop": op.from is a redundant copy of op.to. The plan proved
+        // them identical — verify AGAIN before deleting (same paranoia as
+        // the dup merge: anything can change between plan and apply).
+        if op.kind == "drop" {
+            let from = Path::new(&op.from);
+            let to = Path::new(&op.to);
+            if !to.is_file() {
+                errors.push(format!(
+                    "Kept copy missing, duplicate left in place: {}",
+                    op.from
+                ));
+                continue;
+            }
+            if !from.is_file() || !same_content(from, to) {
+                errors.push(format!(
+                    "No longer identical to the kept copy, left in place: {}",
+                    op.from
+                ));
+                continue;
+            }
+            if let Err(e) = std::fs::remove_file(from) {
+                errors.push(format!("Failed to remove duplicate {}: {}", op.from, e));
+                continue;
+            }
+            match super::db::remove_files(conn, &[op.from.clone()]) {
+                Ok(()) => succeeded += 1,
+                Err(e) => errors.push(format!(
+                    "Removed duplicate {} but failed to update the catalog (rescan to fix): {}",
+                    op.from, e
+                )),
             }
             continue;
         }
@@ -809,7 +918,7 @@ mod tests {
         ];
         db::replace_catalog(&mut conn, &files, &[sup_row, unsup_row], &[], &[]).unwrap();
 
-        let plan = plan(&conn, &root, None).unwrap();
+        let plan = plan(&conn, &root, None, None).unwrap();
         assert_eq!(plan.groups.len(), 1);
         let group = &plan.groups[0];
         let target = root.join("Bestiarum/2026-07 Dread Swamp/Bog Hag");
@@ -856,7 +965,7 @@ mod tests {
         assert!(!root.join("bestiarum-07-2026").exists());
 
         // idempotence: a second plan finds nothing to do
-        let again = super::plan(&conn, &root, None).unwrap();
+        let again = super::plan(&conn, &root, None, None).unwrap();
         assert_eq!(again.groups.len(), 0, "{:?}", again.groups);
         assert_eq!(again.clean_groups, 1);
 
@@ -885,7 +994,7 @@ mod tests {
         ];
         db::replace_catalog(&mut conn, &files, &[row_a, row_b], &[], &[]).unwrap();
 
-        let plan = plan(&conn, &root, None).unwrap();
+        let plan = plan(&conn, &root, None, None).unwrap();
         let group = &plan.groups[0];
         let target = root.join("Bestiarum/2026-07 Dread Swamp/galeb duhr");
 
@@ -926,6 +1035,80 @@ mod tests {
         // file poses beat a dir pose — the dir level stays null
         assert!(meta["pose"].is_null());
         assert_eq!(meta["file_poses"].as_array().unwrap().len(), 2);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn identical_files_collapse_and_different_ones_get_numbered() {
+        // the unicorn-bases shape: every part folder repeats the same base
+        // STLs under an identically-named dir, no poses to disambiguate
+        let root = std::env::temp_dir().join(format!("plinth_norm_dup_{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let pt1 = root.join("unicorn/pt1/Bases");
+        let pt2 = root.join("unicorn/pt2/Bases");
+        fs::create_dir_all(&pt1).unwrap();
+        fs::create_dir_all(&pt2).unwrap();
+        fs::write(pt1.join("oval.stl"), b"same bytes").unwrap();
+        fs::write(pt2.join("oval.stl"), b"same bytes").unwrap();
+        fs::write(pt1.join("square.stl"), b"contents a").unwrap();
+        fs::write(pt2.join("square.stl"), b"contents b").unwrap();
+
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::test_init(&conn);
+        let mut row_1 = model_row(&pt1, "Bases", "Unicorn Bases");
+        row_1.support_status = Some("supported".into());
+        let mut row_2 = model_row(&pt2, "Bases", "Unicorn Bases");
+        row_2.support_status = Some("supported".into());
+        let files = vec![
+            file_row(&pt1.join("oval.stl"), &pt1),
+            file_row(&pt1.join("square.stl"), &pt1),
+            file_row(&pt2.join("oval.stl"), &pt2),
+            file_row(&pt2.join("square.stl"), &pt2),
+        ];
+        db::replace_catalog(&mut conn, &files, &[row_1, row_2], &[], &[]).unwrap();
+
+        let plan = plan(&conn, &root, None, None).unwrap();
+        let group = &plan.groups[0];
+        assert!(
+            group.ops.iter().any(|op| op.kind == "drop"),
+            "identical copy should plan as a drop: {:?}",
+            group.ops
+        );
+        assert!(
+            group.notes.iter().any(|n| n.contains("square 2.stl")),
+            "differing contents should get a numbered name: {:?}",
+            group.notes
+        );
+
+        let outcome = apply_ops(&mut conn, &group.ops).unwrap();
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        let target = root.join("Bestiarum/2026-07 Dread Swamp/Unicorn Bases/Supported");
+        // ONE oval survives; both squares survive under distinct names
+        assert!(target.join("oval.stl").is_file());
+        assert!(!target.join("oval 2.stl").exists());
+        assert!(target.join("square.stl").is_file());
+        assert!(target.join("square 2.stl").is_file());
+        // the dropped copy left the index too
+        let oval_rows: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE file_name = 'oval.stl'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(oval_rows, 1);
+
+        let warnings = finalize(
+            &conn,
+            &root,
+            &["Unicorn Bases".to_string()],
+            &group.old_dirs,
+        )
+        .unwrap();
+        assert!(warnings.is_empty(), "{:?}", warnings);
+        // the emptied part folders are gone
+        assert!(!root.join("unicorn").exists());
 
         fs::remove_dir_all(&root).ok();
     }

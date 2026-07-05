@@ -195,7 +195,7 @@ pub fn supports_links(path: &Path) -> bool {
     supported
 }
 
-fn hash_file(path: &Path, limit: Option<usize>) -> Result<String, AppError> {
+pub(crate) fn hash_file(path: &Path, limit: Option<usize>) -> Result<String, AppError> {
     let mut file = std::fs::File::open(path)
         .map_err(|e| AppError::IoError(format!("Cannot open {}: {}", path.display(), e)))?;
     let mut hasher = blake3::Hasher::new();
