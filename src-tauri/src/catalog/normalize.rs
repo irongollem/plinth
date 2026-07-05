@@ -476,6 +476,77 @@ pub fn plan(
             }
         };
 
+        // ---- stranded images in EXCLUSIVE ancestor dirs. A source model
+        // dir like "Little Knight's Command Group/" often holds its
+        // thumbnails BESIDE the build folders; the build folders merge
+        // away as members and the images stay stranded in a husk dir
+        // forever. An ancestor qualifies while every model dir beneath it
+        // belongs to this group — the walk stops the moment a foreign
+        // model shares the dir, so release-level images that belong to
+        // everybody are never claimed. IMAGES ONLY, deliberately: an
+        // exclusive month folder can also hold backup archives and other
+        // freight that has no business inside a model dir.
+        {
+            // above the wholesale base (it carries its own insides), or
+            // above each member in per-member mode
+            let walk_from: Vec<&str> = match base_move.as_deref() {
+                Some(b) => vec![b],
+                None => dirs.to_vec(),
+            };
+            let mut extra_dirs: Vec<String> = Vec::new();
+            for d in walk_from {
+                let mut current = Path::new(d).parent();
+                while let Some(dir) = current {
+                    let dir_str = dir.to_string_lossy().into_owned();
+                    if dir_str == root_str
+                        || !is_under(&dir_str, &root_str)
+                        || is_under(&dir_str, &model_dir_str)
+                        || group_dirs.contains(dir_str.as_str())
+                    {
+                        break;
+                    }
+                    let exclusive = all_dirs
+                        .iter()
+                        .filter(|x| is_under(x, &dir_str))
+                        .all(|x| group_dirs.contains(*x));
+                    if !exclusive {
+                        break;
+                    }
+                    if !extra_dirs.contains(&dir_str) {
+                        extra_dirs.push(dir_str.clone());
+                    }
+                    current = dir.parent();
+                }
+            }
+            if !extra_dirs.is_empty() {
+                // images land at the model ROOT, colliding against
+                // whatever is already there
+                let mut used_names: HashMap<String, String> = HashMap::new();
+                for f in disk_files(&model_dir) {
+                    used_names.insert(f.file_name.to_lowercase(), f.path.clone());
+                }
+                for dir in &extra_dirs {
+                    for f in disk_files(Path::new(dir)) {
+                        if !is_image_file(&f.file_name) {
+                            continue;
+                        }
+                        place_file(
+                            f.path.clone(),
+                            &f,
+                            None,
+                            &model_dir_str,
+                            &mut used_names,
+                            &mut ops,
+                            &mut notes,
+                        );
+                    }
+                    if !old_dirs.contains(dir) {
+                        old_dirs.push(dir.clone());
+                    }
+                }
+            }
+        }
+
         // ---- phase 2: reshape into Supported/Unsupported[/variant] leaves
         let desired: Vec<String> = members
             .iter()
@@ -1615,9 +1686,9 @@ mod tests {
         assert!(!target.join("Supported/Clean Bases").exists());
         assert!(!target.join("Supported/Great Swords/Pose A").exists());
 
-        // THE regression: sidecars must land in the LEAVES holding the
-        // files, not in the swept pose dirs — or the next scan shatters
-        // the model into heuristic per-variant cards named 'Great Swords'
+        // THE placement regression: sidecars must land in the LEAVES
+        // holding the files, not in the swept pose dirs — or the next scan
+        // shatters the model into heuristic per-variant cards
         for leaf in ["Supported", "Supported/Great Swords", "Unsupported"] {
             let meta: serde_json::Value = serde_json::from_str(
                 &fs::read_to_string(target.join(leaf).join("model.json")).unwrap_or_else(|_| {
@@ -1633,6 +1704,79 @@ mod tests {
         .unwrap();
         assert_eq!(gs_meta["variant"], "Great Swords");
         assert_eq!(gs_meta["file_poses"].as_array().unwrap().len(), 2);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn stranded_thumbnails_follow_the_model() {
+        // Little Knights: the command group's thumbnails sat BESIDE its
+        // build folders in its own source dir. The build folders merged
+        // away as members and the jpgs stayed stranded in a husk directory
+        // the sweep couldn't remove. Images in EXCLUSIVE ancestor dirs
+        // (only this group's models beneath) must ride along to the model
+        // root; the foreign sibling keeps release-level files unclaimed.
+        let root = std::env::temp_dir().join(format!("plinth_norm_husk_{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let rel = root.join("pt1");
+        let foreign = rel.join("Peryton");
+        let src = rel.join("Little Knight's Command Group");
+        let sup = src.join("Supported");
+        fs::create_dir_all(&foreign).unwrap();
+        fs::create_dir_all(&sup).unwrap();
+        fs::write(foreign.join("peryton.stl"), b"x").unwrap();
+        fs::write(sup.join("cmd.stl"), b"x").unwrap();
+        fs::write(src.join("thumb.jpg"), b"jpg").unwrap();
+        // release-level image shared by every model — must NOT be claimed
+        fs::write(rel.join("group shot.jpg"), b"jpg").unwrap();
+
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::test_init(&conn);
+        let mut knight = model_row(&sup, "Little Knights", "Little Knights");
+        knight.support_status = Some("supported".into());
+        let peryton = model_row(&foreign, "Peryton", "Peryton");
+        let files = vec![
+            file_row(&sup.join("cmd.stl"), &sup),
+            file_row(&foreign.join("peryton.stl"), &foreign),
+        ];
+        db::replace_catalog(&mut conn, &files, &[knight, peryton], &[], &[]).unwrap();
+
+        let plan = plan(&conn, &root, None, Some("Little Knights")).unwrap();
+        let group = &plan.groups[0];
+        let target = root.join("Bestiarum/2026-07 Dread Swamp/Little Knights");
+        assert!(
+            group
+                .ops
+                .iter()
+                .any(|op| op.kind == "file" && op.to.ends_with("thumb.jpg")),
+            "husk image must be planned: {:?}",
+            group.ops
+        );
+
+        let outcome = apply_ops(&mut conn, &group.ops).unwrap();
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        assert!(target.join("thumb.jpg").is_file());
+        assert!(target.join("Supported/cmd.stl").is_file());
+        // the shared release image stayed where it was
+        assert!(rel.join("group shot.jpg").is_file());
+
+        let warnings = finalize(
+            &conn,
+            &root,
+            &["Little Knights".to_string()],
+            &group.old_dirs,
+        )
+        .unwrap();
+        assert!(warnings.is_empty(), "{:?}", warnings);
+        // the husk is gone, and the sidecar references the rescued render
+        assert!(!src.exists());
+        let meta: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(target.join("Supported/model.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(meta["images"][0], "../thumb.jpg");
+        // the foreign model was untouched
+        assert!(foreign.join("peryton.stl").is_file());
 
         fs::remove_dir_all(&root).ok();
     }
