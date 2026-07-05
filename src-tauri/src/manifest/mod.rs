@@ -70,6 +70,9 @@ pub struct ManifestModel {
     pub tags: Vec<String>,
     pub designer: Option<String>,
     pub sculptor: Option<String>,
+    /// The facet between support and pose (weapon/mount). Additive in v1.
+    #[serde(default)]
+    pub variant: Option<String>,
     pub pose: Option<String>,
     pub scale: Option<String>,
     pub support_status: Option<String>,
@@ -221,6 +224,7 @@ mod tests {
                     tags: vec!["earth".into()],
                     designer: Some("Dragon Trapper's Lodge".into()),
                     sculptor: None,
+                    variant: None,
                     pose: Some("A".into()),
                     scale: Some("32mm".into()),
                     support_status: Some("unsupported".into()),

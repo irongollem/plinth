@@ -8,12 +8,12 @@ import type {
 } from "../bindings";
 import { useToastStore } from "./toastStore.ts";
 
+// pose/scale/support_status used to live here as ad-hoc extras; they're
+// real StlModel fields now (the 3pk writer carries them), so only the
+// catalog bookkeeping remains local.
 export type DraftReleaseModel = StlModel & {
   source_dir?: string;
   source_group?: string;
-  pose?: string | null;
-  scale?: string | null;
-  support_status?: string | null;
 };
 
 // Top-level sidebar sections. The old flat release/addStl/finalize tabs are

@@ -1123,6 +1123,8 @@ const toggleDups = () => {
 // members (variant_key null).
 const memberKey = (entry: CatalogEntry) => entry.variant_key ?? entry.dir_path;
 
+const basename = (path: string) => path.split(/[\\/]/).pop() ?? path;
+
 // 3D preview is opt-in PER MEMBER. Leaving it latched meant every pose or
 // model click immediately parsed multi-million-triangle STLs on the main
 // thread — browsing became a chain of UI freezes with no way to turn the
@@ -1961,9 +1963,24 @@ const addToDraftRelease = async () => {
         commands.getCatalogModelFiles(variant.dir_path, variant.variant_key),
       ),
     );
+    // Per-file pose assignments ride along so a curated dump folder
+    // reappears already split on the receiving side (docs/3PK.md)
+    const assignmentResults = await Promise.all(
+      newVariants.map((variant) => commands.getFileVariants(variant.dir_path)),
+    );
     for (const [index, variant] of newVariants.entries()) {
       const fileResult = fileResults[index];
       if (fileResult.status !== "ok") throw fileResult.error;
+      const fileNames = new Set(fileResult.data.map((file) => file.file_name));
+      const assignments = assignmentResults[index];
+      const filePoses = (assignments.status === "ok" ? assignments.data : [])
+        .filter((assignment) => fileNames.has(basename(assignment.path)))
+        .map((assignment) => ({
+          name: basename(assignment.path),
+          variant: assignment.variant,
+          pose: assignment.pose,
+          support_status: assignment.support_status,
+        }));
       const poseKey = variant.pose ?? variant.name;
       // Mirror the catalog drawer's preview resolution so the render the user
       // sees on the card actually rides along: the pose's own image, else a
@@ -1987,9 +2004,17 @@ const addToDraftRelease = async () => {
         group: variants.length > 1 ? groupName : null,
         source_dir: variant.dir_path,
         source_group: groupName,
+        // The full curation travels: model.json → manifest → another
+        // user's catalog (the whole point of the 3pk format)
+        variant: variant.variant,
         pose: variant.pose,
         scale: variant.scale,
         support_status: variant.support_status,
+        release_date: variant.release_date,
+        designer: variant.designer,
+        sculptor: variant.sculptor,
+        release_name: variant.release_name,
+        file_poses: filePoses,
       });
     }
     toastStore.addToast(

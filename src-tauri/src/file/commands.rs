@@ -51,14 +51,15 @@ pub async fn add_model(
     let relative_file_paths = storage::convert_to_relative_paths(&copied_files, &model_folder)?;
 
     let model_id = model.id.unwrap_or(Uuid::new_v4());
+    // Struct-update: the rich catalog metadata (pose/scale/support/designer/
+    // file_poses…) passes through untouched — dropping it here would strip
+    // the curation the 3pk format exists to carry
     let model_with_relative_paths = StlModel {
         id: Some(model_id),
         name: clean_model_name,
-        description: model.description,
-        tags: model.tags,
-        group: model.group.clone(),
         images: relative_image_paths,
         model_files: relative_file_paths,
+        ..model
     };
 
     let model_json_path = model_folder.join("model.json");

@@ -86,6 +86,11 @@ pub struct ModelReference {
     pub location: ModelLocation,
 }
 
+/// A model as the release builder stages it and `model.json` records it.
+/// The rich fields mirror the scanner's ModelJson reader — this is the WRITE
+/// side of metadata portability (docs/3PK.md): whatever curation the catalog
+/// holds rides into the sidecar, the manifest, and back out on another
+/// user's scan. All optional with defaults so old sidecars still parse.
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
 pub struct StlModel {
     #[specta(type = Option<String>)]
@@ -96,4 +101,35 @@ pub struct StlModel {
     pub images: Vec<String>, // the path of the temporary location of the image during archive creation
     pub model_files: Vec<String>, // the path of the temporary location of the model file during archive creation
     pub group: Option<String>,
+    #[serde(default)]
+    pub variant: Option<String>,
+    #[serde(default)]
+    pub pose: Option<String>,
+    #[serde(default)]
+    pub scale: Option<String>,
+    #[serde(default)]
+    pub support_status: Option<String>,
+    #[serde(default)]
+    pub release_date: Option<String>,
+    #[serde(default)]
+    pub designer: Option<String>,
+    #[serde(default)]
+    pub sculptor: Option<String>,
+    #[serde(default)]
+    pub release_name: Option<String>,
+    /// Per-file pose/variant assignments (a curated dump folder), restored
+    /// into file_variants on scan. Names are file basenames.
+    #[serde(default)]
+    pub file_poses: Vec<FilePose>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct FilePose {
+    pub name: String,
+    #[serde(default)]
+    pub variant: Option<String>,
+    #[serde(default)]
+    pub pose: Option<String>,
+    #[serde(default)]
+    pub support_status: Option<String>,
 }

@@ -39,7 +39,7 @@ The format (`manifest::Manifest` structs + BLAKE3) and the scanner-side reader
 (rich `model.json` → catalog, incl. per-file poses) are built. The writer is
 the remaining half and depends on the release-builder flow settling first.
 
-- [ ] Enrich what `add_model` writes to `model.json`: carry the catalog metadata (variant/pose/scale/support/designer/sculptor/release_name + `file_poses`) through the release-builder staging → `add_model` → sidecar, so a packed release actually contains the curation the reader restores. Needs `StlModel` (and the frontend `DraftReleaseModel`) extended, and the staging in Catalog.vue `addToDraftRelease` to pull designer/sculptor/release_name + `file_variants`.
+- [x] Enrich what `add_model` writes to `model.json`: `StlModel` carries the full curation (variant/pose/scale/support/designer/sculptor/release_name/release_date + `file_poses`), `addToDraftRelease` stages it from the catalog (incl. per-file assignments filtered to the member's own files), `add_model` passes it through untouched, and `pack_manifest` maps it onto `ManifestModel`/`ManifestFile` (with release-level fallbacks for designer/date/name). `ManifestModel` gained the additive `variant` field.
 - [x] Container `manifest.json` in `release.3pk`: one component per group with a BLAKE3 archive checksum + per-file checksums, built at pack time (`file/pack_manifest.rs`, sequenced components → manifest → 3pk in `compression_jobs`) with the Phase-4 checksum-dedup folded in. Emits null for the fields `model.json` doesn't carry yet — filled by the enrichment bullet above.
 - [ ] Wire the finalize flow to emit the manifest and verify round-trip: pack → scan on a clean profile → curation restored.
 
