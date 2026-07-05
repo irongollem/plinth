@@ -311,6 +311,23 @@ pub async fn rename_catalog_group(
     .map_err(|e| AppError::ConfigError(format!("Group rename task failed: {}", e)))?
 }
 
+/// The scanner-level groups shown under one card. Length > 1 means the card
+/// was combined (or renamed into a collision) and can be split — the UI
+/// offers "split" exactly then, and rename-to-empty performs it.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_catalog_group_sources(
+    app_handle: AppHandle,
+    group_name: String,
+) -> Result<Vec<String>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::group_sources(&conn, &group_name)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Group source task failed: {}", e)))?
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn combine_catalog_groups(
@@ -612,13 +629,24 @@ pub async fn merge_duplicate_files(
         let (merged, errors) = dups::merge_duplicates(&keep, &duplicate_paths)?;
         if !merged.is_empty() {
             if let Some(identity) = dups::file_identity(&keep) {
-                let entries: Vec<(String, String)> = merged
+                // Fresh mtimes ride along: the merged paths now carry the
+                // keeper's timestamp, and a stale one in the index would make
+                // the next rescan drop their hashes as "changed files"
+                let entries: Vec<(String, String, i64)> = merged
                     .iter()
                     .chain(std::iter::once(&keep_path))
-                    .map(|p| (p.clone(), identity.clone()))
+                    .map(|p| {
+                        let modified_at = std::fs::metadata(p)
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        (p.clone(), identity.clone(), modified_at)
+                    })
                     .collect();
                 let conn = open_db(&app_handle)?;
-                db::store_identities(&conn, &entries)?;
+                db::store_merge_results(&conn, &entries)?;
             }
         }
         Ok(BatchOutcome {

@@ -916,6 +916,29 @@ pub fn rename_group(conn: &Connection, group_name: &str, new_name: &str) -> Resu
     Ok(())
 }
 
+/// The scanner-level source groups currently shown under one display name —
+/// more than one means the card is a combination (renamed-together groups),
+/// which is what makes it splittable: clearing the renames (rename_group
+/// with an empty name) restores exactly these names as separate cards.
+pub fn group_sources(conn: &Connection, group_name: &str) -> Result<Vec<String>, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Group source lookup failed: {}", e));
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT COALESCE(m.group_name, m.name) AS src
+             FROM models m
+             LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)
+             WHERE lower(COALESCE(r.display_name, m.group_name, m.name)) = lower(?1)
+             ORDER BY src COLLATE NOCASE",
+        )
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map([group_name], |row| row.get(0))
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
 /// The explicit merge tool: map every listed group onto one display name.
 /// This is rename_group's merge behavior made first-class — folder
 /// inference only groups what a creator's structure happens to encode,
@@ -1171,6 +1194,31 @@ pub fn store_identities(conn: &Connection, entries: &[(String, String)]) -> Resu
             .map_err(map_err)?;
         for (path, identity) in entries {
             stmt.execute(params![path, identity]).map_err(map_err)?;
+        }
+    }
+    tx.commit().map_err(map_err)?;
+    Ok(())
+}
+
+/// Post-merge bookkeeping: identity AND modified_at, in one transaction.
+/// The mtime matters because replacing a duplicate with a hardlink gives the
+/// path the keeper's timestamp — if the index kept the old one, the next
+/// rescan's changed-file check would fail and silently drop the stored hash
+/// and identity, making the merged group vanish and reappear across scans.
+pub fn store_merge_results(
+    conn: &Connection,
+    entries: &[(String, String, i64)],
+) -> Result<(), AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Failed to record merge: {}", e));
+    let tx = conn.unchecked_transaction().map_err(map_err)?;
+    {
+        let mut stmt = tx
+            .prepare("UPDATE files SET file_identity = ?2, modified_at = ?3 WHERE path = ?1")
+            .map_err(map_err)?;
+        for (path, identity, modified_at) in entries {
+            stmt.execute(params![path, identity, modified_at])
+                .map_err(map_err)?;
         }
     }
     tx.commit().map_err(map_err)?;
@@ -2382,6 +2430,37 @@ mod tests {
 
         assert!(combine_groups(&mut conn, &["Dungeon Denizens".to_string()], "  ").is_err());
         assert!(combine_groups(&mut conn, &["ghost".to_string()], "x").is_err());
+    }
+
+    #[test]
+    fn a_combined_group_reports_its_sources_and_splits_apart() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
+
+        // An untouched group is its own only source — nothing to split
+        assert_eq!(group_sources(&conn, "Giant Newt").unwrap(), ["Giant Newt"]);
+
+        combine_groups(
+            &mut conn,
+            &["Giant Newt".to_string(), "Bugbear".to_string()],
+            "Dungeon Denizens",
+        )
+        .unwrap();
+
+        // The combined card knows what it was made from (case-insensitive)
+        assert_eq!(
+            group_sources(&conn, "dungeon denizens").unwrap(),
+            ["Bugbear", "Giant Newt"]
+        );
+
+        // Splitting = clearing the renames: the sources come back as cards
+        rename_group(&conn, "Dungeon Denizens", "").unwrap();
+        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        let names: Vec<_> = page.groups.iter().map(|g| g.group_name.clone()).collect();
+        assert!(names.contains(&"Giant Newt".to_string()));
+        assert!(names.contains(&"Bugbear".to_string()));
+        assert!(!names.contains(&"Dungeon Denizens".to_string()));
     }
 
     #[test]

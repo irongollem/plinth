@@ -370,6 +370,15 @@
                   ✎
                 </button>
               </div>
+              <button
+                v-if="!renamingGroup && groupSources.length > 1"
+                type="button"
+                class="font-mono text-[10px] text-primary/70 hover:text-primary cursor-pointer mt-0.5"
+                :title="`Combined from: ${groupSources.join(', ')} — click to split them apart again`"
+                @click="splitGroup"
+              >
+                combined from {{ groupSources.length }} models · split
+              </button>
               <p
                 v-if="selected.designer || selected.release_name"
                 class="font-mono text-[11px] text-base-content/50 mt-0.5"
@@ -734,7 +743,7 @@
       <template v-if="stats">
         <span
           @click="toggleDups"
-          :class="dupGroups.length ? 'text-primary cursor-pointer' : ''"
+          :class="reclaimableGroups.length ? 'text-primary cursor-pointer' : ''"
         >
           <template v-if="reclaimableGroups.length"
             >{{ reclaimableGroups.length }} duplicate groups ·
@@ -771,9 +780,10 @@
       </span>
     </div>
 
-    <!-- Duplicates panel -->
+    <!-- Duplicates panel: only groups with something left to gain — a merged
+         group is done (stored once, every name works) and leaves the list -->
     <div
-      v-if="showDups && dupGroups.length"
+      v-if="showDups && reclaimableGroups.length"
       class="max-h-48 overflow-y-auto bg-base-200 border border-base-content/10 rounded-box p-3 text-xs space-y-2"
     >
       <div class="flex items-center gap-2 pb-1">
@@ -796,40 +806,31 @@
           merge all — free {{ formatFileSize(wastedBytes) }}
         </button>
       </div>
-      <div v-for="group in dupGroups" :key="group.hash">
+      <div v-for="group in reclaimableGroups" :key="group.hash">
         <div class="flex items-center gap-2">
           <span class="font-semibold">
             {{ group.paths.length }}× {{ formatFileSize(group.size_bytes) }}
           </span>
           <span class="flex-1"></span>
-          <span
-            v-if="group.distinct_copies === 1"
-            class="badge badge-ghost badge-sm font-mono"
-            title="These entries are one file on disk — every variant keeps working, no space wasted"
+          <button
+            v-if="linkSupport !== false"
+            type="button"
+            class="btn btn-xs btn-primary"
+            :disabled="reclaimBusy || linkSupport === null"
+            title="Keep every file where it is, but store the bytes once — all variants keep working"
+            @click="mergeGroup(group)"
           >
-            shared · stored once
-          </span>
-          <template v-else>
-            <button
-              v-if="linkSupport !== false"
-              type="button"
-              class="btn btn-xs btn-primary"
-              :disabled="reclaimBusy || linkSupport === null"
-              title="Keep every file where it is, but store the bytes once — all variants keep working"
-              @click="mergeGroup(group)"
-            >
-              merge — free {{ formatFileSize(reclaimableBytes(group)) }}
-            </button>
-            <button
-              type="button"
-              class="btn btn-xs btn-outline btn-error"
-              :disabled="reclaimBusy"
-              title="Remove the copies from disk — only the kept file remains"
-              @click="reclaimGroup(group)"
-            >
-              delete copies
-            </button>
-          </template>
+            merge — free {{ formatFileSize(reclaimableBytes(group)) }}
+          </button>
+          <button
+            type="button"
+            class="btn btn-xs btn-outline btn-error"
+            :disabled="reclaimBusy"
+            title="Remove the copies from disk — only the kept file remains"
+            @click="reclaimGroup(group)"
+          >
+            delete copies
+          </button>
         </div>
         <ul class="opacity-70">
           <li
@@ -1088,7 +1089,7 @@ const toggleTag = (tag: string) => {
 };
 
 const toggleDups = () => {
-  if (dupGroups.value.length) showDups.value = !showDups.value;
+  if (reclaimableGroups.value.length) showDups.value = !showDups.value;
 };
 
 // A folder split into poses yields several members sharing one dir_path;
@@ -1261,12 +1262,20 @@ const setVariant = (variant: string) => {
   if (next) selectEntry(next);
 };
 
+// The scanner-level groups behind the selected card; more than one means
+// it was combined and offers "split" in the drawer
+const groupSources = ref<string[]>([]);
+
 const selectGroup = async (group: CatalogGroup) => {
   selectedGroup.value = group;
   renamingGroup.value = false;
   members.value = [];
   selected.value = null;
   files.value = [];
+  groupSources.value = [];
+  commands.getCatalogGroupSources(group.group_name).then((sources) => {
+    if (sources.status === "ok") groupSources.value = sources.data;
+  });
   const result = await commands.getCatalogGroupMembers(group.group_name);
   if (result.status !== "ok") {
     toastStore.reportError("Failed to load model variants", result.error);
@@ -1293,6 +1302,33 @@ const groupSummary = (group: CatalogGroup) => {
 const startRenameGroup = () => {
   groupNameDraft.value = selectedGroup.value?.group_name ?? "";
   renamingGroup.value = true;
+};
+
+// Undo for combine (and for a rename collision that merged two models):
+// clearing the name overrides brings every source group back as its own
+// card, named after its folder again. Nothing on disk moves.
+const splitGroup = async () => {
+  const group = selectedGroup.value;
+  if (!group || groupSources.value.length < 2) return;
+  const confirmed = await confirm(
+    `Split "${group.group_name}" back into ${groupSources.value.length} separate models?\n\n${groupSources.value.join("\n")}`,
+    { title: "Split model", kind: "warning" },
+  );
+  if (!confirmed) return;
+  const result = await commands.renameCatalogGroup(group.group_name, "");
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to split model", result.error);
+    return;
+  }
+  toastStore.addToast(
+    `Split into ${groupSources.value.length} models`,
+    "success",
+  );
+  selectedGroup.value = null;
+  selected.value = null;
+  members.value = [];
+  groupSources.value = [];
+  await Promise.all([runSearch(), refreshMeta()]);
 };
 
 const renameGroup = async () => {
