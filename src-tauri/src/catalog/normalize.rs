@@ -841,20 +841,51 @@ pub fn finalize(
         );
         let model_dir_str = model_dir.to_string_lossy().into_owned();
 
+        // Group members by the LEAF the plan sent their files to — NOT by
+        // their plan-time dir. Per-file merges empty the old pose dirs and
+        // the sweep removes them; writing metadata there throws it away
+        // with the dir. That is exactly how Dark Wardens' Supported side
+        // lost its identity: sidecars went into dying pose folders while
+        // the variant folders holding every file got nothing, and the next
+        // scan shattered them into heuristic per-variant cards.
+        let mut leaves: BTreeMap<String, Vec<&MemberRow>> = BTreeMap::new();
+        for member in &members {
+            let computed = layout::member_dir(
+                &model_dir,
+                member.support.as_deref(),
+                member.variant.as_deref(),
+            );
+            let leaf = if computed.is_dir() {
+                computed.to_string_lossy().into_owned()
+            } else if Path::new(&member.dir).is_dir() {
+                // apply skipped/failed this member — describe it where it is
+                member.dir.clone()
+            } else {
+                warnings.push(format!(
+                    "{}: neither the target folder nor the source exists",
+                    member.dir
+                ));
+                continue;
+            };
+            leaves.entry(leaf).or_default().push(member);
+        }
+
         // Images anywhere under the model dir ON DISK — the root itself,
         // or a sibling folder like "Images"/"renders" some designers ship
         // beside Supported/Unsupported — are candidate fallback previews.
         // The disk, not the files table: the scanner never indexes images,
         // so an index lookup wrote empty images lists and the sidecar
         // (being authoritative) then ERASED previews that heuristics used
-        // to find. Excludes anything inside a member's own leaf: that
-        // image is that member's OWN preview (own_images below).
-        let member_dirs: Vec<&str> = members.iter().map(|m| m.dir.as_str()).collect();
-        let root_images: Vec<String> = disk_images_under(&model_dir, &member_dirs);
+        // to find. Excludes anything inside a leaf: that image is the
+        // leaf's OWN preview (own_images below).
+        let leaf_dirs: Vec<&str> = leaves.keys().map(String::as_str).collect();
+        let root_images: Vec<String> = disk_images_under(&model_dir, &leaf_dirs);
 
-        for member in &members {
-            if let Err(e) = write_member_json(conn, member, &model_dir_str, &root_images) {
-                warnings.push(format!("{}: {}", member.dir, e));
+        for (leaf, leaf_members) in &leaves {
+            if let Err(e) =
+                write_leaf_json(conn, leaf, leaf_members, &model_dir_str, &root_images)
+            {
+                warnings.push(format!("{}: {}", leaf, e));
             }
         }
         // a release.json that traveled inside the moved base would claim
@@ -875,33 +906,46 @@ pub fn finalize(
     Ok(warnings)
 }
 
-/// Write one leaf's model.json from catalog state. File-level poses beat a
-/// dir-level pose: when file_poses exist the dir pose is omitted (and its
-/// user override cleared) so the two mechanisms can't fight after a rescan.
-fn write_member_json(
+/// Write one LEAF's model.json from the state of every member whose files
+/// landed there. Facets resolve first-non-null across those members (they
+/// share support/variant by construction; poses differ and live at file
+/// level). File-level poses beat a dir-level pose: when file_poses exist
+/// the dir pose is omitted (and its user override cleared) so the two
+/// mechanisms can't fight after a rescan.
+fn write_leaf_json(
     conn: &Connection,
-    member: &MemberRow,
+    leaf: &str,
+    leaf_members: &[&MemberRow],
     model_dir: &str,
     root_images: &[String],
 ) -> Result<(), AppError> {
-    let leaf = Path::new(&member.dir);
-    if !leaf.is_dir() {
-        return Err(AppError::NotFoundError(format!(
-            "leaf dir missing: {}",
-            member.dir
-        )));
-    }
-
+    let leaf_path = Path::new(leaf);
     let map_err =
         |e: rusqlite::Error| AppError::ConfigError(format!("model.json query failed: {}", e));
+
+    // tags may still ride on old member dirs (per-file merges don't re-key
+    // dir-scoped rows) — union them with the leaf's own
     let mut tag_stmt = conn
         .prepare("SELECT tag FROM model_tags WHERE dir_path = ?1 ORDER BY tag")
         .map_err(map_err)?;
-    let tags: Vec<String> = tag_stmt
-        .query_map([&member.dir], |row| row.get(0))
-        .and_then(|rows| rows.collect())
-        .map_err(map_err)?;
+    let mut tags: Vec<String> = Vec::new();
+    let mut tag_dirs: Vec<&str> = vec![leaf];
+    tag_dirs.extend(leaf_members.iter().map(|m| m.dir.as_str()));
+    for dir in tag_dirs {
+        let rows: Vec<String> = tag_stmt
+            .query_map([dir], |row| row.get(0))
+            .and_then(|rows| rows.collect())
+            .map_err(map_err)?;
+        for tag in rows {
+            if !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
+    }
+    tags.sort();
 
+    // apply re-keys file_variants to the leaf as files land, so the leaf
+    // query sees every pose that survived the merge
     let mut fp_stmt = conn
         .prepare(
             "SELECT path, variant, pose, support_status FROM file_variants
@@ -909,7 +953,7 @@ fn write_member_json(
         )
         .map_err(map_err)?;
     let file_poses: Vec<serde_json::Value> = fp_stmt
-        .query_map([&member.dir], |row| {
+        .query_map([leaf], |row| {
             let path: String = row.get(0)?;
             let variant: Option<String> = row.get(1)?;
             let pose: Option<String> = row.get(2)?;
@@ -937,13 +981,11 @@ fn write_member_json(
     // image references: own images first, else a root/sibling one found by
     // finalize — reached via "../" x (this leaf's depth below model_dir),
     // since root_images entries are already model_dir-relative subpaths
-    let own_images: Vec<String> = disk_images_under(leaf, &[]);
+    let own_images: Vec<String> = disk_images_under(leaf_path, &[]);
     let images: Vec<String> = if !own_images.is_empty() {
         own_images
-    } else if is_under(&member.dir, model_dir) && member.dir != model_dir {
-        let depth = member.dir[model_dir.len()..]
-            .matches(MAIN_SEPARATOR)
-            .count();
+    } else if is_under(leaf, model_dir) && leaf != model_dir {
+        let depth = leaf[model_dir.len()..].matches(MAIN_SEPARATOR).count();
         root_images
             .iter()
             .map(|img| format!("{}{}", "../".repeat(depth), img))
@@ -952,38 +994,43 @@ fn write_member_json(
         vec![]
     };
 
-    let dir_pose = if file_poses.is_empty() {
-        member.pose.clone()
+    let refs: Vec<&MemberRow> = leaf_members.to_vec();
+    let dir_pose = if file_poses.is_empty() && leaf_members.len() == 1 {
+        leaf_members[0].pose.clone()
     } else {
-        // poses live on files now — a lingering dir-level user pose would
-        // resurrect through COALESCE on the next read
-        conn.execute(
-            "UPDATE model_user_meta SET pose = NULL WHERE dir_path = ?1",
-            [&member.dir],
-        )
-        .map_err(map_err)?;
         None
     };
+    if !file_poses.is_empty() {
+        // poses live on files now — a lingering dir-level user pose would
+        // resurrect through COALESCE on the next read
+        for dir in std::iter::once(leaf).chain(leaf_members.iter().map(|m| m.dir.as_str())) {
+            conn.execute(
+                "UPDATE model_user_meta SET pose = NULL WHERE dir_path = ?1",
+                [dir],
+            )
+            .map_err(map_err)?;
+        }
+    }
 
     let json = serde_json::json!({
-        "id": member.uuid,
-        "name": member.gname,
-        "description": member.description,
+        "id": first_some(&refs, |r| r.uuid.as_ref()),
+        "name": leaf_members[0].gname,
+        "description": first_some(&refs, |r| r.description.as_ref()),
         "tags": tags,
         "images": images,
-        "variant": member.variant,
+        "variant": first_some(&refs, |r| r.variant.as_ref()),
         "pose": dir_pose,
-        "scale": member.scale,
-        "support_status": member.support,
-        "release_date": member.date,
-        "designer": member.designer,
-        "sculptor": member.sculptor,
-        "release_name": member.release,
+        "scale": first_some(&refs, |r| r.scale.as_ref()),
+        "support_status": first_some(&refs, |r| r.support.as_ref()),
+        "release_date": first_some(&refs, |r| r.date.as_ref()),
+        "designer": first_some(&refs, |r| r.designer.as_ref()),
+        "sculptor": first_some(&refs, |r| r.sculptor.as_ref()),
+        "release_name": first_some(&refs, |r| r.release.as_ref()),
         "file_poses": file_poses,
     });
     let pretty = serde_json::to_string_pretty(&json)
         .map_err(|e| AppError::ConfigError(format!("model.json encode failed: {}", e)))?;
-    std::fs::write(leaf.join("model.json"), pretty)
+    std::fs::write(leaf_path.join("model.json"), pretty)
         .map_err(|e| AppError::IoError(format!("model.json write failed: {}", e)))?;
     Ok(())
 }
@@ -1373,6 +1420,10 @@ mod tests {
         assert!(warnings.is_empty(), "{:?}", warnings);
         // the emptied pose dir (stale sidecar and all) is gone
         assert!(!nested.exists());
+        // ...and the SURVIVING leaf carries the metadata, not the dead dir
+        let meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(leaf.join("model.json")).unwrap()).unwrap();
+        assert_eq!(meta["name"], "Centaurs");
 
         fs::remove_dir_all(&root).ok();
     }
@@ -1563,6 +1614,25 @@ mod tests {
         assert!(warnings.is_empty(), "{:?}", warnings);
         assert!(!target.join("Supported/Clean Bases").exists());
         assert!(!target.join("Supported/Great Swords/Pose A").exists());
+
+        // THE regression: sidecars must land in the LEAVES holding the
+        // files, not in the swept pose dirs — or the next scan shatters
+        // the model into heuristic per-variant cards named 'Great Swords'
+        for leaf in ["Supported", "Supported/Great Swords", "Unsupported"] {
+            let meta: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(target.join(leaf).join("model.json")).unwrap_or_else(|_| {
+                    panic!("{} must carry a sidecar", leaf)
+                }),
+            )
+            .unwrap();
+            assert_eq!(meta["name"], "Dark Wardens", "{} sidecar name", leaf);
+        }
+        let gs_meta: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(target.join("Supported/Great Swords/model.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(gs_meta["variant"], "Great Swords");
+        assert_eq!(gs_meta["file_poses"].as_array().unwrap().len(), 2);
 
         fs::remove_dir_all(&root).ok();
     }
