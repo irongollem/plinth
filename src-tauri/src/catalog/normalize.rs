@@ -143,58 +143,75 @@ struct FileRowLite {
     file_name: String,
 }
 
-fn files_in_dir(conn: &Connection, dir: &str) -> Result<Vec<FileRowLite>, AppError> {
-    let map_err =
-        |e: rusqlite::Error| AppError::ConfigError(format!("Normalize file query failed: {}", e));
-    let mut stmt = conn
-        .prepare("SELECT path, file_name FROM files WHERE dir_path = ?1 ORDER BY file_name")
-        .map_err(map_err)?;
-    let rows = stmt
-        .query_map([dir], |row| {
-            Ok(FileRowLite {
-                path: row.get(0)?,
-                file_name: row.get(1)?,
-            })
-        })
-        .map_err(map_err)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(map_err)?;
-    Ok(rows)
-}
-
-/// Every indexed file rooted at `dir` OR nested anywhere beneath it —
-/// `files_in_dir`'s recursive cousin. Some designers ship a preview beside
-/// an "Images"/"renders" sibling folder rather than directly at the model
-/// root; an exact-dir lookup would never see it.
-fn files_under_tree(conn: &Connection, dir: &str) -> Result<Vec<FileRowLite>, AppError> {
-    let map_err =
-        |e: rusqlite::Error| AppError::ConfigError(format!("Normalize file query failed: {}", e));
-    let sep = MAIN_SEPARATOR.to_string();
-    let mut stmt = conn
-        .prepare(
-            "SELECT path, file_name FROM files
-             WHERE dir_path = ?1 OR substr(dir_path, 1, length(?1) + 1) = ?1 || ?2
-             ORDER BY path",
-        )
-        .map_err(map_err)?;
-    let rows = stmt
-        .query_map(rusqlite::params![dir, sep], |row| {
-            Ok(FileRowLite {
-                path: row.get(0)?,
-                file_name: row.get(1)?,
-            })
-        })
-        .map_err(map_err)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(map_err)?;
-    Ok(rows)
-}
-
 fn is_image_file(name: &str) -> bool {
     Path::new(name)
         .extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| super::IMAGE_EXTENSIONS.contains(&e.to_lowercase().as_str()))
+}
+
+/// OS litter that should neither be planned as a move nor keep a dir alive.
+fn is_litter(name: &str) -> bool {
+    name.starts_with('.') || name == "Thumbs.db"
+}
+
+/// Regular files directly inside `dir` ON DISK, litter skipped, sorted.
+/// The plan's merge paths ask the DISK, not the files table, on purpose:
+/// the scanner only indexes model files, so images/readmes/licences have
+/// no rows at all — an index-driven merge would silently leave them
+/// behind (and the vanished-production-thumbnail bug was exactly this).
+fn disk_files(dir: &Path) -> Vec<FileRowLite> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+    let mut out: Vec<FileRowLite> = entries
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if is_litter(&name) {
+                return None;
+            }
+            Some(FileRowLite {
+                path: e.path().to_string_lossy().into_owned(),
+                file_name: name,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.file_name.cmp(&b.file_name));
+    out
+}
+
+/// Image files anywhere under `dir` on disk (recursive, `exclude` subtrees
+/// skipped), as dir-relative paths — shallowest first so the model-root
+/// render beats one buried in an "extras" folder as the preview.
+fn disk_images_under(dir: &Path, exclude: &[&str]) -> Vec<String> {
+    let mut found: Vec<(usize, String)> = Vec::new();
+    let mut stack: Vec<(PathBuf, usize)> = vec![(dir.to_path_buf(), 0)];
+    while let Some((current, depth)) = stack.pop() {
+        if depth > 6 {
+            continue; // a runaway tree is not a preview hunt
+        }
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                let path_str = path.to_string_lossy();
+                if !exclude.iter().any(|x| is_under(&path_str, x)) {
+                    stack.push((path, depth + 1));
+                }
+            } else if !is_litter(&name) && is_image_file(&name) {
+                if let Ok(rel) = path.strip_prefix(dir) {
+                    found.push((depth, rel.to_string_lossy().into_owned()));
+                }
+            }
+        }
+    }
+    found.sort();
+    found.into_iter().map(|(_, rel)| rel).collect()
 }
 
 /// The same bytes in two places? Hardlinked names are trivially identical
@@ -460,7 +477,7 @@ pub fn plan(
                     // anchor's files gain their pose suffix so the whole
                     // set stays distinguishable side by side
                     if merging {
-                        for f in files_in_dir(conn, &member.dir)? {
+                        for f in disk_files(Path::new(&member.dir)) {
                             if f.file_name == "model.json" || f.file_name == "release.json" {
                                 continue;
                             }
@@ -481,7 +498,7 @@ pub fn plan(
                 }
 
                 // per-file move (merge into the leaf, pose baked into names)
-                for f in files_in_dir(conn, &member.dir)? {
+                for f in disk_files(Path::new(&member.dir)) {
                     if f.file_name == "model.json" || f.file_name == "release.json" {
                         continue; // stale sidecars die with their dir
                     }
@@ -526,6 +543,11 @@ pub fn plan(
     let total_ops = out.iter().map(|g| g.ops.len() as u32).sum();
     Ok(NormalizePlan {
         clean_groups: out.iter().filter(|g| g.clean).count() as u32,
+        clean_names: out
+            .iter()
+            .filter(|g| g.clean)
+            .map(|g| g.group_name.clone())
+            .collect(),
         groups: out.into_iter().filter(|g| !g.clean).collect(),
         skipped,
         total_ops,
@@ -680,28 +702,16 @@ pub fn finalize(
         );
         let model_dir_str = model_dir.to_string_lossy().into_owned();
 
-        // Images anywhere under the model dir — the root itself, or a
-        // sibling folder like "Images"/"renders" some designers ship
+        // Images anywhere under the model dir ON DISK — the root itself,
+        // or a sibling folder like "Images"/"renders" some designers ship
         // beside Supported/Unsupported — are candidate fallback previews.
-        // Excludes anything already inside a member's own leaf: that image
-        // is that member's OWN preview (own_images below), not a shared one.
-        let member_dirs: HashSet<&str> = members.iter().map(|m| m.dir.as_str()).collect();
-        let root_images: Vec<String> = files_under_tree(conn, &model_dir_str)?
-            .into_iter()
-            .filter(|f| is_image_file(&f.file_name))
-            .filter(|f| {
-                let file_dir = Path::new(&f.path)
-                    .parent()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                !member_dirs.iter().any(|m| is_under(&file_dir, m))
-            })
-            .map(|f| {
-                f.path[model_dir_str.len()..]
-                    .trim_start_matches(MAIN_SEPARATOR)
-                    .to_string()
-            })
-            .collect();
+        // The disk, not the files table: the scanner never indexes images,
+        // so an index lookup wrote empty images lists and the sidecar
+        // (being authoritative) then ERASED previews that heuristics used
+        // to find. Excludes anything inside a member's own leaf: that
+        // image is that member's OWN preview (own_images below).
+        let member_dirs: Vec<&str> = members.iter().map(|m| m.dir.as_str()).collect();
+        let root_images: Vec<String> = disk_images_under(&model_dir, &member_dirs);
 
         for member in &members {
             if let Err(e) = write_member_json(conn, member, &model_dir_str, &root_images) {
@@ -788,11 +798,7 @@ fn write_member_json(
     // image references: own images first, else a root/sibling one found by
     // finalize — reached via "../" x (this leaf's depth below model_dir),
     // since root_images entries are already model_dir-relative subpaths
-    let own_images: Vec<String> = files_in_dir(conn, &member.dir)?
-        .into_iter()
-        .filter(|f| is_image_file(&f.file_name))
-        .map(|f| f.file_name)
-        .collect();
+    let own_images: Vec<String> = disk_images_under(leaf, &[]);
     let images: Vec<String> = if !own_images.is_empty() {
         own_images
     } else if is_under(&member.dir, model_dir) && member.dir != model_dir {
@@ -952,10 +958,11 @@ mod tests {
         sup_row.support_status = Some("supported".into());
         let mut unsup_row = model_row(&unsup, "bog hag", "Bog Hag");
         unsup_row.support_status = Some("unsupported".into());
+        // NOTE: no FileRow for render.png — the real scanner indexes model
+        // files only; images exist on disk but never in the files table
         let files = vec![
             file_row(&sup.join("bog.lys"), &sup),
             file_row(&unsup.join("bog.stl"), &unsup),
-            file_row(&old.join("render.png"), &old),
         ];
         db::replace_catalog(&mut conn, &files, &[sup_row, unsup_row], &[], &[]).unwrap();
 
@@ -983,7 +990,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 3);
+        assert_eq!(count, 2);
 
         let warnings = finalize(
             &conn,
@@ -1179,13 +1186,11 @@ mod tests {
         sup_row.support_status = Some("supported".into());
         let mut unsup_row = model_row(&unsup, "Collector of Names", "Collector of Names");
         unsup_row.support_status = Some("unsupported".into());
+        // like the real scanner: the jpg exists on disk only, never as a
+        // files-table row — the lookup must not depend on the index
         let files = vec![
             file_row(&sup.join("names.lys"), &sup),
             file_row(&unsup.join("names.stl"), &unsup),
-            file_row(
-                &images.join("Product Thumbnail - Collector of Names.jpg"),
-                &images,
-            ),
         ];
         db::replace_catalog(&mut conn, &files, &[sup_row, unsup_row], &[], &[]).unwrap();
 

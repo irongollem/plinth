@@ -180,6 +180,10 @@ pub struct NormalizePlan {
     pub skipped: Vec<NormalizeSkip>,
     pub total_ops: u32,
     pub clean_groups: u32,
+    /// Names of the already-clean groups — finalize can be re-run on these
+    /// to refresh their model.json sidecars without moving anything (the
+    /// repair path when sidecar-writing logic improves after a cleanup).
+    pub clean_names: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

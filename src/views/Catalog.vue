@@ -746,13 +746,20 @@
               </button>
             </div>
 
-            <div
+            <button
               v-if="structureClean === true"
-              class="font-semibold text-[11px] tracking-[0.03em] text-center rounded-md py-2 text-success flex items-center justify-center gap-1.5"
-              title="This model's folders already match the canonical designer/release/model layout"
+              type="button"
+              class="font-semibold text-[11px] tracking-[0.03em] text-center rounded-md py-2 text-success flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
+              title="Folders already match the canonical layout — click to re-write this model's metadata file from the catalog (repairs a stale/incomplete model.json)"
+              :disabled="refreshingSidecars"
+              @click="refreshSidecars([selectedGroup?.group_name ?? ''])"
             >
-              ✓ folder structure OK
-            </div>
+              {{
+                refreshingSidecars
+                  ? "refreshing metadata…"
+                  : "✓ folder structure OK"
+              }}
+            </button>
             <button
               v-else
               type="button"
@@ -1143,6 +1150,20 @@
                 · {{ normalizePlanData.skipped.length }} skipped</template
               >
             </span>
+            <button
+              v-if="normalizePlanData.clean_names.length"
+              type="button"
+              class="link text-base-content/50 hover:text-primary"
+              title="Re-write model.json for the clean models from the catalog — no files move. Use after a Plinth update improves what gets written."
+              :disabled="refreshingSidecars"
+              @click="refreshSidecars(normalizePlanData.clean_names)"
+            >
+              {{
+                refreshingSidecars
+                  ? "refreshing…"
+                  : `refresh metadata for ${normalizePlanData.clean_names.length} clean`
+              }}
+            </button>
           </div>
 
           <div
@@ -2089,6 +2110,39 @@ const checkStructure = async (groupName: string) => {
   // stuck on "checking…" forever would hide a real problem
   structureClean.value =
     result.status === "ok" ? result.data.groups.length === 0 : false;
+};
+
+/* Re-run finalize WITHOUT moving anything: re-writes model.json for
+   already-clean models from current catalog state, then rescans so the
+   catalog re-reads them. The repair path when a Plinth update improves
+   what the sidecar carries (e.g. the image lookup that used to write
+   empty images lists) — otherwise clean models could never heal, since
+   the normal flow only finalizes groups that had moves. */
+const refreshingSidecars = ref(false);
+const refreshSidecars = async (groupNames: string[]) => {
+  const names = groupNames.filter(Boolean);
+  if (!names.length || !catalogRoot.value || refreshingSidecars.value) return;
+  refreshingSidecars.value = true;
+  try {
+    const result = await commands.finalizeNormalize(
+      catalogRoot.value,
+      names,
+      [],
+    );
+    if (result.status !== "ok") {
+      toastStore.reportError("Failed to refresh metadata", result.error);
+      return;
+    }
+    for (const warning of result.data) toastStore.addToast(warning, "error");
+    toastStore.addToast(
+      `Metadata re-written for ${names.length} model${names.length === 1 ? "" : "s"}`,
+      "success",
+    );
+    // the sidecars changed on disk — only a rescan makes the catalog see it
+    await scan();
+  } finally {
+    refreshingSidecars.value = false;
+  }
 };
 
 // Everything is planned read-only first and shown as a reviewable move
