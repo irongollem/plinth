@@ -343,6 +343,38 @@
               ⤢
             </button>
           </div>
+
+          <!-- Primary actions ride right under the preview they act on -->
+          <div class="flex gap-1.5 mt-2">
+            <button
+              type="button"
+              class="flex-1 text-center font-semibold text-[11px] tracking-wider bg-primary text-primary-content rounded-md py-2 cursor-pointer"
+              @click="printModel"
+            >
+              PRINT
+            </button>
+            <button
+              type="button"
+              class="flex-1 text-center font-semibold text-[11px] tracking-wider border rounded-md py-2 cursor-pointer disabled:opacity-40"
+              :class="
+                show3d
+                  ? 'border-primary text-primary'
+                  : 'border-base-content/15'
+              "
+              :disabled="!stlPaths.length"
+              @click="show3d = !show3d"
+            >
+              3D
+            </button>
+            <button
+              type="button"
+              class="flex-1 text-center font-semibold text-[11px] tracking-wider border border-base-content/15 rounded-md py-2 cursor-pointer disabled:opacity-40"
+              :disabled="!stlPaths.length"
+              @click="renderSelected"
+            >
+              RENDER
+            </button>
+          </div>
           <div class="py-3.5 flex flex-col gap-2.5">
             <div>
               <!-- Group title: the logical model; rename applies to the whole
@@ -622,37 +654,6 @@
                 @click="saveMetadata"
               >
                 Save details
-              </button>
-            </div>
-
-            <div class="flex gap-1.5">
-              <button
-                type="button"
-                class="flex-1 text-center font-semibold text-[11px] tracking-wider bg-primary text-primary-content rounded-md py-2 cursor-pointer"
-                @click="printModel"
-              >
-                PRINT
-              </button>
-              <button
-                type="button"
-                class="flex-1 text-center font-semibold text-[11px] tracking-wider border rounded-md py-2 cursor-pointer disabled:opacity-40"
-                :class="
-                  show3d
-                    ? 'border-primary text-primary'
-                    : 'border-base-content/15'
-                "
-                :disabled="!stlPaths.length"
-                @click="show3d = !show3d"
-              >
-                3D
-              </button>
-              <button
-                type="button"
-                class="flex-1 text-center font-semibold text-[11px] tracking-wider border border-base-content/15 rounded-md py-2 cursor-pointer disabled:opacity-40"
-                :disabled="!stlPaths.length"
-                @click="renderSelected"
-              >
-                RENDER
               </button>
             </div>
 

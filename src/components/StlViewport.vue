@@ -12,9 +12,11 @@
  */
 import { readFile } from "@tauri-apps/plugin-fs";
 import * as THREE from "three";
-import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
-import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import type {
+  StlDecodeResponse,
+  StlPartPayload,
+} from "../utils/stlGeometry.worker.ts";
 
 const props = defineProps<{
   parts: string[];
@@ -49,6 +51,53 @@ let meshGroup: THREE.Group | null = null;
 let material: THREE.MeshStandardMaterial | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let loadToken = 0;
+
+/* ---- worker-side STL decoding ----
+   Parsing + mergeVertices run in a Web Worker so million-triangle minis
+   never freeze the UI. One worker per viewport; a superseded decode is
+   aborted by terminating the worker (the only way to stop CPU-bound JS),
+   which rejects its pending promise and a fresh worker takes over. */
+let decodeWorker: Worker | null = null;
+let pendingDecode: {
+  id: number;
+  resolve: (parts: StlPartPayload[]) => void;
+  reject: (error: Error) => void;
+} | null = null;
+
+const SUPERSEDED = "superseded";
+
+const spawnWorker = () => {
+  const worker = new Worker(
+    new URL("../utils/stlGeometry.worker.ts", import.meta.url),
+    { type: "module" },
+  );
+  worker.onmessage = (event: MessageEvent<StlDecodeResponse>) => {
+    if (!pendingDecode || event.data.id !== pendingDecode.id) return;
+    const { resolve, reject } = pendingDecode;
+    pendingDecode = null;
+    if (event.data.error) reject(new Error(event.data.error));
+    else resolve(event.data.parts);
+  };
+  return worker;
+};
+
+const abortDecode = () => {
+  if (!pendingDecode) return;
+  decodeWorker?.terminate();
+  decodeWorker = null;
+  pendingDecode.reject(new Error(SUPERSEDED));
+  pendingDecode = null;
+};
+
+const decodeInWorker = (id: number, buffers: ArrayBuffer[]) => {
+  abortDecode();
+  decodeWorker ??= spawnWorker();
+  return new Promise<StlPartPayload[]>((resolve, reject) => {
+    pendingDecode = { id, resolve, reject };
+    // buffers transfer, not copy — the worker owns them from here
+    decodeWorker?.postMessage({ id, buffers }, buffers);
+  });
+};
 
 // Camera parametrization identical to render_mini.py
 const view = {
@@ -523,12 +572,6 @@ const onWheel = (e: WheelEvent) => {
 };
 
 // ---- model loading ----
-/** Two rAFs = the browser has actually painted the current frame. */
-const nextPaint = () =>
-  new Promise<void>((resolve) => {
-    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-  });
-
 const disposeModel = () => {
   if (!meshGroup || !pivot) return;
   pivot.remove(meshGroup);
@@ -590,37 +633,41 @@ const loadParts = async () => {
 
   isLoading.value = true;
   try {
-    const loader = new STLLoader();
-    // Parsing and vertex-merging below run synchronously on the main
-    // thread; without an explicit yield the loading overlay never paints
-    // and the UI just freezes ("is it happening?")
-    await nextPaint();
     // Read all parts concurrently; Promise.all preserves part order
     const byteArrays = await Promise.all(
       props.parts.map((path) => readFile(path)),
     );
     if (token !== loadToken) return; // superseded by a newer selection
 
-    const geometries: THREE.BufferGeometry[] = [];
-    for (const bytes of byteArrays) {
-      const buffer = bytes.buffer.slice(
-        bytes.byteOffset,
-        bytes.byteOffset + bytes.byteLength,
-      ) as ArrayBuffer;
-      let geometry: THREE.BufferGeometry = loader.parse(buffer);
-      try {
-        // STL is a triangle soup; merge + recompute normals ~= Blender shade_smooth
-        geometry = mergeVertices(geometry, 1e-4);
-        geometry.computeVertexNormals();
-      } catch {
-        // fall back to flat shading from the file's own normals
+    // Parse + mergeVertices in the worker: seconds of CPU on big minis,
+    // and the UI stays fully interactive while it runs
+    const buffers = byteArrays.map(
+      (bytes) =>
+        bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength,
+        ) as ArrayBuffer,
+    );
+    const payloads = await decodeInWorker(token, buffers);
+    if (token !== loadToken) return;
+
+    const geometries: THREE.BufferGeometry[] = payloads.map((part) => {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute(
+        "position",
+        new THREE.BufferAttribute(part.position, 3),
+      );
+      if (part.normal) {
+        geometry.setAttribute(
+          "normal",
+          new THREE.BufferAttribute(part.normal, 3),
+        );
       }
-      geometries.push(geometry);
-      // Sequential on purpose: the per-part yield lets the overlay animate
-      // oxlint-disable-next-line no-await-in-loop
-      await nextPaint();
-      if (token !== loadToken) return;
-    }
+      if (part.index) {
+        geometry.setIndex(new THREE.BufferAttribute(part.index, 1));
+      }
+      return geometry;
+    });
 
     // Join parts in their native coordinates (same as the Blender join),
     // then center and normalize the whole to 2 units like normalize() does.
@@ -641,7 +688,10 @@ const loadParts = async () => {
     afterRotationChange(true);
     emit("loaded");
   } catch (error) {
-    emit("error", `Failed to load STL: ${error}`);
+    // an aborted decode isn't a failure — a newer selection took over
+    if (!(error instanceof Error && error.message === SUPERSEDED)) {
+      emit("error", `Failed to load STL: ${error}`);
+    }
   } finally {
     if (token === loadToken) isLoading.value = false;
   }
@@ -676,6 +726,9 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   loadToken++;
+  abortDecode();
+  decodeWorker?.terminate();
+  decodeWorker = null;
   resizeObserver?.disconnect();
   disposeModel();
   for (const mesh of [...gizmoRings, ...Object.values(visibleRings)]) {
