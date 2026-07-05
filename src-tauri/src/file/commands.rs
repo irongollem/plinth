@@ -225,6 +225,66 @@ pub async fn finalize_release(
     Ok(job_id)
 }
 
+/// Open files with their OS-default application — the "print" hand-off to
+/// whatever slicer owns the extension. NOT the opener plugin: its open_path
+/// is fire-and-forget (open::that_detached), which reports success even
+/// when the OS has no app for the file type, leaving the user with a button
+/// that silently does nothing. Launching the OS opener ourselves captures
+/// that failure so the UI can react (fall back to revealing the folder).
+#[tauri::command]
+#[specta::specta]
+pub async fn open_with_default_app(paths: Vec<String>) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if paths.is_empty() {
+            return Err(AppError::InvalidInput("Nothing to open".into()));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // one `open` call: multiple files reach the slicer as one batch
+            let output = std::process::Command::new("open")
+                .args(&paths)
+                .output()
+                .map_err(|e| AppError::IoError(format!("Failed to run open: {}", e)))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(AppError::ConfigError(format!(
+                    "No app is set up to open these files: {}",
+                    stderr.trim()
+                )));
+            }
+        }
+        #[cfg(target_os = "windows")]
+        for path in &paths {
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "start", "", path])
+                .status()
+                .map_err(|e| AppError::IoError(format!("Failed to run start: {}", e)))?;
+            if !status.success() {
+                return Err(AppError::ConfigError(format!(
+                    "No app is set up to open {}",
+                    path
+                )));
+            }
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        for path in &paths {
+            let status = std::process::Command::new("xdg-open")
+                .arg(path)
+                .status()
+                .map_err(|e| AppError::IoError(format!("Failed to run xdg-open: {}", e)))?;
+            if !status.success() {
+                return Err(AppError::ConfigError(format!(
+                    "No app is set up to open {}",
+                    path
+                )));
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Open task failed: {}", e)))?
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn cancel_compression(job_id: String) -> Result<(), AppError> {

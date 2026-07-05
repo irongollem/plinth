@@ -904,7 +904,7 @@
 <script setup lang="ts">
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { computed, onActivated, onMounted, ref, watch } from "vue";
 import {
   type CatalogEntry,
@@ -1519,14 +1519,20 @@ const printModel = async () => {
     "open-in-slicer";
   try {
     if (action === "open-in-slicer" && printablePaths.value.length) {
-      // Sequential on purpose: slicers collect files arriving one at a
-      // time into a single session, parallel launches can race instances
-      // oxlint-disable-next-line no-await-in-loop
-      for (const path of printablePaths.value) await openPath(path);
-      return;
+      // Our own command, not the opener plugin: its open_path is
+      // fire-and-forget and reports success even when the OS has no app
+      // for the file type — a print button that silently does nothing
+      const result = await commands.openWithDefaultApp(printablePaths.value);
+      if (result.status === "ok") return;
+      // No slicer owns the extension: show why, then still be useful
+      toastStore.reportError("Couldn't open in a slicer", result.error);
+      toastStore.addToast(
+        "Revealing the folder instead — associate the files with your slicer, or switch the print button to reveal-folder in Settings",
+        "info",
+      );
     }
-    // Reveal-folder flow (setting, or nothing printable): open the folder
-    // with the first file selected, ready to drag into a slicer
+    // Reveal-folder flow (setting, failed hand-off, or nothing printable):
+    // open the folder with the first file selected, ready to drag
     const target = files.value[0]?.path ?? selected.value.dir_path;
     await revealItemInDir(target);
   } catch (error) {

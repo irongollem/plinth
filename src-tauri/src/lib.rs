@@ -17,7 +17,9 @@ use catalog::commands::{
     set_model_preview, start_catalog_scan, start_duplicate_scan, supports_file_links,
     update_model_metadata,
 };
-use file::commands::{add_model, cancel_compression, create_release, finalize_release};
+use file::commands::{
+    add_model, cancel_compression, create_release, finalize_release, open_with_default_app,
+};
 use models::events::{CompressionStatus, DuplicateStatus, RenderStatus, ScanStatus};
 use render::commands::{cancel_render, detect_blender, start_render};
 use std::env;
@@ -51,6 +53,7 @@ fn create_specta_builder() -> Builder {
             create_release,
             finalize_release,
             cancel_compression,
+            open_with_default_app,
             settings::get_settings,
             settings::set_settings,
             detect_blender,
