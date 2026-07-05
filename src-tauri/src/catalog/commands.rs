@@ -17,8 +17,8 @@ use uuid::Uuid;
 
 use super::{
     db, dups, scanner, BatchOutcome, CatalogEntry, CatalogFile, CatalogGroupResult,
-    CatalogSearchResult, CatalogStats, DuplicateGroup, FileVariant, ModelMetaUpdate, MoveOperation,
-    ReleaseSummary, TagCount,
+    CatalogSearchResult, CatalogStats, DesignerCount, DuplicateGroup, FileVariant, ModelMetaUpdate,
+    MoveOperation, ReleaseSummary, TagCount,
 };
 
 /// Scan and duplicate jobs share one registry; both cancel through
@@ -267,12 +267,22 @@ pub async fn search_catalog_groups(
     app_handle: AppHandle,
     query: String,
     tags: Vec<String>,
+    designer: Option<String>,
+    sort: Option<String>,
     limit: u32,
     offset: u32,
 ) -> Result<CatalogGroupResult, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
-        let page = db::search_groups(&conn, &query, &tags, limit.min(200), offset)?;
+        let page = db::search_groups(
+            &conn,
+            &query,
+            &tags,
+            designer.as_deref(),
+            sort.as_deref().unwrap_or("name"),
+            limit.min(200),
+            offset,
+        )?;
         Ok(CatalogGroupResult {
             groups: page.groups,
             total: page.total,
@@ -467,6 +477,19 @@ pub async fn get_catalog_releases(app_handle: AppHandle) -> Result<Vec<ReleaseSu
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Release listing task failed: {}", e)))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_catalog_designers(
+    app_handle: AppHandle,
+) -> Result<Vec<DesignerCount>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::designers(&conn)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Designer listing task failed: {}", e)))?
 }
 
 /// Update one member's metadata, then propagate the shared facets (variant,

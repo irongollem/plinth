@@ -3,8 +3,8 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 
 use super::{
-    CatalogEntry, CatalogFile, CatalogGroup, CatalogStats, DuplicateGroup, ExtensionStat, FileRow,
-    FileVariant, FileVariantRow, ModelRow, ReleaseSummary,
+    CatalogEntry, CatalogFile, CatalogGroup, CatalogStats, DesignerCount, DuplicateGroup,
+    ExtensionStat, FileRow, FileVariant, FileVariantRow, ModelRow, ReleaseSummary,
 };
 
 const SCHEMA_VERSION: i64 = 5;
@@ -788,12 +788,25 @@ pub fn search_groups(
     conn: &Connection,
     query: &str,
     tags: &[String],
+    designer: Option<&str>,
+    sort: &str,
     limit: u32,
     offset: u32,
 ) -> Result<GroupPage, AppError> {
     let map_err =
         |e: rusqlite::Error| AppError::ConfigError(format!("Catalog group search failed: {}", e));
-    let (where_sql, bound) = build_search_filter(query, tags);
+    let (mut where_sql, mut bound) = build_search_filter(query, tags);
+    // The designer facet narrows to one designer exactly (the dropdown
+    // offers only names that exist), unlike the fuzzy FTS query
+    if let Some(name) = designer.map(str::trim).filter(|d| !d.is_empty()) {
+        let clause = "lower(COALESCE(u.designer, m.designer)) = lower(?)";
+        where_sql = if where_sql.is_empty() {
+            format!("WHERE {}", clause)
+        } else {
+            format!("{} AND {}", where_sql, clause)
+        };
+        bound.push(Box::new(name.to_string()));
+    }
     let params_ref: Vec<&dyn rusqlite::types::ToSql> = bound.iter().map(|b| b.as_ref()).collect();
 
     // Effective group = rename override > scanner group > own name. The
@@ -804,6 +817,7 @@ pub fn search_groups(
             &format!(
                 "SELECT COUNT(DISTINCT lower(COALESCE(r.display_name, m.group_name, m.name)))
                  FROM models m
+                 LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
                  LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name) {}",
                 where_sql
             ),
@@ -812,11 +826,46 @@ pub fn search_groups(
         )
         .map_err(map_err)?;
 
+    // Aggregates repeated verbatim in ORDER BY (not via alias) so SQLite
+    // resolves them unambiguously inside expressions like the date parse
+    const DESIGNER: &str = "MAX(COALESCE(u.designer, m.designer))";
+    const RELEASE: &str = "MAX(COALESCE(u.release_name, m.release_name))";
+    const REL_DATE: &str = "MAX(COALESCE(u.release_date, m.release_date))";
+    // release_date is "M/YYYY" from the release builder; split on the slash
+    // and sort year-then-month. Dateless formats cast to 0 and sink to the
+    // bottom of their designer rather than erroring.
+    let year = format!("CAST(substr({d}, instr({d}, '/') + 1) AS INTEGER)", d = REL_DATE);
+    let month = format!(
+        "CAST(substr({d}, 1, instr({d}, '/') - 1) AS INTEGER)",
+        d = REL_DATE
+    );
+    let order = match sort {
+        // designer A–Z, their releases A–Z, models A–Z; metadata-less rows last
+        "designer" => format!(
+            "{d} IS NULL, {d} COLLATE NOCASE, {r} IS NULL, {r} COLLATE NOCASE, gname COLLATE NOCASE",
+            d = DESIGNER,
+            r = RELEASE
+        ),
+        // designer A–Z, their releases newest first (a library grows at the front)
+        "designer_date" => format!(
+            "{d} IS NULL, {d} COLLATE NOCASE, {t} IS NULL, {y} DESC, {mo} DESC, {r} COLLATE NOCASE, gname COLLATE NOCASE",
+            d = DESIGNER,
+            t = REL_DATE,
+            y = year,
+            mo = month,
+            r = RELEASE
+        ),
+        _ => "gname COLLATE NOCASE".to_string(),
+    };
+
     // MAX(preview) = any variant's image is better than none;
-    // MAX(designer) likewise picks an arbitrary non-null representative
+    // MAX(designer)/MAX(release) likewise pick an arbitrary non-null
+    // representative
     let sql = format!(
         "SELECT COALESCE(r.display_name, m.group_name, m.name) AS gname,
-                MAX(COALESCE(u.designer, m.designer)),
+                {DESIGNER},
+                {RELEASE},
+                {REL_DATE},
                 COUNT(*),
                 COUNT(DISTINCT COALESCE(u.pose, m.pose)),
                 group_concat(DISTINCT COALESCE(u.support_status, m.support_status)),
@@ -827,25 +876,27 @@ pub fn search_groups(
          LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
          LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name) {}
          GROUP BY lower(gname)
-         ORDER BY gname COLLATE NOCASE
+         ORDER BY {}
          LIMIT {} OFFSET {}",
-        where_sql, limit, offset
+        where_sql, order, limit, offset
     );
     let mut stmt = conn.prepare(&sql).map_err(map_err)?;
     let mut groups = stmt
         .query_map(params_ref.as_slice(), |row| {
-            let supports: Option<String> = row.get(4)?;
+            let supports: Option<String> = row.get(6)?;
             Ok(CatalogGroup {
                 group_name: row.get(0)?,
                 designer: row.get(1)?,
-                variant_count: row.get(2)?,
-                pose_count: row.get(3)?,
+                release_name: row.get(2)?,
+                release_date: row.get(3)?,
+                variant_count: row.get(4)?,
+                pose_count: row.get(5)?,
                 support_statuses: supports
                     .map(|s| s.split(',').map(String::from).collect())
                     .unwrap_or_default(),
-                file_count: row.get::<_, i64>(5)? as u32,
-                total_size_bytes: row.get::<_, i64>(6)? as f64,
-                preview_path: row.get(7)?,
+                file_count: row.get::<_, i64>(7)? as u32,
+                total_size_bytes: row.get::<_, i64>(8)? as f64,
+                preview_path: row.get(9)?,
             })
         })
         .map_err(map_err)?
@@ -1476,6 +1527,37 @@ pub fn list_releases(conn: &Connection) -> Result<Vec<ReleaseSummary>, AppError>
         .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
         .map_err(map_err)?;
     Ok(releases)
+}
+
+/// Every designer in the catalog with their logical-model (group) count,
+/// A–Z — the option list for the catalog's designer filter. Counts groups,
+/// not folder entries, so the numbers match the cards the filter yields.
+pub fn designers(conn: &Connection) -> Result<Vec<DesignerCount>, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Designer listing failed: {}", e));
+    let mut stmt = conn
+        .prepare(
+            "SELECT COALESCE(u.designer, m.designer) AS d,
+                    COUNT(DISTINCT lower(COALESCE(r.display_name, m.group_name, m.name)))
+             FROM models m
+             LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
+             LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)
+             WHERE COALESCE(u.designer, m.designer) IS NOT NULL
+               AND COALESCE(u.designer, m.designer) != ''
+             GROUP BY lower(d)
+             ORDER BY d COLLATE NOCASE",
+        )
+        .map_err(map_err)?;
+    let designers = stmt
+        .query_map([], |row| {
+            Ok(DesignerCount {
+                designer: row.get(0)?,
+                model_count: row.get(1)?,
+            })
+        })
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(map_err)?;
+    Ok(designers)
 }
 
 fn require_model(conn: &Connection, dir_path: &str) -> Result<(), AppError> {
@@ -2486,7 +2568,7 @@ mod tests {
 
         let (files, models, tags) = sample_rows();
         replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
-        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
         assert_eq!(page.total, 2, "grouped search works after self-heal");
     }
 
@@ -2521,7 +2603,7 @@ mod tests {
         ];
         replace_catalog(&mut conn, &[], &models, &[], &[]).unwrap();
 
-        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
         assert_eq!(page.total, 1, "four variants, one card");
         let group = &page.groups[0];
         assert_eq!(group.group_name, "galeb duhr");
@@ -2533,7 +2615,7 @@ mod tests {
         assert_eq!(supports, vec!["supported", "unsupported"]);
 
         // FTS still finds the group through any variant's name
-        let page = search_groups(&conn, "galeb", &[], 10, 0).unwrap();
+        let page = search_groups(&conn, "galeb", &[], None, "name", 10, 0).unwrap();
         assert_eq!(page.total, 1);
 
         // members ordered: supported A, supported B, unsupported A, ...
@@ -2555,19 +2637,83 @@ mod tests {
     }
 
     #[test]
+    fn groups_sort_by_designer_and_filter_by_designer() {
+        let mut conn = test_conn();
+        let model = |name: &str, designer: Option<&str>, release: Option<&str>, date: Option<&str>| ModelRow {
+            dir_path: format!("/lib/{}", name),
+            name: name.into(),
+            description: None,
+            designer: designer.map(String::from),
+            release_name: release.map(String::from),
+            preview_path: None,
+            source: "heuristic".into(),
+            uuid: None,
+            file_count: 1,
+            total_size_bytes: 100,
+            pose: None,
+            scale: None,
+            support_status: None,
+            release_date: date.map(String::from),
+            variant: None,
+            sculptor: None,
+            group_name: None,
+        };
+        let models = vec![
+            model("stray", None, None, None),
+            model("bog hag", Some("Bestiarum"), Some("Dread Swamp"), Some("12/2025")),
+            model("ash golem", Some("Bestiarum"), Some("Emberpeak"), Some("2/2026")),
+            model("zeb", Some("Archvillain"), Some("Zebra"), Some("1/2026")),
+        ];
+        replace_catalog(&mut conn, &[], &models, &[], &[]).unwrap();
+
+        // designer A–Z, releases A–Z within, metadata-less rows last
+        let names = |page: GroupPage| -> Vec<String> {
+            page.groups.into_iter().map(|g| g.group_name).collect()
+        };
+        let page = search_groups(&conn, "", &[], None, "designer", 10, 0).unwrap();
+        assert_eq!(names(page), vec!["zeb", "bog hag", "ash golem", "stray"]);
+
+        // date mode: newest release first WITHIN a designer; 2/2026 must beat
+        // 12/2025 (string comparison would get this backwards)
+        let page = search_groups(&conn, "", &[], None, "designer_date", 10, 0).unwrap();
+        assert_eq!(names(page), vec!["zeb", "ash golem", "bog hag", "stray"]);
+
+        // the facet is exact but case-insensitive, and total honors it
+        let page = search_groups(&conn, "", &[], Some("bestiarum"), "name", 10, 0).unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(names(page), vec!["ash golem", "bog hag"]);
+
+        // the dropdown's option list: A–Z with per-designer group counts
+        let list = designers(&conn).unwrap();
+        let pairs: Vec<_> = list
+            .into_iter()
+            .map(|d| (d.designer, d.model_count))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![("Archvillain".to_string(), 1), ("Bestiarum".to_string(), 2)]
+        );
+
+        // release fields ride on the group rows for the UI's section headers
+        let page = search_groups(&conn, "", &[], None, "designer", 10, 1).unwrap();
+        assert_eq!(page.groups[0].release_name.as_deref(), Some("Dread Swamp"));
+        assert_eq!(page.groups[0].release_date.as_deref(), Some("12/2025"));
+    }
+
+    #[test]
     fn group_renames_survive_rescans_and_merge_when_named_alike() {
         let mut conn = test_conn();
         let (files, models, tags) = sample_rows();
         replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
 
         rename_group(&conn, "Giant Newt", "Stone Guardian").unwrap();
-        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
         assert!(page.groups.iter().any(|g| g.group_name == "Stone Guardian"));
         assert!(!page.groups.iter().any(|g| g.group_name == "Giant Newt"));
 
         // findable by the new name, both in FTS and member lookup
         assert_eq!(
-            search_groups(&conn, "guardian", &[], 10, 0).unwrap().total,
+            search_groups(&conn, "guardian", &[], None, "name", 10, 0).unwrap().total,
             1
         );
         assert_eq!(group_members(&conn, "stone guardian").unwrap().len(), 1);
@@ -2575,19 +2721,19 @@ mod tests {
         // a rescan keeps the rename (keyed on the scanner's group name)
         replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
         assert_eq!(
-            search_groups(&conn, "guardian", &[], 10, 0).unwrap().total,
+            search_groups(&conn, "guardian", &[], None, "name", 10, 0).unwrap().total,
             1
         );
 
         // renaming another group to the same display name merges them
         rename_group(&conn, "Bugbear", "Stone Guardian").unwrap();
-        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
         assert_eq!(page.total, 1, "two groups now share one card");
         assert_eq!(group_members(&conn, "Stone Guardian").unwrap().len(), 2);
 
         // empty name reverts every override displaying that name
         rename_group(&conn, "Stone Guardian", "").unwrap();
-        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
         assert_eq!(page.total, 2);
         assert!(page.groups.iter().any(|g| g.group_name == "Giant Newt"));
 
@@ -2607,13 +2753,13 @@ mod tests {
         )
         .unwrap();
 
-        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.groups[0].group_name, "Dungeon Denizens");
         assert_eq!(group_members(&conn, "Dungeon Denizens").unwrap().len(), 2);
         // findable by the combined name
         assert_eq!(
-            search_groups(&conn, "denizens", &[], 10, 0).unwrap().total,
+            search_groups(&conn, "denizens", &[], None, "name", 10, 0).unwrap().total,
             1
         );
 
@@ -2645,7 +2791,7 @@ mod tests {
 
         // Splitting = clearing the renames: the sources come back as cards
         rename_group(&conn, "Dungeon Denizens", "").unwrap();
-        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
         let names: Vec<_> = page.groups.iter().map(|g| g.group_name.clone()).collect();
         assert!(names.contains(&"Giant Newt".to_string()));
         assert!(names.contains(&"Bugbear".to_string()));
@@ -2667,7 +2813,7 @@ mod tests {
 
         // Pull one back out: it's its own card again, the other stays put
         detach_group_source(&conn, "Dungeon Denizens", "Bugbear").unwrap();
-        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
         let names: Vec<_> = page.groups.iter().map(|g| g.group_name.clone()).collect();
         assert!(names.contains(&"Bugbear".to_string()));
         assert!(names.contains(&"Dungeon Denizens".to_string()));
@@ -2691,7 +2837,7 @@ mod tests {
         replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
 
         set_group_cover(&conn, "critters", &picked_dir, None).unwrap();
-        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
         assert_eq!(
             page.groups[0].preview_path.as_deref(),
             Some("/previews/newt.png"),

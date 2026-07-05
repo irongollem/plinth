@@ -111,6 +111,11 @@ pub struct CatalogSearchResult {
 pub struct CatalogGroup {
     pub group_name: String,
     pub designer: Option<String>,
+    /// Aggregated like designer: any variant's value stands in for the
+    /// group, so grouping by release works even when only the release
+    /// models (not later additions) carry the metadata.
+    pub release_name: Option<String>,
+    pub release_date: Option<String>,
     pub variant_count: u32,
     pub pose_count: u32,
     pub support_statuses: Vec<String>,
@@ -123,6 +128,14 @@ pub struct CatalogGroup {
 pub struct CatalogGroupResult {
     pub groups: Vec<CatalogGroup>,
     pub total: u32,
+}
+
+/// One designer and how many logical models (groups) carry that name —
+/// feeds the catalog's designer filter dropdown.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct DesignerCount {
+    pub designer: String,
+    pub model_count: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

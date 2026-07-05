@@ -22,6 +22,25 @@
           v-model="query"
         />
       </label>
+      <select
+        v-model="designerFilter"
+        class="select select-sm w-44 font-mono text-[11px]"
+        title="Show only this designer's models"
+      >
+        <option value="">All designers</option>
+        <option v-for="d in designers" :key="d.designer" :value="d.designer">
+          {{ d.designer }} ({{ d.model_count }})
+        </option>
+      </select>
+      <select
+        v-model="groupMode"
+        class="select select-sm w-48 font-mono text-[11px]"
+        title="How the catalog is ordered"
+      >
+        <option value="none">Sort: model A–Z</option>
+        <option value="designer">Group: designer › release</option>
+        <option value="designer-date">Group: designer › newest</option>
+      </select>
       <div
         class="flex bg-base-200 border border-base-content/10 rounded-lg p-0.5"
       >
@@ -200,70 +219,131 @@
             <span class="w-40">VARIANTS</span>
             <span class="w-15 text-right">SIZE</span>
           </div>
-          <!-- div, not button: the row hosts a nested checkbox and
-               interactive elements can't nest -->
-          <div
-            v-for="group in groups"
-            :key="group.group_name"
-            role="button"
-            class="flex items-center gap-3 w-full text-left border-b border-base-content/5 py-1.5 pr-3 pl-2.5 cursor-pointer"
-            :class="
-              group.group_name === selectedGroup?.group_name
-                ? 'bg-primary/10 border-l-2 border-l-primary'
-                : 'border-l-2 border-l-transparent'
-            "
-            @click="selectGroup(group)"
-          >
-            <input
-              type="checkbox"
-              class="checkbox checkbox-xs w-4 shrink-0"
-              :checked="checkedGroups.includes(group.group_name)"
-              @click.stop
-              @change="toggleCheckedGroup(group.group_name)"
-            />
+          <template v-for="section in sections" :key="section.key">
             <div
-              class="w-10 h-10 shrink-0 rounded-md bg-base-300 overflow-hidden flex items-center justify-center text-base-content/30"
+              v-if="section.designer !== null"
+              class="flex items-baseline gap-2 pt-3 pb-1"
             >
-              <img
-                v-if="group.preview_path"
-                :src="convertFileSrc(group.preview_path)"
-                class="w-full h-full object-cover"
-                alt=""
-              />
-              <span v-else class="text-lg">🗿</span>
+              <span class="font-bold text-[13px]">{{ section.designer }}</span>
+              <span class="font-mono text-[10px] text-base-content/40">
+                {{ sectionModelCount(section) }} model{{
+                  sectionModelCount(section) === 1 ? "" : "s"
+                }}
+              </span>
             </div>
-            <span class="flex-1 font-medium text-[13px] truncate">{{
-              group.group_name
-            }}</span>
-            <span class="w-35 text-[12px] text-base-content/60 truncate">{{
-              group.designer
-            }}</span>
-            <span
-              class="w-40 font-mono text-[10.5px] text-base-content/50 truncate"
-              >{{ groupSummary(group) }}</span
-            >
-            <span
-              class="w-15 text-right font-mono text-[11px] text-base-content/50"
-              >{{ formatFileSize(group.total_size_bytes) }}</span
-            >
-          </div>
+            <template v-for="bucket in section.releases" :key="bucket.key">
+              <div
+                v-if="bucket.label !== null"
+                class="flex items-baseline gap-2 py-1 pl-0.5"
+              >
+                <span
+                  class="font-mono font-semibold text-[10px] tracking-widest uppercase text-base-content/50"
+                  >{{ bucket.label }}</span
+                >
+                <span
+                  v-if="bucket.date"
+                  class="font-mono text-[9.5px] text-base-content/35"
+                  >{{ bucket.date }}</span
+                >
+              </div>
+              <!-- div, not button: the row hosts a nested checkbox and
+               interactive elements can't nest -->
+              <div
+                v-for="group in bucket.groups"
+                :key="group.group_name"
+                role="button"
+                class="flex items-center gap-3 w-full text-left border-b border-base-content/5 py-1.5 pr-3 pl-2.5 cursor-pointer"
+                :class="
+                  group.group_name === selectedGroup?.group_name
+                    ? 'bg-primary/10 border-l-2 border-l-primary'
+                    : 'border-l-2 border-l-transparent'
+                "
+                @click="selectGroup(group)"
+              >
+                <input
+                  type="checkbox"
+                  class="checkbox checkbox-xs w-4 shrink-0"
+                  :checked="checkedGroups.includes(group.group_name)"
+                  @click.stop
+                  @change="toggleCheckedGroup(group.group_name)"
+                />
+                <div
+                  class="w-10 h-10 shrink-0 rounded-md bg-base-300 overflow-hidden flex items-center justify-center text-base-content/30"
+                >
+                  <img
+                    v-if="group.preview_path"
+                    :src="convertFileSrc(group.preview_path)"
+                    class="w-full h-full object-cover"
+                    alt=""
+                  />
+                  <span v-else class="text-lg">🗿</span>
+                </div>
+                <span class="flex-1 font-medium text-[13px] truncate">{{
+                  group.group_name
+                }}</span>
+                <span class="w-35 text-[12px] text-base-content/60 truncate">{{
+                  group.designer
+                }}</span>
+                <span
+                  class="w-40 font-mono text-[10.5px] text-base-content/50 truncate"
+                  >{{ groupSummary(group) }}</span
+                >
+                <span
+                  class="w-15 text-right font-mono text-[11px] text-base-content/50"
+                  >{{ formatFileSize(group.total_size_bytes) }}</span
+                >
+              </div>
+            </template>
+          </template>
         </template>
 
-        <!-- GRID MODE -->
-        <div
-          v-else
-          class="grid gap-3"
-          style="grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr))"
-        >
-          <CatalogCard
-            v-for="group in groups"
-            :key="group.group_name"
-            :group="group"
-            :selected="group.group_name === selectedGroup?.group_name"
-            :checked="checkedGroups.includes(group.group_name)"
-            @select="selectGroup"
-            @toggle-check="toggleCheckedGroup($event.group_name)"
-          />
+        <!-- GRID MODE (sections stack; each release bucket is its own grid) -->
+        <div v-else class="flex flex-col gap-1.5">
+          <template v-for="section in sections" :key="section.key">
+            <div
+              v-if="section.designer !== null"
+              class="flex items-baseline gap-2 pt-2"
+            >
+              <span class="font-bold text-[13px]">{{ section.designer }}</span>
+              <span class="font-mono text-[10px] text-base-content/40">
+                {{ sectionModelCount(section) }} model{{
+                  sectionModelCount(section) === 1 ? "" : "s"
+                }}
+              </span>
+            </div>
+            <template v-for="bucket in section.releases" :key="bucket.key">
+              <div
+                v-if="bucket.label !== null"
+                class="flex items-baseline gap-2 pl-0.5"
+              >
+                <span
+                  class="font-mono font-semibold text-[10px] tracking-widest uppercase text-base-content/50"
+                  >{{ bucket.label }}</span
+                >
+                <span
+                  v-if="bucket.date"
+                  class="font-mono text-[9.5px] text-base-content/35"
+                  >{{ bucket.date }}</span
+                >
+              </div>
+              <div
+                class="grid gap-3 mb-1.5"
+                style="
+                  grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+                "
+              >
+                <CatalogCard
+                  v-for="group in bucket.groups"
+                  :key="group.group_name"
+                  :group="group"
+                  :selected="group.group_name === selectedGroup?.group_name"
+                  :checked="checkedGroups.includes(group.group_name)"
+                  @select="selectGroup"
+                  @toggle-check="toggleCheckedGroup($event.group_name)"
+                />
+              </div>
+            </template>
+          </template>
         </div>
 
         <div v-if="groups.length < total" class="flex justify-center py-4">
@@ -912,6 +992,7 @@ import {
   type CatalogFile,
   type CatalogGroup,
   type CatalogStats,
+  type DesignerCount,
   type DuplicateGroup,
   type TagCount,
   commands,
@@ -950,6 +1031,27 @@ const query = ref("");
 const viewMode = ref<"list" | "grid">("grid");
 const selectedTags = ref<string[]>([]);
 const allTags = ref<TagCount[]>([]);
+
+/* Ordering/grouping: flat A–Z by model name, or grouped designer › release
+   with releases alphabetical or newest-first. The backend sorts (grouping
+   must hold across pages); the view only draws headers where the designer
+   or release changes between consecutive rows. */
+type GroupMode = "none" | "designer" | "designer-date";
+const SORT_FOR_MODE: Record<GroupMode, string> = {
+  none: "name",
+  designer: "designer",
+  "designer-date": "designer_date",
+};
+const storedGroupMode = localStorage.getItem("catalogGroupMode");
+const groupMode = ref<GroupMode>(
+  storedGroupMode === "designer" || storedGroupMode === "designer-date"
+    ? storedGroupMode
+    : "none",
+);
+watch(groupMode, (mode) => localStorage.setItem("catalogGroupMode", mode));
+// exact-match facet on top of the fuzzy text search; "" = all designers
+const designerFilter = ref("");
+const designers = ref<DesignerCount[]>([]);
 // the browsable units: one group per logical model
 const groups = ref<CatalogGroup[]>([]);
 const total = ref(0);
@@ -1068,6 +1170,8 @@ const runSearch = async (append = false) => {
   const result = await commands.searchCatalogGroups(
     query.value,
     selectedTags.value,
+    designerFilter.value || null,
+    SORT_FOR_MODE[groupMode.value],
     PAGE_SIZE,
     offset,
   );
@@ -1092,20 +1196,81 @@ const runSearch = async (append = false) => {
 const loadMore = () => runSearch(true);
 
 let searchTimeout: number | null = null;
-watch([query, selectedTags], () => {
+watch([query, selectedTags, designerFilter, groupMode], () => {
   if (searchTimeout) clearTimeout(searchTimeout);
   searchTimeout = setTimeout(() => runSearch(), 250) as unknown as number;
 });
 
+/* ---- designer › release sections, derived from the backend's order ---- */
+type ReleaseBucket = {
+  key: string;
+  label: string | null; // null = no release header (flat mode)
+  date: string | null;
+  groups: CatalogGroup[];
+};
+type DesignerSection = {
+  key: string;
+  designer: string | null; // null = no designer header (flat mode)
+  releases: ReleaseBucket[];
+};
+
+// One pass over the loaded page(s): a new header opens whenever the
+// designer or release changes between consecutive rows — safe because the
+// backend sorts by exactly (designer, release, name). Flat mode is the
+// same structure with a single headerless section, so the template never
+// branches on the mode.
+const sections = computed<DesignerSection[]>(() => {
+  if (groupMode.value === "none") {
+    return [
+      {
+        key: "all",
+        designer: null,
+        releases: [
+          { key: "all", label: null, date: null, groups: groups.value },
+        ],
+      },
+    ];
+  }
+  const out: DesignerSection[] = [];
+  for (const group of groups.value) {
+    const designer = group.designer?.trim() || "Unknown designer";
+    let section = out[out.length - 1];
+    // compare case-insensitively, matching the backend's NOCASE ordering
+    if (section?.designer?.toLowerCase() !== designer.toLowerCase()) {
+      section = { key: designer.toLowerCase(), designer, releases: [] };
+      out.push(section);
+    }
+    const label = group.release_name?.trim() || "No release";
+    let bucket = section.releases[section.releases.length - 1];
+    if (bucket?.label?.toLowerCase() !== label.toLowerCase()) {
+      bucket = {
+        key: `${section.key}\u{1f}${label.toLowerCase()}`,
+        label,
+        date: group.release_date,
+        groups: [],
+      };
+      section.releases.push(bucket);
+    }
+    bucket.groups.push(group);
+  }
+  return out;
+});
+
+const sectionModelCount = (section: DesignerSection) =>
+  section.releases.reduce((count, bucket) => count + bucket.groups.length, 0);
+
 const refreshMeta = async () => {
-  const [tagsResult, statsResult, dupResult] = await Promise.all([
-    commands.getCatalogTags(),
-    commands.getCatalogStats(),
-    commands.getDuplicateGroups(),
-  ]);
+  const [tagsResult, statsResult, dupResult, designerResult] =
+    await Promise.all([
+      commands.getCatalogTags(),
+      commands.getCatalogStats(),
+      commands.getDuplicateGroups(),
+      commands.getCatalogDesigners(),
+    ]);
   if (tagsResult.status === "ok") allTags.value = tagsResult.data;
   if (statsResult.status === "ok") stats.value = statsResult.data;
   if (dupResult.status === "ok") dupGroups.value = dupResult.data;
+  if (designerResult.status === "ok") designers.value = designerResult.data;
 };
 
 const toggleTag = (tag: string) => {
