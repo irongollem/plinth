@@ -573,7 +573,7 @@ fn prettify_segment(segment: &str) -> String {
 /// model as "lys supported" — these are dropped before reading support.
 const SLICER_FORMATS: &[&str] = &["stl", "stls", "lys", "chitu", "chitubox", "obj", "3mf"];
 
-fn support_from_segment(segment: &str) -> Option<&'static str> {
+pub(crate) fn support_from_segment(segment: &str) -> Option<&'static str> {
     // Drop any slicer-format words so "stl supported", "lys presupported"
     // and "unsupported chitu" all read as their support status. presupported
     // means supports are present — same answer as supported.

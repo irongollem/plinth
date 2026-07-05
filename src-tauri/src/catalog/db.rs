@@ -986,6 +986,104 @@ pub fn list_tags(conn: &Connection) -> Result<Vec<(String, u32)>, AppError> {
     Ok(rows)
 }
 
+/// The dir_paths shown under one card — the same display-name resolution as
+/// group_members, for operations that apply to the whole logical model.
+fn group_member_dirs(conn: &Connection, group_name: &str) -> Result<Vec<String>, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Group member lookup failed: {}", e));
+    let mut stmt = conn
+        .prepare(
+            "SELECT m.dir_path FROM models m
+             LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)
+             WHERE lower(COALESCE(r.display_name, m.group_name, m.name)) = lower(?1)",
+        )
+        .map_err(map_err)?;
+    stmt.query_map([group_name], |row| row.get(0))
+        .and_then(|rows| rows.collect())
+        .map_err(map_err)
+}
+
+/// Tag every member of a group. A tag describes the mini, not one build of
+/// it — tagging the supported and unsupported variants separately was just
+/// busywork that drifted out of sync.
+pub fn add_group_tag(conn: &Connection, group_name: &str, tag: &str) -> Result<(), AppError> {
+    let dirs = group_member_dirs(conn, group_name)?;
+    if dirs.is_empty() {
+        return Err(AppError::NotFoundError(format!(
+            "No catalog group named '{}'",
+            group_name
+        )));
+    }
+    for dir in &dirs {
+        add_tag(conn, dir, tag)?;
+    }
+    Ok(())
+}
+
+pub fn remove_group_tag(conn: &Connection, group_name: &str, tag: &str) -> Result<(), AppError> {
+    for dir in group_member_dirs(conn, group_name)? {
+        remove_tag(conn, &dir, tag)?;
+    }
+    Ok(())
+}
+
+/// The supported/unsupported (and format-variant) builds of the same sculpt:
+/// model dirs in the same group whose paths are identical once
+/// support-status segments are ignored. Exact structural match only — no
+/// fuzzy pairing — so an edit can never propagate to the wrong model.
+pub fn support_twins(conn: &Connection, dir_path: &str) -> Result<Vec<String>, AppError> {
+    let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Twin lookup failed: {}", e));
+    let support_neutral_key = |path: &str| -> String {
+        Path::new(path)
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .filter(|seg| crate::catalog::scanner::support_from_segment(seg).is_none())
+            .collect::<Vec<_>>()
+            .join("\u{1f}")
+            .to_lowercase()
+    };
+    let own_key = support_neutral_key(dir_path);
+    let mut stmt = conn
+        .prepare(
+            "SELECT m2.dir_path FROM models m2
+             WHERE lower(COALESCE(m2.group_name, m2.name)) =
+                   (SELECT lower(COALESCE(group_name, name)) FROM models WHERE dir_path = ?1)
+               AND m2.dir_path <> ?1",
+        )
+        .map_err(map_err)?;
+    let candidates: Vec<String> = stmt
+        .query_map([dir_path], |row| row.get(0))
+        .and_then(|rows| rows.collect())
+        .map_err(map_err)?;
+    Ok(candidates
+        .into_iter()
+        .filter(|c| support_neutral_key(c) == own_key)
+        .collect())
+}
+
+/// Partial user-meta upsert used for twin propagation: only Some fields are
+/// written (COALESCE keeps the twin's own values for the rest), so a
+/// file-split member sending null facets never clears its twin.
+pub fn update_model_facets(
+    conn: &Connection,
+    dir_path: &str,
+    variant: Option<&str>,
+    pose: Option<&str>,
+    scale: Option<&str>,
+) -> Result<(), AppError> {
+    conn.execute(
+        "INSERT INTO model_user_meta (dir_path, variant, pose, scale)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(dir_path) DO UPDATE SET
+             variant = COALESCE(excluded.variant, model_user_meta.variant),
+             pose    = COALESCE(excluded.pose, model_user_meta.pose),
+             scale   = COALESCE(excluded.scale, model_user_meta.scale)",
+        params![dir_path, variant, pose, scale],
+    )
+    .map_err(|e| AppError::ConfigError(format!("Failed to propagate facets: {}", e)))?;
+    Ok(())
+}
+
 pub fn add_tag(conn: &Connection, dir_path: &str, tag: &str) -> Result<(), AppError> {
     let tag = tag.trim().to_lowercase().replace(' ', "_");
     if tag.is_empty() {
@@ -2466,6 +2564,76 @@ mod tests {
         assert!(names.contains(&"Giant Newt".to_string()));
         assert!(names.contains(&"Bugbear".to_string()));
         assert!(!names.contains(&"Dungeon Denizens".to_string()));
+    }
+
+    #[test]
+    fn support_twins_match_exact_structure_and_facets_propagate() {
+        let mut conn = test_conn();
+        let mk = |dir: &str, group: &str, support: &str| ModelRow {
+            dir_path: dir.into(),
+            name: group.into(),
+            description: None,
+            designer: None,
+            release_name: None,
+            preview_path: None,
+            source: "heuristic".into(),
+            uuid: None,
+            file_count: 1,
+            total_size_bytes: 10,
+            variant: None,
+            pose: None,
+            scale: None,
+            support_status: Some(support.into()),
+            release_date: None,
+            sculptor: None,
+            group_name: Some(group.into()),
+        };
+        let models = vec![
+            mk("/lib/knight/Supported/A", "knight", "supported"),
+            mk("/lib/knight/Unsupported/A", "knight", "unsupported"),
+            mk("/lib/knight/Unsupported/B", "knight", "unsupported"),
+        ];
+        replace_catalog(&mut conn, &[], &models, &[], &[]).unwrap();
+
+        // A's builds pair up; B is the same model but a different pose dir
+        let twins = support_twins(&conn, "/lib/knight/Supported/A").unwrap();
+        assert_eq!(twins, ["/lib/knight/Unsupported/A"]);
+
+        // Some values propagate, None leaves the twin's own value alone
+        update_model_facets(&conn, "/lib/knight/Unsupported/A", None, Some("A"), None).unwrap();
+        update_model_facets(
+            &conn,
+            "/lib/knight/Unsupported/A",
+            Some("spear"),
+            None,
+            None,
+        )
+        .unwrap();
+        let (variant, pose): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT variant, pose FROM model_user_meta WHERE dir_path = ?1",
+                ["/lib/knight/Unsupported/A"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(variant.as_deref(), Some("spear"));
+        assert_eq!(pose.as_deref(), Some("A"), "None must not clear the pose");
+
+        // Group tags hit every member in one call
+        add_group_tag(&conn, "knight", "Cavalry").unwrap();
+        let tagged: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM model_tags WHERE tag = 'cavalry'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tagged, 3, "normalized tag lands on all three members");
+        remove_group_tag(&conn, "knight", "cavalry").unwrap();
+        let left: u32 = conn
+            .query_row("SELECT COUNT(*) FROM model_tags", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]

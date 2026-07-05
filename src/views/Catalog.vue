@@ -1374,12 +1374,12 @@ const renameGroup = async () => {
   }
 };
 
+// Tags apply to the whole group: a tag describes the mini, so tagging the
+// supported and unsupported builds separately was busywork that drifted
 const addTag = async () => {
-  if (!selected.value || !newTag.value.trim()) return;
-  const result = await commands.addCatalogTag(
-    selected.value.dir_path,
-    newTag.value,
-  );
+  const group = selectedGroup.value;
+  if (!group || !selected.value || !newTag.value.trim()) return;
+  const result = await commands.addGroupTag(group.group_name, newTag.value);
   if (result.status === "ok") {
     newTag.value = "";
     await refreshSelected();
@@ -1390,8 +1390,9 @@ const addTag = async () => {
 };
 
 const removeTag = async (tag: string) => {
-  if (!selected.value) return;
-  const result = await commands.removeCatalogTag(selected.value.dir_path, tag);
+  const group = selectedGroup.value;
+  if (!group || !selected.value) return;
+  const result = await commands.removeGroupTag(group.group_name, tag);
   if (result.status === "ok") {
     await refreshSelected();
     await refreshMeta();
@@ -1771,6 +1772,16 @@ const saveMetadata = async () => {
     toastStore.reportError("Failed to save details", result.error);
     return;
   }
+  // variant/pose/scale were also applied to this sculpt's other support
+  // builds (exact folder twins) — say so, since the user didn't click them
+  const twinCount = result.data;
+  const savedToast = () =>
+    toastStore.addToast(
+      twinCount
+        ? `Details saved · also applied to ${twinCount} matching build${twinCount === 1 ? "" : "s"}`
+        : "Details saved",
+      "success",
+    );
 
   // NAME edits the group/card name (the sort key) for every model.
   const newName = draft.name.trim();
@@ -1784,7 +1795,7 @@ const saveMetadata = async () => {
       await refreshSelected();
       return;
     }
-    toastStore.addToast("Details saved", "success");
+    savedToast();
     // the card moved to its new name — re-open it there
     await Promise.all([runSearch(), refreshMeta()]);
     const found = groups.value.find(
@@ -1794,7 +1805,7 @@ const saveMetadata = async () => {
     return;
   }
 
-  toastStore.addToast("Details saved", "success");
+  savedToast();
   // land on the re-filed bucket (or the pool, if both facets were cleared)
   if (bucketChanged) {
     await Promise.all([

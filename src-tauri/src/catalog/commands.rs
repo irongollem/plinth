@@ -435,31 +435,82 @@ pub async fn get_catalog_releases(app_handle: AppHandle) -> Result<Vec<ReleaseSu
     .map_err(|e| AppError::ConfigError(format!("Release listing task failed: {}", e)))?
 }
 
+/// Update one member's metadata, then propagate the shared facets (variant,
+/// pose, scale) to its support twins — the supported/unsupported builds of
+/// the same sculpt, matched by exact path structure. Returns how many twins
+/// received the edit so the UI can say so. Only Some values propagate;
+/// clears stay local to the edited member.
 #[tauri::command]
 #[specta::specta]
 pub async fn update_model_metadata(
     app_handle: AppHandle,
     dir_path: String,
     meta: ModelMetaUpdate,
-) -> Result<(), AppError> {
+) -> Result<u32, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
         db::update_model_user_meta(
             &conn,
             &dir_path,
             meta.custom_name,
-            meta.pose,
-            meta.scale,
+            meta.pose.clone(),
+            meta.scale.clone(),
             meta.support_status,
             meta.release_date,
             meta.designer,
             meta.sculptor,
             meta.release_name,
-            meta.variant,
-        )
+            meta.variant.clone(),
+        )?;
+        if meta.variant.is_none() && meta.pose.is_none() && meta.scale.is_none() {
+            return Ok(0);
+        }
+        let twins = db::support_twins(&conn, &dir_path)?;
+        for twin in &twins {
+            db::update_model_facets(
+                &conn,
+                twin,
+                meta.variant.as_deref(),
+                meta.pose.as_deref(),
+                meta.scale.as_deref(),
+            )?;
+        }
+        Ok(twins.len() as u32)
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Metadata update failed: {}", e)))?
+}
+
+/// Tag/untag every member of a group at once — a tag describes the mini,
+/// not one support build of it.
+#[tauri::command]
+#[specta::specta]
+pub async fn add_group_tag(
+    app_handle: AppHandle,
+    group_name: String,
+    tag: String,
+) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::add_group_tag(&conn, &group_name, &tag)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Tag task failed: {}", e)))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn remove_group_tag(
+    app_handle: AppHandle,
+    group_name: String,
+    tag: String,
+) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::remove_group_tag(&conn, &group_name, &tag)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Tag task failed: {}", e)))?
 }
 
 /// Assign files to a pose (with optional per-file support) so a dump
