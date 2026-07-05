@@ -251,11 +251,16 @@ fn numbered_name(name: &str, taken: &HashMap<String, String>) -> String {
     unreachable!("ran out of integers before file names")
 }
 
-/// Plan one file's landing spot in a merge bucket. Clash policy: a file
-/// that is byte-identical to the one already claiming the name becomes a
-/// reviewable "drop" (the copy is redundant once one lands — the unicorn-
-/// bases case, where every part folder repeats the same base STLs); files
-/// that merely SHARE a name get a numbered one instead of being skipped.
+/// Plan one file's landing spot in a merge bucket.
+///
+/// File names are the DESIGNER'S — they stay untouched unless an actual
+/// clash forces a choice (pose is metadata: file_variants + model.json,
+/// not a mandatory name mutation). Clash policy, in order:
+/// 1. byte-identical to the claimant -> reviewable "drop" (the copy is
+///    redundant once one lands — the repeated-bases case)
+/// 2. pose suffix, when the member has a pose and it frees the name
+///    (identically-named files from pose dirs A/B/C)
+/// 3. numbered name — never skip, never lose a file
 #[allow(clippy::too_many_arguments)]
 fn place_file(
     current: String,
@@ -266,22 +271,28 @@ fn place_file(
     ops: &mut Vec<NormalizeOp>,
     notes: &mut Vec<String>,
 ) {
-    let desired = layout::pose_suffixed_name(&file.file_name, pose.unwrap_or(""));
-    let mut target_name = desired.clone();
-    if let Some(kept_original) = used_names.get(&desired.to_lowercase()) {
+    let mut target_name = file.file_name.clone();
+    if let Some(kept_original) = used_names.get(&target_name.to_lowercase()) {
         if same_content(Path::new(kept_original), Path::new(&file.path)) {
             ops.push(NormalizeOp {
                 from: current,
-                to: format!("{}{}{}", leaf, MAIN_SEPARATOR, desired),
+                to: format!("{}{}{}", leaf, MAIN_SEPARATOR, target_name),
                 kind: "drop".into(),
                 pose: None,
             });
             return;
         }
-        target_name = numbered_name(&desired, used_names);
+        let suffixed = layout::pose_suffixed_name(&file.file_name, pose.unwrap_or(""));
+        target_name = if suffixed != file.file_name
+            && !used_names.contains_key(&suffixed.to_lowercase())
+        {
+            suffixed
+        } else {
+            numbered_name(&file.file_name, used_names)
+        };
         notes.push(format!(
             "{} exists twice with different contents — one becomes {}",
-            desired, target_name
+            file.file_name, target_name
         ));
     }
     used_names.insert(target_name.to_lowercase(), file.path.clone());
@@ -294,7 +305,7 @@ fn place_file(
             pose: pose.map(String::from),
         });
     } else if pose.is_some() {
-        // name already carries the pose; still record it as metadata
+        // nothing moves, but the pose still lands as file-level metadata
         ops.push(NormalizeOp {
             from: current,
             to,
@@ -384,6 +395,12 @@ pub fn plan(
                 && is_under(b, &root_str)
                 && !is_under(b, &model_dir_str)      // already at/inside the target
                 && !is_under(&model_dir_str, b)      // can't rename a dir into itself
+                // a model dir that ALREADY exists (earlier cleanup, second
+                // batch of the same release) can't be rename-created again —
+                // per-member mode merges into it instead. Case-only fixes of
+                // the same dir are still a legal rename.
+                && (!Path::new(&model_dir_str).exists()
+                    || b.eq_ignore_ascii_case(&model_dir_str))
                 && all_dirs
                     .iter()
                     .filter(|d| is_under(d, b))
@@ -440,30 +457,59 @@ pub fn plan(
         }
 
         for (leaf, idxs) in &buckets {
-            let merging = idxs.len() > 1;
-            // pick the dir-rename anchor: a member already at the leaf, or
-            // the first one that can legally rename there. A member whose
-            // dir contains another member (nested) or contains the leaf
-            // itself must move per-file instead.
-            let mut anchored = false;
+            // A leaf that already exists ON DISK is normal, not an error:
+            // an earlier cleanup of the same designer/release created it,
+            // or a nested pose dir lives inside it. Nothing may dir-rename
+            // onto it — everything merges INTO it per-file, colliding
+            // against what's already there.
+            let occupant = idxs
+                .iter()
+                .copied()
+                .find(|&i| cur[i].eq_ignore_ascii_case(leaf));
+            let leaf_on_disk = Path::new(leaf).exists();
+            let leaf_exists_foreign = leaf_on_disk && occupant.is_none();
+
             // target name (lowercased) -> ORIGINAL path of the file that
-            // claimed it, so clashes can be settled by comparing contents
+            // claimed it, so clashes can be settled by comparing contents.
+            // Pre-seeded with the leaf's existing disk files so merges
+            // dedup/disambiguate against them too.
             let mut used_names: HashMap<String, String> = HashMap::new();
-            for &i in idxs.iter() {
+            if leaf_exists_foreign {
+                for f in disk_files(Path::new(leaf)) {
+                    if f.file_name != "model.json" && f.file_name != "release.json" {
+                        used_names.insert(f.file_name.to_lowercase(), f.path.clone());
+                    }
+                }
+            }
+
+            let merging = idxs.len() > 1 || leaf_exists_foreign;
+            let mut anchored = occupant.is_some() || leaf_exists_foreign;
+
+            // the member already AT the leaf claims its file names first —
+            // renaming an in-place file away because a merged file got to
+            // the registry earlier would be exactly backwards
+            let mut order: Vec<usize> = idxs.clone();
+            if let Some(o) = occupant {
+                order.retain(|&i| i != o);
+                order.insert(0, o);
+            }
+
+            for &i in &order {
                 let member = members[i];
                 let from_dir = &cur[i];
+                let is_occupant = Some(i) == occupant;
                 let is_nested_parent = cur
                     .iter()
                     .enumerate()
                     .any(|(j, other)| j != i && is_under(other, from_dir) && other != from_dir);
+                // a dir rename is legal only onto a spot that's genuinely
+                // free on disk (case-only fixes of the same dir excepted)
                 let can_rename = !anchored
                     && !is_nested_parent
                     && !is_under(leaf, from_dir)
-                    && !cur.iter().enumerate().any(|(j, other)| {
-                        j != i && other == *leaf && desired[j] != **leaf
-                    });
+                    && (!leaf_on_disk || from_dir.eq_ignore_ascii_case(leaf));
 
-                if from_dir == *leaf || can_rename {
+                if is_occupant || can_rename {
                     if from_dir != *leaf {
                         ops.push(NormalizeOp {
                             from: from_dir.clone(),
@@ -473,9 +519,9 @@ pub fn plan(
                         });
                     }
                     anchored = true;
-                    // when poses merge into one build folder, even the
-                    // anchor's files gain their pose suffix so the whole
-                    // set stays distinguishable side by side
+                    // in a merge, the anchor's files still register their
+                    // names (and pose metadata) so incomers collide with
+                    // them correctly
                     if merging {
                         for f in disk_files(Path::new(&member.dir)) {
                             if f.file_name == "model.json" || f.file_name == "release.json" {
@@ -561,8 +607,20 @@ pub fn plan(
 pub fn apply_ops(conn: &mut Connection, ops: &[NormalizeOp]) -> Result<BatchOutcome, AppError> {
     let mut succeeded = 0u32;
     let mut errors: Vec<String> = Vec::new();
+    // targets of failed folder moves: every later op addressing paths the
+    // rename would have created is doomed — skip them quietly instead of
+    // burying the ONE real error under a wall of "Source not found"
+    let mut failed_dir_targets: Vec<String> = Vec::new();
+    let mut suppressed = 0u32;
 
     for op in ops {
+        if failed_dir_targets
+            .iter()
+            .any(|t| is_under(&op.from, t) || is_under(&op.to, t))
+        {
+            suppressed += 1;
+            continue;
+        }
         // "pose" ops only record metadata — no filesystem side
         if op.kind == "pose" {
             if let Err(e) = record_pose(conn, &op.to, op.pose.as_deref()) {
@@ -609,6 +667,9 @@ pub fn apply_ops(conn: &mut Connection, ops: &[NormalizeOp]) -> Result<BatchOutc
         let to = Path::new(&op.to);
         if !from.exists() {
             errors.push(format!("Source not found: {}", op.from));
+            if op.kind == "dir" {
+                failed_dir_targets.push(op.to.clone());
+            }
             continue;
         }
         // A case-only rename ("unsupported" -> "Unsupported") reports the
@@ -617,6 +678,9 @@ pub fn apply_ops(conn: &mut Connection, ops: &[NormalizeOp]) -> Result<BatchOutc
         let case_only = op.from.eq_ignore_ascii_case(&op.to) && op.from != op.to;
         if to.exists() && !case_only {
             errors.push(format!("Destination already exists: {}", op.to));
+            if op.kind == "dir" {
+                failed_dir_targets.push(op.to.clone());
+            }
             continue;
         }
         if let Some(parent) = to.parent() {
@@ -629,6 +693,9 @@ pub fn apply_ops(conn: &mut Connection, ops: &[NormalizeOp]) -> Result<BatchOutc
             // EXDEV lands here too: cross-volume moves are refused loudly,
             // because a copy+delete would silently split shared hardlinks
             errors.push(format!("Failed to move {} to {}: {}", op.from, op.to, e));
+            if op.kind == "dir" {
+                failed_dir_targets.push(op.to.clone());
+            }
             continue;
         }
         let index_result = if op.kind == "dir" {
@@ -647,6 +714,13 @@ pub fn apply_ops(conn: &mut Connection, ops: &[NormalizeOp]) -> Result<BatchOutc
                 op.to, e
             )),
         }
+    }
+    if suppressed > 0 {
+        errors.push(format!(
+            "{} follow-up move{} skipped because their folder move failed above",
+            suppressed,
+            if suppressed == 1 { "" } else { "s" }
+        ));
     }
     Ok(BatchOutcome { succeeded, errors })
 }
@@ -1025,8 +1099,11 @@ mod tests {
         let root = std::env::temp_dir().join(format!("plinth_norm_pose_{}", std::process::id()));
         fs::remove_dir_all(&root).ok();
         let old = root.join("galeb duhr/supported");
-        touch(&old.join("A/galeb duhr.stl"));
-        touch(&old.join("B/galeb duhr.stl"));
+        // identical names, DIFFERENT sculpts — the true pose-dir shape
+        fs::create_dir_all(old.join("A")).unwrap();
+        fs::create_dir_all(old.join("B")).unwrap();
+        fs::write(old.join("A/galeb duhr.stl"), b"pose a sculpt").unwrap();
+        fs::write(old.join("B/galeb duhr.stl"), b"pose b sculpt").unwrap();
 
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         db::test_init(&conn);
@@ -1048,11 +1125,14 @@ mod tests {
 
         let outcome = apply_ops(&mut conn, &group.ops).unwrap();
         assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
-        // both poses side by side in ONE build folder, names disambiguated
-        assert!(target.join("Supported/galeb duhr A.stl").is_file());
+        // both poses side by side in ONE build folder. The first keeps the
+        // designer's original name — renames happen ONLY to resolve the
+        // clash, and the pose suffix is the preferred disambiguator
+        assert!(target.join("Supported/galeb duhr.stl").is_file());
         assert!(target.join("Supported/galeb duhr B.stl").is_file());
+        assert!(!target.join("Supported/galeb duhr A.stl").exists());
 
-        // pose survived as file-level metadata
+        // pose survived as file-level metadata on BOTH files
         let poses: Vec<(String, String)> = {
             let mut stmt = conn
                 .prepare("SELECT path, pose FROM file_variants ORDER BY path")
@@ -1065,7 +1145,11 @@ mod tests {
             rows
         };
         assert_eq!(poses.len(), 2);
-        assert!(poses.iter().any(|(p, pose)| p.ends_with("A.stl") && pose == "A"));
+        assert!(
+            poses
+                .iter()
+                .any(|(p, pose)| p.ends_with("galeb duhr.stl") && pose == "A")
+        );
         assert!(poses.iter().any(|(p, pose)| p.ends_with("B.stl") && pose == "B"));
 
         let warnings = finalize(
@@ -1157,6 +1241,73 @@ mod tests {
         assert!(warnings.is_empty(), "{:?}", warnings);
         // the emptied part folders are gone
         assert!(!root.join("unicorn").exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn merges_into_an_already_existing_build_folder() {
+        // The Centaurs incident: Supported/ already existed at the target
+        // (holding earlier-merged files) while pose A still lived in a
+        // nested A/ subdir inside it. The old planner elected A for a dir
+        // rename ONTO its own parent — "Destination already exists" plus a
+        // wall of dependent "Source not found" errors. An occupied leaf is
+        // normal (second batch of a release, partial earlier run): merge
+        // INTO it per-file, colliding against what's already there.
+        let root = std::env::temp_dir().join(format!("plinth_norm_occ_{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let leaf = root.join("Bestiarum/2026-07 Dread Swamp/Centaurs/Supported");
+        let nested = leaf.join("A");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(leaf.join("centaur_B.lys"), b"pose b").unwrap();
+        fs::write(nested.join("centaur_A.lys"), b"pose a").unwrap();
+        fs::write(nested.join("shared_base.stl"), b"same base").unwrap();
+        fs::write(leaf.join("shared_base.stl"), b"same base").unwrap();
+        fs::write(nested.join("model.json"), b"{\"name\":\"Centaurs\"}").unwrap();
+
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::test_init(&conn);
+        // only the nested pose dir is indexed as a member — exactly the
+        // mid-cleanup state the incident's rescan produced
+        let mut row_a = model_row(&nested, "Centaurs", "Centaurs");
+        row_a.support_status = Some("supported".into());
+        row_a.pose = Some("A".into());
+        let files = vec![
+            file_row(&nested.join("centaur_A.lys"), &nested),
+            file_row(&nested.join("shared_base.stl"), &nested),
+        ];
+        db::replace_catalog(&mut conn, &files, &[row_a], &[], &[]).unwrap();
+
+        let plan = plan(&conn, &root, None, None).unwrap();
+        let group = &plan.groups[0];
+        // NOTHING may dir-rename onto the occupied leaf
+        assert!(
+            group.ops.iter().all(|op| op.kind != "dir"),
+            "occupied leaf must merge per-file: {:?}",
+            group.ops
+        );
+
+        let outcome = apply_ops(&mut conn, &group.ops).unwrap();
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        // unique file moved UP with its designer name intact...
+        assert!(leaf.join("centaur_A.lys").is_file());
+        assert!(!leaf.join("centaur_A A.lys").exists());
+        // ...the identical base collapsed instead of erroring...
+        assert!(leaf.join("shared_base.stl").is_file());
+        assert!(!nested.join("shared_base.stl").exists());
+        // ...and what was already in the leaf is untouched
+        assert!(leaf.join("centaur_B.lys").is_file());
+
+        let warnings = finalize(
+            &conn,
+            &root,
+            &["Centaurs".to_string()],
+            &group.old_dirs,
+        )
+        .unwrap();
+        assert!(warnings.is_empty(), "{:?}", warnings);
+        // the emptied pose dir (stale sidecar and all) is gone
+        assert!(!nested.exists());
 
         fs::remove_dir_all(&root).ok();
     }
