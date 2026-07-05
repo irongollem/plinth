@@ -506,6 +506,10 @@ pub async fn update_model_metadata(
 ) -> Result<u32, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
+        // variant casing is the tool's convention (Title Case), applied at
+        // the input boundary so 'sword' and 'SWORD' can never coexist
+        let mut meta = meta;
+        meta.variant = meta.variant.map(|v| super::layout::title_case(&v));
         db::update_model_user_meta(
             &conn,
             &dir_path,
@@ -602,6 +606,8 @@ pub async fn assign_files_to_pose(
 ) -> Result<u32, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut conn = open_db(&app_handle)?;
+        // casing is the tool's convention, not the typist's
+        let variant = variant.map(|v| super::layout::title_case(&v));
         db::set_file_variants(&mut conn, &paths, variant, pose, support_status)
     })
     .await

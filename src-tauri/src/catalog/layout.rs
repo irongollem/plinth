@@ -78,6 +78,26 @@ pub fn release_segment(release_name: &str, release_date: Option<&str>) -> String
     }
 }
 
+/// The casing CONVENTION for variant names: Title Case, tool-decided.
+/// "sword", "SWORD" and "Sword" are one variant — letting whoever typed
+/// first pick the spelling made grouping depend on data-entry accidents.
+/// Acronym-styled variants ("OPR") flatten to "Opr"; that's the price of
+/// a convention and it's consistent.
+pub fn title_case(name: &str) -> String {
+    name.split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// "supported"/"presupported" -> Supported, "unsupported" -> Unsupported.
 /// Anything else (None, unknown strings) has no canonical build folder.
 pub fn support_segment(support: Option<&str>) -> Option<&'static str> {
@@ -114,7 +134,8 @@ pub fn member_dir(model_dir: &Path, support: Option<&str>, variant: Option<&str>
         Some(build) => {
             let dir = model_dir.join(build);
             match variant.filter(|v| !v.trim().is_empty()) {
-                Some(v) => dir.join(sanitize_segment(v)),
+                // variant folders always carry the conventional casing
+                Some(v) => dir.join(sanitize_segment(&title_case(v))),
                 None => dir,
             }
         }
@@ -211,7 +232,7 @@ mod tests {
         );
         assert_eq!(
             member_dir(model, Some("presupported"), Some("sword")),
-            Path::new("/lib/B/R/Bog Hag/Supported/sword")
+            Path::new("/lib/B/R/Bog Hag/Supported/Sword")
         );
         assert_eq!(
             member_dir(model, Some("unsupported"), None),
@@ -219,6 +240,17 @@ mod tests {
         );
         // unknown support -> model root, variant tier does not apply
         assert_eq!(member_dir(model, None, Some("sword")), model);
+    }
+
+    #[test]
+    fn title_case_is_the_variant_convention() {
+        assert_eq!(title_case("sword"), "Sword");
+        assert_eq!(title_case("SWORD"), "Sword");
+        assert_eq!(title_case("great swords"), "Great Swords");
+        assert_eq!(title_case("sword + flower shield"), "Sword + Flower Shield");
+        assert_eq!(title_case("  spaced   out "), "Spaced Out");
+        // the convention flattens acronyms — consistent beats clever
+        assert_eq!(title_case("OPR"), "Opr");
     }
 
     #[test]

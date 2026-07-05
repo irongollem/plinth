@@ -682,10 +682,19 @@ fn expand_file_variants(
             // canonical leaf .../Supported/Great Swords fans into pose
             // members that must stay inside the Great Swords tab — using
             // only the file-level value collapsed every pose member into
-            // a variantless pool and the variant tier vanished
+            // a variantless pool and the variant tier vanished. A file
+            // value that only differs from the folder's by CASE adopts the
+            // folder's spelling — legacy rows predate the Title Case
+            // convention and must not fork a second bucket.
             let variant = v
                 .variant
                 .filter(|s| !s.is_empty())
+                .map(|s| {
+                    match entry.variant.as_deref() {
+                        Some(ev) if ev.eq_ignore_ascii_case(&s) => ev.to_string(),
+                        _ => s,
+                    }
+                })
                 .or_else(|| entry.variant.clone())
                 .unwrap_or_default();
             let pose = v.pose.unwrap_or_default();
@@ -702,7 +711,11 @@ fn expand_file_variants(
             // (every pose member repeating it would just be noise)
             let mut label = entry.name.clone();
             for facet in [&variant, &pose] {
-                if !facet.is_empty() && Some(facet.as_str()) != entry.variant.as_deref() {
+                let repeats_folder = entry
+                    .variant
+                    .as_deref()
+                    .is_some_and(|ev| ev.eq_ignore_ascii_case(facet));
+                if !facet.is_empty() && !repeats_folder {
                     label.push(' ');
                     label.push_str(facet);
                 }

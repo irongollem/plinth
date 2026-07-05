@@ -1674,7 +1674,7 @@ const reloadMembers = async (preferKey?: string) => {
     members.value[0];
   // move the support + variant tiers to wherever we landed, so it's visible
   activeSupport.value = next?.support_status ?? firstTab;
-  activeVariant.value = next?.variant ?? "";
+  activeVariant.value = resolveVariant(next?.variant ?? "");
   if (next) await selectEntry(next);
 };
 
@@ -1751,13 +1751,18 @@ const supportMembers = computed(() =>
   members.value.filter((m) => (m.support_status ?? "") === activeSupport.value),
 );
 
-// distinct variants within the active support build, in the backend's bucket
-// order; "" = no variant. Only shown when there's more than one.
+// distinct variants within the active support build, in the backend's
+// bucket order; "" = no variant. Only shown when there's more than one.
+// Case-insensitive on purpose: new writes are Title Cased by convention,
+// but legacy members may still carry "sword" beside "Sword" until their
+// metadata is re-saved — one chip, not two.
 const variantsInTab = computed(() => {
   const seen: string[] = [];
   for (const member of supportMembers.value) {
     const variant = member.variant ?? "";
-    if (!seen.includes(variant)) seen.push(variant);
+    if (!seen.some((v) => v.toLowerCase() === variant.toLowerCase())) {
+      seen.push(variant);
+    }
   }
   return seen;
 });
@@ -1765,14 +1770,18 @@ const variantLabel = (variant: string) => variant || "base";
 
 // the pose members within the active (support, variant) bucket
 const tabMembers = computed(() =>
-  supportMembers.value.filter((m) => (m.variant ?? "") === activeVariant.value),
+  supportMembers.value.filter(
+    (m) =>
+      (m.variant ?? "").toLowerCase() === activeVariant.value.toLowerCase(),
+  ),
 );
 
 // pick a variant present in the active support build, preferring `prefer`
+// (case-insensitively — the chip's spelling wins over the member's)
 const resolveVariant = (prefer: string) =>
-  variantsInTab.value.includes(prefer)
-    ? prefer
-    : (variantsInTab.value[0] ?? "");
+  variantsInTab.value.find((v) => v.toLowerCase() === prefer.toLowerCase()) ??
+  variantsInTab.value[0] ??
+  "";
 
 const setSupportTab = (tab: string) => {
   // keep the pose/variant when hopping between builds — you're looking at the
@@ -1824,7 +1833,8 @@ const selectGroup = async (group: CatalogGroup) => {
   const first =
     members.value.find((m) => (m.support_status ?? "") === firstTab) ??
     members.value[0];
-  activeVariant.value = first?.variant ?? "";
+  // through resolveVariant so the active chip carries the CHIP's spelling
+  activeVariant.value = resolveVariant(first?.variant ?? "");
   if (first) await selectEntry(first);
 };
 

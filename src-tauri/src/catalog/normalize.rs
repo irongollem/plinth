@@ -138,6 +138,21 @@ fn first_some(rows: &[&MemberRow], get: fn(&MemberRow) -> Option<&String>) -> Op
     rows.iter().find_map(|r| get(r).cloned())
 }
 
+/// lowercase variant -> the CONVENTIONAL spelling (layout::title_case),
+/// so case-variant names ("Sword"/"sword"/"SWORD") resolve to ONE leaf
+/// everywhere the layout is built — the tool decides casing, not
+/// whichever member got typed first.
+fn canonical_variants(members: &[&MemberRow]) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = HashMap::new();
+    for m in members {
+        if let Some(v) = m.variant.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+            map.entry(v.to_lowercase())
+                .or_insert_with(|| layout::title_case(v));
+        }
+    }
+    map
+}
+
 struct FileRowLite {
     path: String,
     file_name: String,
@@ -548,10 +563,19 @@ pub fn plan(
         }
 
         // ---- phase 2: reshape into Supported/Unsupported[/variant] leaves
+        // "Sword" and "sword" are the same variant: unify case-variant
+        // spellings onto the first one seen, or they'd bucket into two
+        // case-variant leaves that are the SAME dir on macOS/Windows and
+        // a forked pair on the case-sensitive NAS
+        let variant_case = canonical_variants(members);
         let desired: Vec<String> = members
             .iter()
             .map(|m| {
-                layout::member_dir(&model_dir, m.support.as_deref(), m.variant.as_deref())
+                let variant = m
+                    .variant
+                    .as_deref()
+                    .and_then(|v| variant_case.get(&v.to_lowercase()).map(String::as_str));
+                layout::member_dir(&model_dir, m.support.as_deref(), variant)
                     .to_string_lossy()
                     .into_owned()
             })
@@ -919,13 +943,17 @@ pub fn finalize(
         // lost its identity: sidecars went into dying pose folders while
         // the variant folders holding every file got nothing, and the next
         // scan shattered them into heuristic per-variant cards.
+        let member_refs: Vec<&MemberRow> = members.iter().collect();
+        let variant_case = canonical_variants(&member_refs);
         let mut leaves: BTreeMap<String, Vec<&MemberRow>> = BTreeMap::new();
         for member in &members {
-            let computed = layout::member_dir(
-                &model_dir,
-                member.support.as_deref(),
-                member.variant.as_deref(),
-            );
+            // same case unification as plan — the sidecar must land in the
+            // ONE leaf both spellings map to
+            let variant = member
+                .variant
+                .as_deref()
+                .and_then(|v| variant_case.get(&v.to_lowercase()).map(String::as_str));
+            let computed = layout::member_dir(&model_dir, member.support.as_deref(), variant);
             let leaf = if computed.is_dir() {
                 computed.to_string_lossy().into_owned()
             } else if Path::new(&member.dir).is_dir() {
@@ -1089,7 +1117,8 @@ fn write_leaf_json(
         "description": first_some(&refs, |r| r.description.as_ref()),
         "tags": tags,
         "images": images,
-        "variant": first_some(&refs, |r| r.variant.as_ref()),
+        "variant": first_some(&refs, |r| r.variant.as_ref())
+            .map(|v| layout::title_case(&v)),
         "pose": dir_pose,
         "scale": first_some(&refs, |r| r.scale.as_ref()),
         "support_status": first_some(&refs, |r| r.support.as_ref()),
