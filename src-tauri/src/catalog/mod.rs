@@ -92,6 +92,10 @@ pub struct CatalogEntry {
     /// alone identifies it. The UI keys members on `variant_key ?? dir_path`
     /// and passes it back to fetch only that pose's files.
     pub variant_key: Option<String>,
+    /// The scanner-level group this member belongs to — the unit a combine
+    /// maps and a detach removes. Differs from the card's group_name when
+    /// the member is only in the card via a rename/combine.
+    pub source_group: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

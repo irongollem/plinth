@@ -154,6 +154,16 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             preview_path TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_variant_previews_dir ON variant_previews(dir_path);
+
+        -- The user's pick for a group card's main image: WHICH member
+        -- represents the card, not a copied path — the member's current
+        -- preview is resolved at read time, so re-renders follow along.
+        -- Keyed by display name (case-insensitive) so it survives rescans.
+        CREATE TABLE IF NOT EXISTS group_covers (
+            group_name  TEXT PRIMARY KEY COLLATE NOCASE,
+            dir_path    TEXT NOT NULL,
+            variant_key TEXT
+        );
         "#,
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to init catalog schema: {}", e)))?;
@@ -562,7 +572,8 @@ fn entry_select_sql(where_sql: &str, tail_sql: &str) -> String {
                 COALESCE(u.support_status, m.support_status),
                 COALESCE(u.release_date, m.release_date),
                 u.custom_name, COALESCE(u.sculptor, m.sculptor),
-                COALESCE(u.variant, m.variant)
+                COALESCE(u.variant, m.variant),
+                COALESCE(m.group_name, m.name)
          FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path {} {}",
         where_sql, tail_sql
     )
@@ -591,6 +602,7 @@ fn map_entry_row(row: &rusqlite::Row) -> rusqlite::Result<CatalogEntry> {
         custom_name: row.get(13)?,
         sculptor: row.get(14)?,
         variant: row.get(15)?,
+        source_group: row.get(16)?,
         // Whole-folder member; expand_file_variants stamps a key on any
         // synthetic pose members it derives from this row.
         variant_key: None,
@@ -820,7 +832,7 @@ pub fn search_groups(
         where_sql, limit, offset
     );
     let mut stmt = conn.prepare(&sql).map_err(map_err)?;
-    let groups = stmt
+    let mut groups = stmt
         .query_map(params_ref.as_slice(), |row| {
             let supports: Option<String> = row.get(4)?;
             Ok(CatalogGroup {
@@ -839,6 +851,13 @@ pub fn search_groups(
         .map_err(map_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(map_err)?;
+
+    // A user-picked cover beats the arbitrary MAX() representative
+    for group in &mut groups {
+        if let Some(preview) = cover_preview(conn, &group.group_name) {
+            group.preview_path = Some(preview);
+        }
+    }
 
     Ok(GroupPage { groups, total })
 }
@@ -937,6 +956,73 @@ pub fn group_sources(conn: &Connection, group_name: &str) -> Result<Vec<String>,
         .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
         .map_err(map_err)?;
     Ok(rows)
+}
+
+/// Undo ONE source's membership in a combined card — the fix for "I checked
+/// one card too many when combining". Deletes just that source's rename row,
+/// so it reappears as its own card under its folder-derived name; the rest
+/// of the combination is untouched. Errors when the source sits in the card
+/// by its own folder name (nothing to detach — that's a folder rename/move).
+pub fn detach_group_source(
+    conn: &Connection,
+    group_name: &str,
+    source_group: &str,
+) -> Result<(), AppError> {
+    let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Detach failed: {}", e));
+    let removed = conn
+        .execute(
+            "DELETE FROM group_renames
+             WHERE lower(source_group) = lower(?2) AND lower(display_name) = lower(?1)",
+            params![group_name, source_group],
+        )
+        .map_err(map_err)?;
+    if removed == 0 {
+        return Err(AppError::InvalidInput(format!(
+            "\"{}\" isn't combined into \"{}\" — it groups there under its own folder name, so rename or move the folder instead",
+            source_group, group_name
+        )));
+    }
+    rebuild_fts(conn).map_err(map_err)?;
+    Ok(())
+}
+
+/// Remember which member fronts a group's card. Stored as the member's
+/// identity (dir_path + optional variant_key), resolved to its CURRENT
+/// preview at read time — a re-render updates the card automatically.
+pub fn set_group_cover(
+    conn: &Connection,
+    group_name: &str,
+    dir_path: &str,
+    variant_key: Option<&str>,
+) -> Result<(), AppError> {
+    require_model(conn, dir_path)?;
+    conn.execute(
+        "INSERT INTO group_covers (group_name, dir_path, variant_key)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(group_name) DO UPDATE SET
+             dir_path = excluded.dir_path,
+             variant_key = excluded.variant_key",
+        params![group_name, dir_path, variant_key],
+    )
+    .map_err(|e| AppError::ConfigError(format!("Failed to set card image: {}", e)))?;
+    Ok(())
+}
+
+/// The chosen cover member's current preview, if a cover is set and its
+/// member still has one.
+fn cover_preview(conn: &Connection, group_name: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT COALESCE(vp.preview_path, u.preview_path, m.preview_path)
+         FROM group_covers gc
+         LEFT JOIN variant_previews vp ON vp.variant_key = gc.variant_key
+         LEFT JOIN model_user_meta u ON u.dir_path = gc.dir_path
+         LEFT JOIN models m ON m.dir_path = gc.dir_path
+         WHERE gc.group_name = ?1",
+        [group_name],
+        |row| row.get(0),
+    )
+    .ok()
+    .flatten()
 }
 
 /// The explicit merge tool: map every listed group onto one display name.
@@ -2564,6 +2650,53 @@ mod tests {
         assert!(names.contains(&"Giant Newt".to_string()));
         assert!(names.contains(&"Bugbear".to_string()));
         assert!(!names.contains(&"Dungeon Denizens".to_string()));
+    }
+
+    #[test]
+    fn detaching_one_source_leaves_the_rest_combined() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
+
+        combine_groups(
+            &mut conn,
+            &["Giant Newt".to_string(), "Bugbear".to_string()],
+            "Dungeon Denizens",
+        )
+        .unwrap();
+
+        // Pull one back out: it's its own card again, the other stays put
+        detach_group_source(&conn, "Dungeon Denizens", "Bugbear").unwrap();
+        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        let names: Vec<_> = page.groups.iter().map(|g| g.group_name.clone()).collect();
+        assert!(names.contains(&"Bugbear".to_string()));
+        assert!(names.contains(&"Dungeon Denizens".to_string()));
+        assert_eq!(group_members(&conn, "Dungeon Denizens").unwrap().len(), 1);
+
+        // Detaching something that isn't rename-combined is a clear error,
+        // not a silent no-op
+        assert!(detach_group_source(&conn, "Dungeon Denizens", "Bugbear").is_err());
+    }
+
+    #[test]
+    fn a_user_picked_cover_fronts_the_group_card() {
+        let mut conn = test_conn();
+        let (files, mut models, tags) = sample_rows();
+        for m in &mut models {
+            m.group_name = Some("critters".into());
+        }
+        models[0].preview_path = Some("/previews/newt.png".into());
+        models[1].preview_path = Some("/previews/bugbear.png".into());
+        let picked_dir = models[0].dir_path.clone();
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
+
+        set_group_cover(&conn, "critters", &picked_dir, None).unwrap();
+        let page = search_groups(&conn, "", &[], 10, 0).unwrap();
+        assert_eq!(
+            page.groups[0].preview_path.as_deref(),
+            Some("/previews/newt.png"),
+            "the chosen member's preview wins over the arbitrary MAX()"
+        );
     }
 
     #[test]

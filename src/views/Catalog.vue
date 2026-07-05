@@ -325,6 +325,15 @@
               set image…
             </button>
             <button
+              v-if="!show3d && drawerPreview"
+              type="button"
+              class="absolute bottom-1.5 left-1.5 btn btn-xs bg-base-100/70"
+              title="Use this variant's image as the card image in the catalog"
+              @click="useAsCardImage"
+            >
+              ★ card image
+            </button>
+            <button
               v-if="show3d"
               type="button"
               class="absolute top-1.5 right-1.5 btn btn-xs bg-base-100/70"
@@ -370,15 +379,31 @@
                   ✎
                 </button>
               </div>
-              <button
+              <div
                 v-if="!renamingGroup && groupSources.length > 1"
-                type="button"
-                class="font-mono text-[10px] text-primary/70 hover:text-primary cursor-pointer mt-0.5"
-                :title="`Combined from: ${groupSources.join(', ')} — click to split them apart again`"
-                @click="splitGroup"
+                class="flex flex-wrap gap-x-3 mt-0.5"
               >
-                combined from {{ groupSources.length }} models · split
-              </button>
+                <button
+                  type="button"
+                  class="font-mono text-[10px] text-primary/70 hover:text-primary cursor-pointer"
+                  :title="`Combined from: ${groupSources.join(', ')} — click to split them apart again`"
+                  @click="splitGroup"
+                >
+                  combined from {{ groupSources.length }} models · split
+                </button>
+                <button
+                  v-if="
+                    selected.source_group.toLowerCase() !==
+                    selectedGroup?.group_name.toLowerCase()
+                  "
+                  type="button"
+                  class="font-mono text-[10px] text-error/70 hover:text-error cursor-pointer"
+                  :title="`Pull “${selected.source_group}” back out of this model — the rest stays combined`"
+                  @click="detachSelectedSource"
+                >
+                  remove “{{ selected.source_group }}”
+                </button>
+              </div>
               <p
                 v-if="selected.designer || selected.release_name"
                 class="font-mono text-[11px] text-base-content/50 mt-0.5"
@@ -1317,6 +1342,50 @@ const startRenameGroup = () => {
   renamingGroup.value = true;
 };
 
+// The selected variant's image becomes the group card's face — stored as
+// WHICH member, so a re-render of that member updates the card too
+const useAsCardImage = async () => {
+  const group = selectedGroup.value;
+  const entry = selected.value;
+  if (!group || !entry) return;
+  const result = await commands.setGroupCover(
+    group.group_name,
+    entry.dir_path,
+    entry.variant_key ?? null,
+  );
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to set card image", result.error);
+    return;
+  }
+  toastStore.addToast("Card image updated", "success");
+  await runSearch();
+};
+
+// Surgical combine-undo: pull ONE mis-combined model back out of this card
+// (one checkbox too many happens); the rest of the combination stays
+const detachSelectedSource = async () => {
+  const group = selectedGroup.value;
+  const source = selected.value?.source_group;
+  if (!group || !source) return;
+  const confirmed = await confirm(
+    `Remove "${source}" from "${group.group_name}"?\n\nIt comes back as its own model; nothing on disk moves.`,
+    { title: "Remove from model", kind: "warning" },
+  );
+  if (!confirmed) return;
+  const result = await commands.detachCatalogGroupSource(
+    group.group_name,
+    source,
+  );
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to remove from model", result.error);
+    return;
+  }
+  toastStore.addToast(`"${source}" is its own model again`, "success");
+  await Promise.all([runSearch(), refreshMeta()]);
+  // the card still exists (other sources remain) — reload it in place
+  await selectGroup(group);
+};
+
 // Undo for combine (and for a rename collision that merged two models):
 // clearing the name overrides brings every source group back as its own
 // card, named after its folder again. Nothing on disk moves.
@@ -1936,6 +2005,21 @@ const scan = async () => {
 watch(scanCompletedCount, async () => {
   toastStore.addToast("Catalog scan complete", "success");
   await Promise.all([runSearch(), refreshMeta()]);
+  // The open drawer shows pre-scan members otherwise — a rescan that
+  // regroups models (or removes dirs) must be visible immediately, not
+  // after a reopen
+  const openGroup = selectedGroup.value;
+  if (!openGroup) return;
+  const fresh = groups.value.find(
+    (g) => g.group_name.toLowerCase() === openGroup.group_name.toLowerCase(),
+  );
+  if (fresh) {
+    await selectGroup(fresh);
+  } else {
+    selectedGroup.value = null;
+    selected.value = null;
+    members.value = [];
+  }
 });
 
 watch(dupCompletedCount, async () => {

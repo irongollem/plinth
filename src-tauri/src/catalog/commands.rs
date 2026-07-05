@@ -328,6 +328,40 @@ pub async fn get_catalog_group_sources(
     .map_err(|e| AppError::ConfigError(format!("Group source task failed: {}", e)))?
 }
 
+/// Remove one mis-combined source from a card (its rename row) so it comes
+/// back as its own card — the surgical undo, next to full split.
+#[tauri::command]
+#[specta::specta]
+pub async fn detach_catalog_group_source(
+    app_handle: AppHandle,
+    group_name: String,
+    source_group: String,
+) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::detach_group_source(&conn, &group_name, &source_group)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Detach task failed: {}", e)))?
+}
+
+/// Pick which member's image fronts the group's card.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_group_cover(
+    app_handle: AppHandle,
+    group_name: String,
+    dir_path: String,
+    variant_key: Option<String>,
+) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::set_group_cover(&conn, &group_name, &dir_path, variant_key.as_deref())
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Cover task failed: {}", e)))?
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn combine_catalog_groups(
