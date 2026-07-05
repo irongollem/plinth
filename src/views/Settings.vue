@@ -133,6 +133,46 @@
       <div class="flex flex-col gap-1.5">
         <span
           class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          >PRINT BUTTON</span
+        >
+        <div
+          class="flex gap-1 bg-base-200 border border-base-content/10 rounded-full p-0.75 w-55"
+        >
+          <button
+            type="button"
+            class="flex-1 text-center font-semibold text-[11px] py-1.5 rounded-full cursor-pointer"
+            :class="
+              printAction === 'open-in-slicer'
+                ? 'bg-primary text-primary-content'
+                : 'text-base-content/60'
+            "
+            @click="settings.print_action = 'open-in-slicer'"
+          >
+            Open in slicer
+          </button>
+          <button
+            type="button"
+            class="flex-1 text-center font-semibold text-[11px] py-1.5 rounded-full cursor-pointer"
+            :class="
+              printAction === 'reveal-folder'
+                ? 'bg-primary text-primary-content'
+                : 'text-base-content/60'
+            "
+            @click="settings.print_action = 'reveal-folder'"
+          >
+            Reveal folder
+          </button>
+        </div>
+        <p class="text-[10.5px] text-base-content/40">
+          Open in slicer sends the model's files straight to whatever app your
+          system opens STL files with. Reveal folder shows them in
+          Finder/Explorer instead — handy if you switch between slicers.
+        </p>
+      </div>
+
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
           >APPEARANCE</span
         >
         <div
@@ -189,7 +229,13 @@ const settings = ref<Settings>({
   blender_path: null,
   catalog_root: null,
   known_designers: null,
+  print_action: null,
 });
+
+// Unset means the default behavior: hand files straight to the slicer
+const printAction = computed(
+  () => settings.value.print_action ?? "open-in-slicer",
+);
 
 /* The scanner's designer lexicon, editable here; seeded server-side with
    sensible defaults. Mutating the array triggers the deep-watch auto-save. */

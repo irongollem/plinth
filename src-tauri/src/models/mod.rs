@@ -16,6 +16,10 @@ pub struct Settings {
     /// Studios the scanner recognizes in folder names to infer a designer.
     /// Seeded from scanner::DEFAULT_DESIGNERS on first load; user-editable.
     pub known_designers: Option<Vec<String>>,
+    /// What the catalog's print button does: "open-in-slicer" (default —
+    /// hand the files to the OS-default slicer app) or "reveal-folder"
+    /// (the drag-it-yourself flow for people juggling several slicers).
+    pub print_action: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

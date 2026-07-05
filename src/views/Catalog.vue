@@ -878,7 +878,7 @@
 <script setup lang="ts">
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { computed, onActivated, onMounted, ref, watch } from "vue";
 import {
   type CatalogEntry,
@@ -1379,15 +1379,39 @@ const renderSelected = () => {
   );
 };
 
+// Print-ready scene files beat raw geometry: a .lys/.chitu already carries
+// supports and plate layout, so when a member has both, those are what
+// "print" should hand to the slicer.
+const printablePaths = computed(() => {
+  const sliced = files.value.filter((f) =>
+    ["lys", "chitu", "chitubox"].includes(f.extension),
+  );
+  const pool = sliced.length
+    ? sliced
+    : files.value.filter((f) => ["stl", "obj", "3mf"].includes(f.extension));
+  return pool.map((f) => f.path);
+});
+
 const printModel = async () => {
   if (!selected.value) return;
-  // Reveal the first model file so the folder opens with it selected,
-  // ready to drag into a slicer (v2: hand the file to the slicer directly)
-  const target = files.value[0]?.path ?? selected.value.dir_path;
+  const settingsResult = await commands.getSettings();
+  const action =
+    (settingsResult.status === "ok" && settingsResult.data.print_action) ||
+    "open-in-slicer";
   try {
+    if (action === "open-in-slicer" && printablePaths.value.length) {
+      // Sequential on purpose: slicers collect files arriving one at a
+      // time into a single session, parallel launches can race instances
+      // oxlint-disable-next-line no-await-in-loop
+      for (const path of printablePaths.value) await openPath(path);
+      return;
+    }
+    // Reveal-folder flow (setting, or nothing printable): open the folder
+    // with the first file selected, ready to drag into a slicer
+    const target = files.value[0]?.path ?? selected.value.dir_path;
     await revealItemInDir(target);
   } catch (error) {
-    toastStore.reportError("Failed to open folder", error);
+    toastStore.reportError("Failed to send to slicer", error);
   }
 };
 
