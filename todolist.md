@@ -11,7 +11,7 @@
 - [ ] Store chosen rotation in model metadata (`model.json`) so catalog re-renders don't need repositioning
 - [ ] Scale reference figure / true-scale rendering (handover roadmap; current look normalizes size)
 - [ ] Sidecar JSON per render (dimensions mm, parts, rotation) for future catalog search
-- [ ] Promo overlay compositing: the Render studio branding panel (logo/text, position/font/size) previews live over the viewport but isn't baked into the output PNG yet — needs a font-rendering approach + Rust-side compositing design
+- [x] Promo overlay compositing: branding (logo image + title/credit text) now bakes into the output PNG after Blender finishes — the webview composites on a canvas (same font engine as the preview = guaranteed WYSIWYG; no bundled fonts, no Rust glyph layout), Rust writes it back atomically with PNG-magic + exists guards. Ink color auto-picks dark/light by sampling the pixels under the text.
 - [ ] render_mini.py uses `use_nodes` (deprecated, removal in Blender 6.0) — needs a tweak when 6.x lands
 - [ ] Parse STLs in a Web Worker: mergeVertices on million-triangle minis still freezes the main thread during load (the overlay paints now, but a worker would keep the UI fully responsive)
 
@@ -21,6 +21,11 @@
 - [x] default releasedate current? — MonthYear form field now defaults to the current month
 - [x] recover/continue mode (quick so testing becomes less tedious!) — draft (staged models + step + release) snapshots to localStorage from the store; unsaved details form mirrors separately; both restore on launch with a toast
 - [ ] Combine safety: group_renames match scanner group names globally — combining a generically-named group ("Spear") can capture same-named groups from other releases. Scope renames (e.g. per release subtree) or warn when a source name is ambiguous
+- [ ] On-disk normalizer/cleaner: physically restructure folders so the disk matches the curated catalog (pose assignments, renames) — preview-first dry-run diff, then file-level moves extending batch_move_models (deliverable 4 of the normalization plan)
+- [ ] Compressed-at-rest option: after cleanup, keep each model bundled on disk (pack/unpack on demand) to save space while staying workable — the finalize_release compression path is the seed tech
+- [ ] Remaining catalog filter facets: year (from release date), release name, and category (new concept, still TBD) — designer facet + grouping shipped 2026-07-05
+- [ ] Print modal: list the model's files with checkboxes so the user picks which to send to the slicer (today PRINT sends all printable files / reveals folder)
+- [ ] docs/CATALOG.md is outdated: documented model.json shape lacks pose/scale/support/file-variants that the code now writes and scans — source of truth is StlModel + the scanner's meta parse
 
 ### Duplicate handling — share, don't delete (hardlink dedup)
 
