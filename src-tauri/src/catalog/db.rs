@@ -678,7 +678,16 @@ fn expand_file_variants(
         let mut buckets: BTreeMap<(Option<String>, String, String), Vec<String>> = BTreeMap::new();
         let mut claimed: HashSet<String> = HashSet::new();
         for v in assigned {
-            let variant = v.variant.unwrap_or_default();
+            // A pose-only assignment inherits the FOLDER's variant: the
+            // canonical leaf .../Supported/Great Swords fans into pose
+            // members that must stay inside the Great Swords tab — using
+            // only the file-level value collapsed every pose member into
+            // a variantless pool and the variant tier vanished
+            let variant = v
+                .variant
+                .filter(|s| !s.is_empty())
+                .or_else(|| entry.variant.clone())
+                .unwrap_or_default();
             let pose = v.pose.unwrap_or_default();
             claimed.insert(v.path.clone());
             buckets
@@ -688,10 +697,12 @@ fn expand_file_variants(
         }
         for ((support, variant, pose), paths) in buckets {
             let bytes: i64 = paths.iter().filter_map(|p| sizes.get(p)).sum();
-            // label reads "mob sword 2" — base plus whichever facets are set
+            // label reads "mob sword 2" — base plus whichever facets are
+            // set, skipping a variant the whole folder already carries
+            // (every pose member repeating it would just be noise)
             let mut label = entry.name.clone();
             for facet in [&variant, &pose] {
-                if !facet.is_empty() {
+                if !facet.is_empty() && Some(facet.as_str()) != entry.variant.as_deref() {
                     label.push(' ');
                     label.push_str(facet);
                 }
@@ -725,7 +736,9 @@ fn expand_file_variants(
                 .or_else(|| entry.preview_path.clone());
             out.push(CatalogEntry {
                 name: format!("{} (unassigned)", entry.name),
-                variant: None,
+                // keep the folder's variant — the leftovers still live in
+                // that variant's folder, only their pose is unknown
+                variant: entry.variant.clone(),
                 pose: None,
                 file_count: residual.len() as u32,
                 total_size_bytes: bytes as f64,
@@ -1289,15 +1302,30 @@ pub fn model_files(
             conn.prepare(&sql)
                 .and_then(|mut s| s.query_map(params![dir_path], read)?.collect())
         }
-        // a specific (variant, pose) bucket
+        // a specific (variant, pose) bucket. Mirrors expand_file_variants'
+        // inheritance rule: a pose-only assignment (empty file-level
+        // variant) belongs to the FOLDER's variant bucket — matching only
+        // the exact value made every inherited-variant pose member list
+        // zero files.
         Some((variant, pose)) => {
+            let folder_variant: String = conn
+                .query_row(
+                    "SELECT COALESCE(u.variant, m.variant, '') FROM models m
+                     LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
+                     WHERE m.dir_path = ?1",
+                    [dir_path],
+                    |row| row.get(0),
+                )
+                .unwrap_or_default();
             let sql = format!(
                 "{select}f.path IN (SELECT path FROM file_variants
-                     WHERE dir_path = ?1 AND COALESCE(variant,'') = ?2
+                     WHERE dir_path = ?1
+                       AND (COALESCE(variant,'') = ?2
+                            OR (COALESCE(variant,'') = '' AND ?4 = ?2))
                        AND COALESCE(pose,'') = ?3){order}"
             );
             conn.prepare(&sql).and_then(|mut s| {
-                s.query_map(params![dir_path, variant, pose], read)?
+                s.query_map(params![dir_path, variant, pose, folder_variant], read)?
                     .collect()
             })
         }
@@ -2447,6 +2475,79 @@ mod tests {
         // clearing every assignment collapses back to the whole-folder member
         clear_file_variants(&conn, &["/dump/mob/a.stl".into(), "/dump/mob/b.stl".into()]).unwrap();
         assert_eq!(group_members(&conn, "mob").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn pose_members_inherit_the_folders_variant() {
+        // The canonical leaf after a cleanup: .../Supported/Great Swords
+        // carries variant on the DIR (sidecar) and pose-only assignments on
+        // the files. Pose members must stay inside the Great Swords tab —
+        // using only the file-level variant collapsed them all into a
+        // variantless pool and the drawer's variant tier vanished.
+        let mut conn = test_conn();
+        let dir = "/lib/Dark Wardens/Supported/Great Swords";
+        let files = vec![
+            file_row(&format!("{}/warden A.stl", dir), dir, 100),
+            file_row(&format!("{}/warden B.stl", dir), dir, 100),
+        ];
+        let models = vec![ModelRow {
+            dir_path: dir.into(),
+            name: "Dark Wardens".into(),
+            description: None,
+            designer: None,
+            release_name: None,
+            preview_path: None,
+            source: "metadata".into(),
+            uuid: None,
+            file_count: 2,
+            total_size_bytes: 200,
+            pose: None,
+            scale: None,
+            support_status: Some("supported".into()),
+            release_date: None,
+            variant: Some("Great Swords".into()),
+            sculptor: None,
+            group_name: Some("Dark Wardens".into()),
+        }];
+        replace_catalog(&mut conn, &files, &models, &[], &[]).unwrap();
+        set_file_variants(
+            &mut conn,
+            &[format!("{}/warden A.stl", dir)],
+            None,
+            Some("A".into()),
+            None,
+        )
+        .unwrap();
+        set_file_variants(
+            &mut conn,
+            &[format!("{}/warden B.stl", dir)],
+            None,
+            Some("B".into()),
+            None,
+        )
+        .unwrap();
+
+        let members = group_members(&conn, "Dark Wardens").unwrap();
+        assert_eq!(members.len(), 2);
+        for member in &members {
+            assert_eq!(
+                member.variant.as_deref(),
+                Some("Great Swords"),
+                "pose member lost the folder's variant: {:?}",
+                member.name
+            );
+        }
+        // the label doesn't repeat what the folder already says
+        assert!(members.iter().any(|m| m.name == "Dark Wardens A"));
+        // and the inherited-variant key still scopes files correctly
+        let member_a = members.iter().find(|m| m.pose.as_deref() == Some("A")).unwrap();
+        assert_eq!(
+            member_a.variant_key.as_deref(),
+            Some("/lib/Dark Wardens/Supported/Great Swords\u{1f}Great Swords\u{1f}A")
+        );
+        let files_a = model_files(&conn, dir, member_a.variant_key.as_deref()).unwrap();
+        assert_eq!(files_a.len(), 1);
+        assert_eq!(files_a[0].file_name, "warden A.stl");
     }
 
     #[test]
