@@ -1193,7 +1193,20 @@ const clearChecked = async () => {
     toastStore.reportError("Failed to clear assignment", result.error);
     return;
   }
-  toastStore.addToast("Unfiled the selected files", "success");
+  // 0 = the selection was never filed to a pose — a success toast here
+  // would claim an effect that didn't happen (files that LIVE in another
+  // folder can't be unfiled out of this model; that's split or move)
+  if (result.data === 0) {
+    toastStore.addToast(
+      "Nothing to unfile — these files aren't assigned to a pose",
+      "info",
+    );
+    return;
+  }
+  toastStore.addToast(
+    `Unfiled ${result.data} file assignment${result.data === 1 ? "" : "s"}`,
+    "success",
+  );
   checkedFiles.value = [];
   await Promise.all([runSearch(), reloadMembers()]);
 };
@@ -1918,12 +1931,17 @@ watch(dupCompletedCount, async () => {
   const dupResult = await commands.getDuplicateGroups();
   if (dupResult.status === "ok") {
     dupGroups.value = dupResult.data;
-    showDups.value = dupGroups.value.length > 0;
+    // Same filter as the footer and the panel: already-merged (shared)
+    // groups are done, not news — counting them here made the toast and
+    // the summary disagree after a few merges
+    const actionable = reclaimableGroups.value.length;
+    const shared = dupGroups.value.length - actionable;
+    showDups.value = actionable > 0;
     toastStore.addToast(
-      dupGroups.value.length
-        ? `Found ${dupGroups.value.length} duplicate groups`
+      actionable
+        ? `Found ${actionable} duplicate group${actionable === 1 ? "" : "s"}${shared ? ` (${shared} already merged)` : ""}`
         : "No duplicates found",
-      dupGroups.value.length ? "warning" : "success",
+      actionable ? "warning" : "success",
     );
   }
 });

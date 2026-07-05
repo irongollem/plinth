@@ -1469,12 +1469,17 @@ pub fn set_file_variants(
 
 /// Drop pose assignments for the given files, reverting them to plain
 /// members of their folder.
-pub fn clear_file_variants(conn: &Connection, paths: &[String]) -> Result<(), AppError> {
+/// Returns how many assignments actually existed — files that were never
+/// filed clear nothing, and the UI should say so instead of claiming success.
+pub fn clear_file_variants(conn: &Connection, paths: &[String]) -> Result<u32, AppError> {
+    let mut cleared = 0u32;
     for path in paths {
-        conn.execute("DELETE FROM file_variants WHERE path = ?1", params![path])
-            .map_err(|e| AppError::ConfigError(format!("Failed to clear assignment: {}", e)))?;
+        cleared += conn
+            .execute("DELETE FROM file_variants WHERE path = ?1", params![path])
+            .map_err(|e| AppError::ConfigError(format!("Failed to clear assignment: {}", e)))?
+            as u32;
     }
-    Ok(())
+    Ok(cleared)
 }
 
 /// Every file-pose assignment under one model folder, for the split UI.

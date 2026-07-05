@@ -482,10 +482,11 @@ pub async fn assign_files_to_pose(
     .map_err(|e| AppError::ConfigError(format!("Assign task failed: {}", e)))?
 }
 
-/// Revert files to plain members of their folder.
+/// Revert files to plain members of their folder. Returns how many
+/// assignments existed — 0 tells the UI the selection was never filed.
 #[tauri::command]
 #[specta::specta]
-pub async fn clear_file_pose(app_handle: AppHandle, paths: Vec<String>) -> Result<(), AppError> {
+pub async fn clear_file_pose(app_handle: AppHandle, paths: Vec<String>) -> Result<u32, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
         db::clear_file_variants(&conn, &paths)
