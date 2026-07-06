@@ -1204,6 +1204,13 @@ pub fn finalize(
                         == *leaf.as_str()
                 })
                 .collect();
+            // a mixed dir (loose files + a variant subdir) is a leaf with
+            // child leaves inside it — their images are theirs, not ours
+            let other_leaves: Vec<&str> = leaf_specs
+                .iter()
+                .map(|(path, _, _)| path.as_str())
+                .filter(|p| *p != leaf.as_str())
+                .collect();
             if let Err(e) = write_leaf_json(
                 conn,
                 leaf,
@@ -1211,6 +1218,7 @@ pub fn finalize(
                 variant.as_deref(),
                 &leaf_members,
                 &member_refs,
+                &other_leaves,
                 &model_dir_str,
                 &root_images,
             ) {
@@ -1249,6 +1257,7 @@ fn write_leaf_json(
     variant: Option<&str>,
     leaf_members: &[&MemberRow],
     group_refs: &[&MemberRow],
+    other_leaves: &[&str],
     model_dir: &str,
     root_images: &[String],
 ) -> Result<(), AppError> {
@@ -1313,8 +1322,10 @@ fn write_leaf_json(
 
     // image references: own images first, else a root/sibling one found by
     // finalize — reached via "../" x (this leaf's depth below model_dir),
-    // since root_images entries are already model_dir-relative subpaths
-    let own_images: Vec<String> = disk_images_under(leaf_path, &[]);
+    // since root_images entries are already model_dir-relative subpaths.
+    // Child leaves are excluded: a build dir with loose files AND a variant
+    // subdir must not claim the subdir's render as its own preview.
+    let own_images: Vec<String> = disk_images_under(leaf_path, other_leaves);
     let images: Vec<String> = if !own_images.is_empty() {
         own_images
     } else if is_under(leaf, model_dir) && leaf != model_dir {
@@ -1327,11 +1338,16 @@ fn write_leaf_json(
         vec![]
     };
 
-    // leaf-specific facts win; the group fills in what the leaf lacks
-    // (a fan-out leaf has NO member row of its own)
+    // Model-level facts (designer, release, description…) may borrow from
+    // any group member when the leaf lacks them — they are true of the
+    // whole model. Leaf-scoped facts (variant, support) must NOT: borrowing
+    // a sibling leaf's variant writes it into this leaf's sidecar, the next
+    // scan treats the sidecar as authority, and the planner then wants to
+    // move these files into that sibling's folder forever.
     let pick = |get: fn(&MemberRow) -> Option<&String>| {
         first_some(leaf_members, get).or_else(|| first_some(group_refs, get))
     };
+    let pick_leaf = |get: fn(&MemberRow) -> Option<&String>| first_some(leaf_members, get);
     let dir_pose = if file_poses.is_empty() && leaf_members.len() == 1 {
         leaf_members[0].pose.clone()
     } else {
@@ -1364,12 +1380,12 @@ fn write_leaf_json(
         // leaf physically is; member facets only fill gaps
         "variant": variant
             .map(layout::title_case)
-            .or_else(|| pick(|r| r.variant.as_ref()).map(|v| layout::title_case(&v))),
+            .or_else(|| pick_leaf(|r| r.variant.as_ref()).map(|v| layout::title_case(&v))),
         "pose": dir_pose,
         "scale": pick(|r| r.scale.as_ref()),
         "support_status": support
             .map(String::from)
-            .or_else(|| pick(|r| r.support.as_ref())),
+            .or_else(|| pick_leaf(|r| r.support.as_ref())),
         "release_date": pick(|r| r.date.as_ref()),
         "designer": pick(|r| r.designer.as_ref()),
         "sculptor": pick(|r| r.sculptor.as_ref()),
@@ -2099,6 +2115,77 @@ mod tests {
         let again = super::plan(&conn, &root, None, None).unwrap();
         assert_eq!(again.groups.len(), 0, "ghost ops: {:?}", again.groups);
         assert_eq!(again.clean_groups, 1);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn mixed_build_leaf_keeps_its_own_facts() {
+        // False Maiden: Unsupported/ held loose files (no variant) NEXT TO
+        // a variant subfolder. The build leaf's sidecar borrowed the
+        // sibling leaf's variant through the group fallback and claimed the
+        // child's render as its own image; the next scan took the sidecar
+        // as authority and the planner then wanted to move the loose files
+        // into the sibling's folder — forever.
+        let root = std::env::temp_dir().join(format!("plinth_norm_mixed_{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let target = root.join("Bestiarum/2026-07 Dread Swamp/Maiden");
+        let sup_clone = target.join("Supported/Clone");
+        let unsup = target.join("Unsupported");
+        let unsup_clone = unsup.join("Clone");
+        touch(&sup_clone.join("clone_sup.lys"));
+        touch(&unsup_clone.join("clone.stl"));
+        touch(&unsup_clone.join("clone.png"));
+        touch(&unsup.join("maiden.stl"));
+        touch(&target.join("promo.jpg"));
+
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::test_init(&conn);
+        let mut sup_clone_row = model_row(&sup_clone, "Maiden", "Maiden");
+        sup_clone_row.support_status = Some("supported".into());
+        sup_clone_row.variant = Some("Clone".into());
+        let mut unsup_clone_row = model_row(&unsup_clone, "Maiden", "Maiden");
+        unsup_clone_row.support_status = Some("unsupported".into());
+        unsup_clone_row.variant = Some("Clone".into());
+        let mut loose_row = model_row(&unsup, "Maiden", "Maiden");
+        loose_row.support_status = Some("unsupported".into());
+        let files = vec![
+            file_row(&sup_clone.join("clone_sup.lys"), &sup_clone),
+            file_row(&unsup_clone.join("clone.stl"), &unsup_clone),
+            file_row(&unsup.join("maiden.stl"), &unsup),
+        ];
+        db::replace_catalog(
+            &mut conn,
+            &files,
+            &[sup_clone_row, unsup_clone_row, loose_row],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        // the shape is already canonical — nothing to move
+        let plan = plan(&conn, &root, None, None).unwrap();
+        assert_eq!(plan.groups.len(), 0, "{:?}", plan.groups);
+        assert_eq!(plan.clean_groups, 1);
+
+        // metadata refresh must not poison the mixed leaf
+        let warnings = finalize(&conn, &root, &["Maiden".to_string()], &[]).unwrap();
+        assert!(warnings.is_empty(), "{:?}", warnings);
+
+        let unsup_meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(unsup.join("model.json")).unwrap()).unwrap();
+        // NOT "Clone" — that's the sibling leaf's fact, and writing it here
+        // sends the loose files chasing the sibling folder on every plan
+        assert_eq!(unsup_meta["variant"], serde_json::Value::Null);
+        assert_eq!(unsup_meta["support_status"], "unsupported");
+        // NOT the child leaf's render — the root promo is the fallback
+        assert_eq!(unsup_meta["images"][0], "../promo.jpg");
+
+        let clone_meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(unsup_clone.join("model.json")).unwrap())
+                .unwrap();
+        assert_eq!(clone_meta["variant"], "Clone");
+        assert_eq!(clone_meta["images"][0], "clone.png");
 
         fs::remove_dir_all(&root).ok();
     }
