@@ -365,6 +365,8 @@
         </div>
       </div>
 
+      <RenderAdvanced v-model="advanced" :look="look" />
+
       <div>
         <label class="label text-sm" for="render-output">Output</label>
         <div class="flex">
@@ -548,6 +550,7 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import { type BlenderInfo, commands } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
 import ProgressBar from "../components/ProgressBar.vue";
+import RenderAdvanced from "../components/RenderAdvanced.vue";
 // NOT `import type`: the component is used in the template, which
 // biome's useImportType can't see (rule disabled for .vue in biome.json)
 import StlViewport from "../components/StlViewport.vue";
@@ -556,6 +559,11 @@ import type { SelectedFile } from "../composables/useFileSelect";
 import { useRenderStatus } from "../composables/useRenderStatus";
 import { hexToLinear } from "../utils/color";
 import { drawOverlay } from "../utils/promoOverlay";
+import {
+  type LookOverrides,
+  overridesToNested,
+  sanitizeOverrides,
+} from "../utils/renderLookSchema";
 import { useReleasesStore } from "../stores/releasesStore.ts";
 import { useToastStore } from "../stores/toastStore.ts";
 
@@ -623,6 +631,9 @@ const resinSwatches = [
 const isPresetColor = computed(() =>
   resinSwatches.some((s) => s.hex === colorHex.value),
 );
+// Advanced look overrides: only the diff from the locked recipe, keyed by
+// LOOK dot-path ("key.energy"). Empty record = stock look.
+const advanced = ref<LookOverrides>({});
 const outputPath = ref("");
 
 const setRotationAxis = (index: number, event: Event) => {
@@ -890,6 +901,7 @@ const persistRenderSettings = () => {
       samples: samples.value,
       look: look.value,
       colorHex: colorHex.value,
+      advanced: advanced.value,
       branding: { ...branding },
     }),
   );
@@ -911,6 +923,10 @@ const loadRenderSettings = () => {
     if (["rich", "flat", "resin"].includes(saved.look)) look.value = saved.look;
     if (typeof saved.colorHex === "string" && saved.colorHex.startsWith("#"))
       colorHex.value = saved.colorHex;
+    // Schema-validated: knobs that vanish in an update (or hand-edited
+    // garbage) drop out silently instead of riding along to Blender
+    if (saved.advanced)
+      advanced.value = sanitizeOverrides(saved.advanced).overrides;
     if (
       saved.view &&
       [saved.view.azimuth, saved.view.elevation, saved.view.zoom].every(
@@ -945,6 +961,7 @@ const resetRenderSettings = () => {
   samples.value = 96;
   look.value = "flat";
   colorHex.value = DEFAULT_RESIN_HEX;
+  advanced.value = {};
   Object.assign(branding, BRANDING_DEFAULTS);
   localStorage.removeItem(STICKY_KEY);
   toastStore.addToast("Render settings reset to defaults", "success");
@@ -959,6 +976,7 @@ watch(
     samples,
     look,
     colorHex,
+    advanced,
     branding,
   ],
   persistRenderSettings,
@@ -1066,6 +1084,9 @@ const render = async () => {
     // default outputs never overwrite — the backend uniquifies with -N
     overwrite: !!outputPath.value,
     align_parts: alignParts.value,
+    look_config: Object.keys(advanced.value).length
+      ? JSON.stringify(overridesToNested(advanced.value))
+      : null,
   });
 
   if (result.status === "error") {
