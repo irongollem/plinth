@@ -98,7 +98,10 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
         -- rebuild models wholesale (replace_catalog), and anything stored
         -- there is lost. Keyed by dir_path like model_tags, surviving the
         -- same way. Scanner-inferred values stay in models; a row here
-        -- overrides them (COALESCE in search).
+        -- overrides them (COALESCE in search). Three states per column:
+        -- NULL = user hasn't spoken (scanner value shows through), '' =
+        -- user explicitly cleared it (reads NULLIF the scanner value away),
+        -- anything else = user override.
         CREATE TABLE IF NOT EXISTS model_user_meta (
             dir_path       TEXT PRIMARY KEY,
             custom_name    TEXT,
@@ -571,20 +574,21 @@ fn build_search_filter(
 fn entry_select_sql(where_sql: &str, tail_sql: &str) -> String {
     format!(
         "SELECT m.dir_path, COALESCE(u.custom_name, m.name), m.description,
-                COALESCE(u.designer, m.designer),
-                COALESCE(u.release_name, m.release_name),
+                NULLIF(COALESCE(u.designer, m.designer), ''),
+                NULLIF(COALESCE(u.release_name, m.release_name), ''),
                 COALESCE(u.preview_path, m.preview_path),
                 m.file_count, m.total_size_bytes,
                 COALESCE((SELECT group_concat(t.tag, char(31)) FROM model_tags t
                           WHERE t.dir_path = m.dir_path), ''),
-                COALESCE(u.pose, m.pose), COALESCE(u.scale, m.scale),
-                COALESCE(u.support_status, m.support_status),
-                COALESCE(u.release_date, m.release_date),
-                u.custom_name, COALESCE(u.sculptor, m.sculptor),
-                COALESCE(u.variant, m.variant),
+                NULLIF(COALESCE(u.pose, m.pose), ''),
+                NULLIF(COALESCE(u.scale, m.scale), ''),
+                NULLIF(COALESCE(u.support_status, m.support_status), ''),
+                NULLIF(COALESCE(u.release_date, m.release_date), ''),
+                u.custom_name, NULLIF(COALESCE(u.sculptor, m.sculptor), ''),
+                NULLIF(COALESCE(u.variant, m.variant), ''),
                 COALESCE(m.group_name, m.name),
-                COALESCE(u.base_round, m.base_round),
-                COALESCE(u.base_square, m.base_square)
+                NULLIF(COALESCE(u.base_round, m.base_round), ''),
+                NULLIF(COALESCE(u.base_square, m.base_square), '')
          FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path {} {}",
         where_sql, tail_sql
     )
@@ -867,9 +871,9 @@ pub fn search_groups(
 
     // Aggregates repeated verbatim in ORDER BY (not via alias) so SQLite
     // resolves them unambiguously inside expressions like the date parse
-    const DESIGNER: &str = "MAX(COALESCE(u.designer, m.designer))";
-    const RELEASE: &str = "MAX(COALESCE(u.release_name, m.release_name))";
-    const REL_DATE: &str = "MAX(COALESCE(u.release_date, m.release_date))";
+    const DESIGNER: &str = "MAX(NULLIF(COALESCE(u.designer, m.designer), ''))";
+    const RELEASE: &str = "MAX(NULLIF(COALESCE(u.release_name, m.release_name), ''))";
+    const REL_DATE: &str = "MAX(NULLIF(COALESCE(u.release_date, m.release_date), ''))";
     // release_date is "M/YYYY" from the release builder; split on the slash
     // and sort year-then-month. Dateless formats cast to 0 and sink to the
     // bottom of their designer rather than erroring.
@@ -906,8 +910,8 @@ pub fn search_groups(
                 {RELEASE},
                 {REL_DATE},
                 COUNT(*),
-                COUNT(DISTINCT COALESCE(u.pose, m.pose)),
-                group_concat(DISTINCT COALESCE(u.support_status, m.support_status)),
+                COUNT(DISTINCT NULLIF(COALESCE(u.pose, m.pose), '')),
+                group_concat(DISTINCT NULLIF(COALESCE(u.support_status, m.support_status), '')),
                 SUM(m.file_count),
                 SUM(m.total_size_bytes),
                 MAX(COALESCE(u.preview_path, m.preview_path))
@@ -961,10 +965,10 @@ pub fn group_members(conn: &Connection, group_name: &str) -> Result<Vec<CatalogE
     let sql = entry_select_sql(
         "LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)
          WHERE lower(COALESCE(r.display_name, m.group_name, m.name)) = lower(?)",
-        "ORDER BY COALESCE(u.support_status, m.support_status) IS NULL,
-                  COALESCE(u.support_status, m.support_status),
-                  COALESCE(u.pose, m.pose) IS NULL,
-                  COALESCE(u.pose, m.pose),
+        "ORDER BY NULLIF(COALESCE(u.support_status, m.support_status), '') IS NULL,
+                  NULLIF(COALESCE(u.support_status, m.support_status), ''),
+                  NULLIF(COALESCE(u.pose, m.pose), '') IS NULL,
+                  NULLIF(COALESCE(u.pose, m.pose), ''),
                   m.dir_path",
     );
     let mut stmt = conn.prepare(&sql).map_err(map_err)?;
@@ -1642,6 +1646,12 @@ pub fn update_model_user_meta(
     base_square_mm: Option<String>,
 ) -> Result<(), AppError> {
     require_model(conn, dir_path)?;
+    // This is the full-form save: a None facet means the field was blank in
+    // the editor, i.e. the user wants it EMPTY. Storing NULL can't say that
+    // — NULL means "no opinion" and COALESCE would resurrect the scanner's
+    // value on the next read. Store the '' tombstone instead; reads strip
+    // it with NULLIF. custom_name keeps NULL semantics: clearing it is the
+    // documented way to revert to the inferred name.
     conn.execute(
         "INSERT INTO model_user_meta
              (dir_path, custom_name, pose, scale, support_status, release_date,
@@ -1663,16 +1673,16 @@ pub fn update_model_user_meta(
         params![
             dir_path,
             custom_name,
-            pose,
-            scale,
-            support_status,
-            release_date,
-            designer,
-            sculptor,
-            release_name,
-            variant,
-            base_round_mm,
-            base_square_mm
+            pose.unwrap_or_default(),
+            scale.unwrap_or_default(),
+            support_status.unwrap_or_default(),
+            release_date.unwrap_or_default(),
+            designer.unwrap_or_default(),
+            sculptor.unwrap_or_default(),
+            release_name.unwrap_or_default(),
+            variant.unwrap_or_default(),
+            base_round_mm.unwrap_or_default(),
+            base_square_mm.unwrap_or_default()
         ],
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to update metadata: {}", e)))?;
@@ -2901,7 +2911,10 @@ mod tests {
             Some("/appdata/previews/abc.png")
         );
 
-        // clearing the override reverts to the scanner name and designer
+        // clearing the NAME reverts to the scanner name (custom_name keeps
+        // NULL semantics — a model always needs some name to fall back to);
+        // clearing a FACET means empty, full stop — the scanner's value
+        // must NOT resurrect it (that was the un-deletable-pose bug)
         update_model_user_meta(
             &conn,
             "/lib/newt",
@@ -2920,16 +2933,14 @@ mod tests {
         .unwrap();
         let page = search(&conn, "newt", &[], 10, 0).unwrap();
         assert_eq!(page.entries[0].name, "Giant Newt");
-        assert_eq!(
-            page.entries[0].designer.as_deref(),
-            Some("DTL"),
-            "reverts to release designer"
+        assert!(
+            page.entries[0].designer.is_none(),
+            "cleared designer stays cleared, not the release's"
         );
         assert!(page.entries[0].sculptor.is_none());
-        assert_eq!(
-            page.entries[0].release_name.as_deref(),
-            Some("Critterfolk"),
-            "reverts to the scanned release name"
+        assert!(
+            page.entries[0].release_name.is_none(),
+            "cleared release stays cleared, not the scanned one"
         );
         // ...but the preview set separately is untouched by a metadata save
         assert_eq!(
@@ -2943,6 +2954,73 @@ mod tests {
         )
         .is_err());
         assert!(set_model_preview(&conn, "/nope", "/x.png").is_err());
+    }
+
+    #[test]
+    fn clearing_a_scanner_provided_pose_sticks() {
+        let mut conn = test_conn();
+        let (files, mut models, tags) = sample_rows();
+        // the scanner inferred these from model.json / the folder name
+        models[0].pose = Some("Attacking".into());
+        models[0].scale = Some("32mm".into());
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
+
+        // untouched, the scanner value shows through
+        let page = search(&conn, "newt", &[], 10, 0).unwrap();
+        assert_eq!(page.entries[0].pose.as_deref(), Some("Attacking"));
+
+        // the user blanks the pose (the full-form save sends None for
+        // every empty field) — the scanner value must NOT come back
+        update_model_user_meta(
+            &conn,
+            "/lib/newt",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let page = search(&conn, "newt", &[], 10, 0).unwrap();
+        assert!(
+            page.entries[0].pose.is_none(),
+            "cleared pose must not resurrect"
+        );
+        assert!(page.entries[0].scale.is_none());
+
+        // ...and the clear survives a rescan repopulating models.pose
+        replace_catalog(&mut conn, &files, &models, &tags, &[]).unwrap();
+        let page = search(&conn, "newt", &[], 10, 0).unwrap();
+        assert!(
+            page.entries[0].pose.is_none(),
+            "rescan must not resurrect the cleared pose"
+        );
+
+        // a later real edit still beats the tombstone
+        update_model_user_meta(
+            &conn,
+            "/lib/newt",
+            None,
+            Some("B".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let page = search(&conn, "newt", &[], 10, 0).unwrap();
+        assert_eq!(page.entries[0].pose.as_deref(), Some("B"));
     }
 
     #[test]

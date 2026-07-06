@@ -27,7 +27,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf, MAIN_SEPARATOR};
 
 /// One catalog member with every facet resolved user-override-first —
-/// the same COALESCE(u.x, m.x) rule the rest of the catalog reads by.
+/// the same NULLIF(COALESCE(u.x, m.x), '') rule the rest of the catalog
+/// reads by ('' in user meta = explicitly cleared, not a real value).
 struct MemberRow {
     dir: String,
     gname: String,
@@ -50,17 +51,17 @@ fn member_rows(conn: &Connection, group: Option<&str>) -> Result<Vec<MemberRow>,
         |e: rusqlite::Error| AppError::ConfigError(format!("Normalize query failed: {}", e));
     let base = "SELECT m.dir_path,
                 COALESCE(r.display_name, m.group_name, m.name),
-                COALESCE(u.designer, m.designer),
-                COALESCE(u.release_name, m.release_name),
-                COALESCE(u.release_date, m.release_date),
-                COALESCE(u.support_status, m.support_status),
-                COALESCE(u.variant, m.variant),
-                COALESCE(u.pose, m.pose),
+                NULLIF(COALESCE(u.designer, m.designer), ''),
+                NULLIF(COALESCE(u.release_name, m.release_name), ''),
+                NULLIF(COALESCE(u.release_date, m.release_date), ''),
+                NULLIF(COALESCE(u.support_status, m.support_status), ''),
+                NULLIF(COALESCE(u.variant, m.variant), ''),
+                NULLIF(COALESCE(u.pose, m.pose), ''),
                 m.description, m.uuid,
-                COALESCE(u.scale, m.scale),
-                COALESCE(u.sculptor, m.sculptor),
-                COALESCE(u.base_round, m.base_round),
-                COALESCE(u.base_square, m.base_square)
+                NULLIF(COALESCE(u.scale, m.scale), ''),
+                NULLIF(COALESCE(u.sculptor, m.sculptor), ''),
+                NULLIF(COALESCE(u.base_round, m.base_round), ''),
+                NULLIF(COALESCE(u.base_square, m.base_square), '')
          FROM models m
          LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
          LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)";
