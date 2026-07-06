@@ -43,10 +43,43 @@ LOOK = dict(
     key   = dict(color=(1.0,0.82,0.55), energy=1100, size=10, loc=( 4,-4,6)),
     fill  = dict(color=(1.0,0.78,0.55), energy=110,  size=12, loc=(-5,-2,3)),  # low = deep shadows
     rim   = dict(color=(1.0,0.80,0.60), energy=500,  size=5,  loc=( 0, 5,5)),
-    cam_lens = 60,
+    cam_lens = 60.0,
     samples  = 96,
     res      = 1600,
     exposure = 0.0,
+    # Look-variant constants, gathered here so the WHOLE recipe lives in one
+    # overridable place. "resin" = glossy coat + speckle + dim studio
+    # reflections; "rich" = harder key, deep shadows, gentle contrast curve.
+    resin = dict(
+        coat_weight    = 0.3,
+        coat_roughness = 0.12,
+        noise_scale    = 450.0,
+        noise_detail   = 3.0,
+        bump_strength  = 0.035,
+        world_color    = (0.9, 0.88, 0.85),
+        world_strength = 0.12,
+        # Classic energies, but the rim runs slightly COOL against the warm
+        # key — the subtle temperature split real product shots have. The
+        # key itself follows LOOK["key"]["color"].
+        fill_color     = (0.95, 0.93, 0.90),
+        rim_color      = (0.85, 0.90, 1.0),
+    ),
+    rich = dict(
+        # Light color stays close to white — the warmth should come from
+        # the resin, not from orange lamps stacking onto an orange material.
+        key_color        = (1.0, 0.92, 0.80),
+        fill_color       = (1.0, 0.90, 0.78),
+        rim_color        = (1.0, 0.92, 0.82),
+        # Key energy stays at 1.0: with the pale resin a boosted key blows
+        # the lit side out to clipping. Hardness comes from the smaller
+        # size alone; the low fill is what deepens the shadow side.
+        key_energy_mult  = 1.0,
+        key_size_mult    = 0.55,
+        fill_energy_mult = 0.3,
+        sss_weight_mult  = 0.6,
+        gamma            = 0.9,
+        exposure_shift   = -0.25,
+    ),
 )
 
 # Candidate rotations for the orientation picker. Order is stable — a UI maps
@@ -167,7 +200,7 @@ def resin_material(obj, color, look="flat"):
     b.inputs["Roughness"].default_value = LOOK["roughness"]
     # SSS wraps light around into the shadow side; the rich look keeps just
     # enough for the resin read while letting shadows actually go dark
-    sss_weight = LOOK["sss_weight"] * (0.6 if look == "rich" else 1.0)
+    sss_weight = LOOK["sss_weight"] * (LOOK["rich"]["sss_weight_mult"] if look == "rich" else 1.0)
     for name, val in (("Subsurface Weight", sss_weight),
                       ("Subsurface Radius", LOOK["sss_radius"]),
                       ("Subsurface Scale",  LOOK["sss_scale"])):
@@ -175,16 +208,17 @@ def resin_material(obj, color, look="flat"):
     if look == "resin":
         # Cured resin is satin with a tighter glossy layer on top — the
         # dual-lobe "gloss over matte" a single roughness can't give
-        for name, val in (("Coat Weight", 0.3), ("Coat Roughness", 0.12)):
+        for name, val in (("Coat Weight", LOOK["resin"]["coat_weight"]),
+                          ("Coat Roughness", LOOK["resin"]["coat_roughness"])):
             if name in b.inputs: b.inputs[name].default_value = val
         # Faint surface speckle: micro-noise bump breaks the highlights up
         # so they sparkle like a physical print instead of CAD-smooth
         nt = m.node_tree
         noise = nt.nodes.new("ShaderNodeTexNoise")
-        noise.inputs["Scale"].default_value = 450.0
-        noise.inputs["Detail"].default_value = 3.0
+        noise.inputs["Scale"].default_value = LOOK["resin"]["noise_scale"]
+        noise.inputs["Detail"].default_value = LOOK["resin"]["noise_detail"]
         bump = nt.nodes.new("ShaderNodeBump")
-        bump.inputs["Strength"].default_value = 0.035
+        bump.inputs["Strength"].default_value = LOOK["resin"]["bump_strength"]
         nt.links.new(noise.outputs["Fac"], bump.inputs["Height"])
         nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
     obj.data.materials.clear(); obj.data.materials.append(m)
@@ -192,23 +226,21 @@ def resin_material(obj, color, look="flat"):
 def lights(look="flat"):
     # "rich" = the promo-grade tonal shift: a harder (smaller), stronger key
     # against a low fill, so the form rolls from pale cream through warm
-    # midtones into deep shadow. Light color stays close to white — the
-    # warmth should come from the resin, not from orange lamps stacking
-    # onto an orange material.
-    # Key energy stays at 1.0: with the pale resin a boosted key blows the
-    # lit side out to clipping. Hardness comes from the smaller size alone.
-    key_scale, key_size, fill_scale = (1.0, 0.55, 0.3) if look == "rich" else (1.0, 1.0, 1.0)
+    # midtones into deep shadow. All constants live in LOOK["rich"] /
+    # LOOK["resin"] — see the recipe comments there for the why.
+    rich = LOOK["rich"]; resin = LOOK["resin"]
+    key_scale, key_size, fill_scale = (
+        (rich["key_energy_mult"], rich["key_size_mult"], rich["fill_energy_mult"])
+        if look == "rich" else (1.0, 1.0, 1.0))
     rich_colors = {
-        "Key":  (1.0, 0.92, 0.80),
-        "Fill": (1.0, 0.90, 0.78),
-        "Rim":  (1.0, 0.92, 0.82),
+        "Key":  rich["key_color"],
+        "Fill": rich["fill_color"],
+        "Rim":  rich["rim_color"],
     }
-    # Resin look: Classic energies, but the rim runs slightly COOL against
-    # the warm key — the subtle temperature split real product shots have
     resin_colors = {
         "Key":  LOOK["key"]["color"],
-        "Fill": (0.95, 0.93, 0.90),
-        "Rim":  (0.85, 0.90, 1.0),
+        "Fill": resin["fill_color"],
+        "Rim":  resin["rim_color"],
     }
     def mk(spec, name, energy_scale=1.0, size_scale=1.0):
         d = bpy.data.lights.new(name, "AREA"); d.energy=spec["energy"]*energy_scale; d.size=spec["size"]*size_scale
@@ -231,8 +263,8 @@ def black_world(look="flat"):
         # gets to reflect a dim neutral studio — with a void-black world the
         # speculars contain only three lamps, which is the big "CG" tell.
         env = nt.nodes.new("ShaderNodeBackground")
-        env.inputs["Color"].default_value = (0.9, 0.88, 0.85, 1.0)
-        env.inputs["Strength"].default_value = 0.12
+        env.inputs["Color"].default_value = tuple(LOOK["resin"]["world_color"]) + (1.0,)
+        env.inputs["Strength"].default_value = LOOK["resin"]["world_strength"]
         lp = nt.nodes.new("ShaderNodeLightPath")
         mix = nt.nodes.new("ShaderNodeMixShader")
         out = nt.nodes.get("World Output")
@@ -297,9 +329,9 @@ def setup_render(res, samples, look="flat"):
         # gamma < 1 is a cheap contrast curve: deepens shadows while the
         # near-white key side barely moves. Kept gentle — pushing it also
         # over-saturates midtones, which reads "digital"
-        sc.view_settings.gamma = 0.9
+        sc.view_settings.gamma = LOOK["rich"]["gamma"]
         # pull the highlights back off the clipping point
-        sc.view_settings.exposure = LOOK["exposure"] - 0.25
+        sc.view_settings.exposure = LOOK["exposure"] + LOOK["rich"]["exposure_shift"]
     sc.render.resolution_x = res; sc.render.resolution_y = res
     sc.render.resolution_percentage = 100
     sc.render.image_settings.file_format = "PNG"
