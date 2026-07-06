@@ -554,6 +554,7 @@ import StlViewport from "../components/StlViewport.vue";
 import { filesFromPaths, useFileSelect } from "../composables/useFileSelect";
 import type { SelectedFile } from "../composables/useFileSelect";
 import { useRenderStatus } from "../composables/useRenderStatus";
+import { hexToLinear } from "../utils/color";
 import { drawOverlay } from "../utils/promoOverlay";
 import { useReleasesStore } from "../stores/releasesStore.ts";
 import { useToastStore } from "../stores/toastStore.ts";
@@ -1000,16 +1001,9 @@ onMounted(async () => {
   }
 });
 
-const srgbToLinear = (c: number) =>
-  c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-
-const colorLinear = computed<[number, number, number]>(() => {
-  const hex = colorHex.value.replace("#", "");
-  const r = Number.parseInt(hex.slice(0, 2), 16) / 255;
-  const g = Number.parseInt(hex.slice(2, 4), 16) / 255;
-  const b = Number.parseInt(hex.slice(4, 6), 16) / 255;
-  return [srgbToLinear(r), srgbToLinear(g), srgbToLinear(b)];
-});
+const colorLinear = computed<[number, number, number]>(() =>
+  hexToLinear(colorHex.value),
+);
 
 const defaultOutputPath = computed(() =>
   parts.value.length
