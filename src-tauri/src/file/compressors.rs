@@ -52,7 +52,34 @@ pub fn determine_dir_size_kb(paths: &[PathBuf]) -> Result<(u32, u32), AppError> 
 }
 
 /// (source file on disk, its name inside the archive)
-type ArchivePlan = Vec<(PathBuf, String)>;
+pub type ArchivePlan = Vec<(PathBuf, String)>;
+
+/// How entries are compressed. Release exports stay Deflate (any unzip tool
+/// can open them); the catalog's at-rest packs use Zstd (much better ratio on
+/// STL geometry, but needs a zstd-aware reader — fine for archives only
+/// Plinth itself opens).
+#[derive(Debug, Clone, Copy)]
+pub struct CompressOptions {
+    pub method: zip::CompressionMethod,
+    /// None = the method's default level (zstd: 3, deflate: 6).
+    pub level: Option<i64>,
+}
+
+impl CompressOptions {
+    pub fn deflate() -> Self {
+        Self {
+            method: zip::CompressionMethod::Deflated,
+            level: None,
+        }
+    }
+
+    pub fn zstd(level: Option<i64>) -> Self {
+        Self {
+            method: zip::CompressionMethod::Zstd,
+            level,
+        }
+    }
+}
 
 /// Flatten dirs/files into archive entries up front, so duplicate detection
 /// can see every file's size before any bytes are written.
@@ -125,14 +152,30 @@ fn write_hashing<T: Write + Seek>(
 pub fn compress_files<T, F>(
     paths: &[PathBuf],
     writer: T,
-    mut progress_callback: Option<F>,
+    progress_callback: Option<F>,
 ) -> Result<Vec<ArchiveFileEntry>, AppError>
 where
     T: Write + Seek,
     F: FnMut(u32) -> bool,
 {
     let (files, dirs) = plan_entries(paths)?;
+    compress_planned(files, &dirs, writer, CompressOptions::deflate(), progress_callback)
+}
 
+/// Same as `compress_files`, but the caller supplies the entry plan (so it
+/// controls which files go in and their archive names) and the compression
+/// method. `compress_files` is the plan-everything Deflate wrapper.
+pub fn compress_planned<T, F>(
+    files: ArchivePlan,
+    dirs: &[String],
+    writer: T,
+    compress_options: CompressOptions,
+    mut progress_callback: Option<F>,
+) -> Result<Vec<ArchiveFileEntry>, AppError>
+where
+    T: Write + Seek,
+    F: FnMut(u32) -> bool,
+{
     // Sizes that appear more than once — only these need a pre-hash
     let mut size_counts: HashMap<u64, u32> = HashMap::new();
     let mut sizes: Vec<u64> = Vec::with_capacity(files.len());
@@ -149,11 +192,12 @@ where
 
     let mut zip = zip::ZipWriter::new(writer);
     let options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
+        .compression_method(compress_options.method)
+        .compression_level(compress_options.level)
         .unix_permissions(0o755);
 
     for dir in dirs {
-        zip.add_directory(dir, options)
+        zip.add_directory(dir.as_str(), options)
             .map_err(|e| AppError::FileProcessingError(format!("Error adding directory: {}", e)))?;
     }
 
