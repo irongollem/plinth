@@ -230,8 +230,15 @@ pub fn scan(
                     metadata_tags.push((dir_path.clone(), tag.clone()));
                 }
                 (
-                    meta.name.clone(),
-                    meta.description.clone(),
+                    // sidecars are an interchange format — hand-edited or
+                    // legacy ones ship stray whitespace ("Unsupported "
+                    // taught us that lesson at the folder level)
+                    meta.name.trim().to_string(),
+                    meta.description
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from),
                     meta.id.map(|id| id.to_string()),
                     "metadata",
                     preview,
@@ -265,8 +272,13 @@ pub fn scan(
 
         // An enriched model.json is the authority — it carries the curation a
         // release was packed with — so its fields win over folder inference.
+        // Values are trimmed on the way in; whitespace-only means unset.
         let meta = info.metadata.as_ref();
-        let meta_field = |get: fn(&ModelJson) -> Option<String>| meta.and_then(get);
+        let meta_field = |get: fn(&ModelJson) -> Option<String>| {
+            meta.and_then(get)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
 
         models.push(ModelRow {
             dir_path: dir_path.clone(),
@@ -828,14 +840,16 @@ mod tests {
         let dir = root.join("knight");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("knight.stl"), b"solid").unwrap();
+        // values deliberately padded: sidecars are hand-editable and the
+        // import must trim — the exact-match asserts below prove it
         fs::write(
             dir.join("model.json"),
-            r#"{"id":null,"name":"Knight","description":"a knight","tags":["hero"],
+            r#"{"id":null,"name":" Knight ","description":"a knight","tags":["hero"],
                 "images":[],"model_files":["knight.stl"],"group":"Knights",
-                "variant":"sword","pose":"charging","scale":"32mm",
-                "support_status":"unsupported","release_date":"2026-05",
-                "designer":"Dragon Trapper's Lodge","sculptor":"A. Artist",
-                "release_name":"Order of the Unicorn"}"#,
+                "variant":"sword","pose":"charging ","scale":" 32mm",
+                "support_status":"unsupported","release_date":" 2026-05 ",
+                "designer":" Dragon Trapper's Lodge ","sculptor":"A. Artist",
+                "release_name":"Order of the Unicorn "}"#,
         )
         .unwrap();
 

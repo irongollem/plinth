@@ -182,6 +182,11 @@ const saveReleaseInfo = async () => {
   }
   isSavingInfo.value = true;
   try {
+    // stray whitespace must not reach release.json — these values become
+    // folder names and cross-user metadata on pack
+    releaseForm.value.name = releaseForm.value.name.trim();
+    releaseForm.value.designer = releaseForm.value.designer.trim();
+    releaseForm.value.description = releaseForm.value.description.trim();
     await persistFieldDefaults();
     releasesStore.updateRelease(releaseForm.value);
     releasesStore.setReleaseStep(3);

@@ -506,10 +506,21 @@ pub async fn update_model_metadata(
 ) -> Result<u32, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
-        // variant casing is the tool's convention (Title Case), applied at
-        // the input boundary so 'sword' and 'SWORD' can never coexist
+        // Input hygiene lives at the boundary, whoever the caller is:
+        // stray leading/trailing whitespace must never reach the catalog
+        // (a value of only spaces means "not set"), and variant casing is
+        // the tool's convention (Title Case) so 'sword' and 'SWORD' can
+        // never coexist.
         let mut meta = meta;
-        meta.variant = meta.variant.map(|v| super::layout::title_case(&v));
+        meta.custom_name = tidy(meta.custom_name);
+        meta.variant = tidy(meta.variant).map(|v| super::layout::title_case(&v));
+        meta.pose = tidy(meta.pose);
+        meta.scale = tidy(meta.scale);
+        meta.support_status = tidy(meta.support_status);
+        meta.release_date = tidy(meta.release_date);
+        meta.designer = tidy(meta.designer);
+        meta.sculptor = tidy(meta.sculptor);
+        meta.release_name = tidy(meta.release_name);
         db::update_model_user_meta(
             &conn,
             &dir_path,
@@ -606,12 +617,21 @@ pub async fn assign_files_to_pose(
 ) -> Result<u32, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut conn = open_db(&app_handle)?;
-        // casing is the tool's convention, not the typist's
-        let variant = variant.map(|v| super::layout::title_case(&v));
+        // whitespace hygiene + casing convention at the boundary
+        let variant = tidy(variant).map(|v| super::layout::title_case(&v));
+        let pose = tidy(pose);
+        let support_status = tidy(support_status);
         db::set_file_variants(&mut conn, &paths, variant, pose, support_status)
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Assign task failed: {}", e)))?
+}
+
+/// Trim a user-entered optional value; whitespace-only means "not set".
+fn tidy(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Revert files to plain members of their folder. Returns how many
