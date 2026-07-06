@@ -808,10 +808,13 @@
                 </span>
               </div>
 
-              <!-- Assignment bar: appears once files are ticked. Splits a
-                   dump folder into pose members without moving anything. -->
+              <!-- Assignment bar: always visible on multi-file members.
+                   Splits a dump folder into pose members without moving
+                   anything. "match" ticks every file whose name carries
+                   the typed facets — two spear types x five poses is ten
+                   type-match-file rounds, not a hundred checkbox clicks. -->
               <div
-                v-if="checkedFiles.length"
+                v-if="files.length > 1 || checkedFiles.length"
                 class="flex items-center gap-1.5 bg-base-200 border border-base-content/10 rounded-lg px-2 py-1.5 mb-1.5"
               >
                 <span
@@ -836,10 +839,22 @@
                     placeholder="pose"
                   />
                   <button
+                    type="button"
+                    class="btn btn-xs"
+                    title="Tick every file whose name contains the variant and pose typed above"
+                    :disabled="
+                      !variantAssignDraft.trim() && !poseAssignDraft.trim()
+                    "
+                    @click="selectMatchingFiles"
+                  >
+                    match
+                  </button>
+                  <button
                     type="submit"
                     class="btn btn-xs btn-primary"
                     :disabled="
-                      !variantAssignDraft.trim() && !poseAssignDraft.trim()
+                      !checkedFiles.length ||
+                      (!variantAssignDraft.trim() && !poseAssignDraft.trim())
                     "
                   >
                     file
@@ -848,6 +863,7 @@
                 <button
                   type="button"
                   class="btn btn-xs btn-ghost"
+                  :disabled="!checkedFiles.length"
                   @click="clearChecked"
                 >
                   unfile
@@ -1654,6 +1670,37 @@ const toggleCheckedFile = (path: string) => {
     : [...checkedFiles.value, path];
 };
 
+/* "match": tick every file whose name carries the typed facets, so bulk
+   filing is type -> match -> file instead of a hundred checkbox clicks.
+   Underscores and spaces count as the same separator; the pose token
+   demands word boundaries so pose "a" doesn't match every file with an
+   'a' in it. */
+const normalizeForMatch = (value: string) =>
+  value.toLowerCase().replace(/[_\s]+/g, " ");
+const escapeRegExp = (value: string) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const selectMatchingFiles = () => {
+  const variant = normalizeForMatch(variantAssignDraft.value.trim());
+  const pose = normalizeForMatch(poseAssignDraft.value.trim());
+  if (!variant && !pose) return;
+  const poseRe = pose
+    ? new RegExp(`(^|[^a-z0-9])${escapeRegExp(pose)}([^a-z0-9]|$)`)
+    : null;
+  const matches = files.value
+    .filter((file) => {
+      const name = normalizeForMatch(file.file_name);
+      return (
+        (!variant || name.includes(variant)) && (!poseRe || poseRe.test(name))
+      );
+    })
+    .map((file) => file.path);
+  checkedFiles.value = matches;
+  if (!matches.length) {
+    toastStore.addToast("No file names match those facets", "info");
+  }
+};
+
 /** Reload the open group's members and select a sensible one — used after a
  *  split changes the member set. Prefers `preferKey` when it still exists. */
 const reloadMembers = async (preferKey?: string) => {
@@ -1701,7 +1748,8 @@ const assignChecked = async () => {
     "success",
   );
   checkedFiles.value = [];
-  variantAssignDraft.value = "";
+  // the variant sticks for the next round — filing five poses of one
+  // spear type means retyping only the pose letter
   poseAssignDraft.value = "";
   // Stay on the unassigned pool so the remaining files are still in front of
   // you to keep filing. When the last file is filed the pool is gone and
