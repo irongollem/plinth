@@ -20,8 +20,8 @@ use uuid::Uuid;
 use super::{
     db, dups, normalize, pack, scanner, BatchOutcome, CatalogEntry, CatalogFile,
     CatalogGroupResult, CatalogSearchResult, CatalogStats, DesignerCount, DuplicateGroup,
-    FileVariant, ModelMetaUpdate, MoveOperation, NormalizeOp, NormalizePlan, ReleaseSummary,
-    TagCount,
+    EnsureOutcome, FileVariant, ModelMetaUpdate, MoveOperation, NormalizeOp, NormalizePlan,
+    ReleaseSummary, TagCount,
 };
 
 /// Scan and duplicate jobs share one registry; both cancel through
@@ -368,6 +368,163 @@ pub async fn pack_models(
     });
 
     Ok(job_id)
+}
+
+/// Make `paths` readable on disk, extracting packed ones from their
+/// archives as EPHEMERAL working copies — the archive stays authoritative
+/// and cleanup_ephemeral_files takes the copies back. Awaits completion:
+/// the promise resolving means the bytes are there, so callers just chain
+/// their print/preview/render after it. Progress rides the PackStatus
+/// stream (phase "extract"); the Started event carries the job_id the
+/// frontend can feed to cancel_catalog_job.
+#[tauri::command]
+#[specta::specta]
+pub async fn ensure_model_files(
+    app_handle: AppHandle,
+    paths: Vec<String>,
+) -> Result<EnsureOutcome, AppError> {
+    let job_id = Uuid::new_v4().to_string();
+    let cancel = register_job(&job_id)?;
+    let job_id_clone = job_id.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<EnsureOutcome, AppError> {
+        let started = Instant::now();
+        let conn = open_db(&app_handle)?;
+        let archives = db::archive_paths_for(&conn, &paths)?;
+        let already_loose = (paths.len() - archives.len()) as u32;
+        if archives.is_empty() {
+            return Ok(EnsureOutcome {
+                extracted: Vec::new(),
+                already_loose,
+            });
+        }
+
+        // Group the packed paths per model dir so each archive opens once
+        let mut by_dir: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for (path, archive) in &archives {
+            let Some(model_dir) = Path::new(archive)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            by_dir.entry(model_dir).or_default().push(path.clone());
+        }
+        let total_models = by_dir.len() as u32;
+        PackStatus::Started(PackStartedStatus {
+            job_id: job_id_clone.clone(),
+            action: "extract".to_string(),
+            total_models,
+        })
+        .emit(&app_handle)
+        .ok();
+
+        let run = || -> Result<Vec<String>, AppError> {
+            let mut extracted: Vec<String> = Vec::new();
+            for (index, (dir, wanted)) in by_dir.iter().enumerate() {
+                if cancel.load(Ordering::SeqCst) {
+                    return Err(AppError::UserCancelled("Extraction cancelled".to_string()));
+                }
+                PackStatus::Progress(PackProgressStatus {
+                    job_id: job_id_clone.clone(),
+                    phase: "extract".to_string(),
+                    current_model: dir.clone(),
+                    model_index: index as u32 + 1,
+                    total_models,
+                    processed_size_kb: 0,
+                    total_size_kb: 0,
+                    percent: (index as u32 * 100) / total_models.max(1),
+                })
+                .emit(&app_handle)
+                .ok();
+                let got = pack::extract_paths_ephemeral(Path::new(dir), wanted, &cancel, |_| {
+                    !cancel.load(Ordering::SeqCst)
+                })?;
+                extracted.extend(got);
+            }
+            Ok(extracted)
+        };
+        let outcome = run();
+        match &outcome {
+            Ok(extracted) => {
+                PackStatus::Completed(PackCompletedStatus {
+                    job_id: job_id_clone.clone(),
+                    action: "extract".to_string(),
+                    succeeded: extracted.len() as u32,
+                    total_models,
+                    kept_files: Vec::new(),
+                    elapsed_seconds: started.elapsed().as_secs_f64(),
+                })
+                .emit(&app_handle)
+                .ok();
+            }
+            Err(AppError::UserCancelled(_)) => {
+                PackStatus::Cancelled(PackCancelledStatus {
+                    job_id: job_id_clone.clone(),
+                    succeeded: 0,
+                })
+                .emit(&app_handle)
+                .ok();
+            }
+            Err(e) => {
+                PackStatus::Failed(PackFailedStatus {
+                    job_id: job_id_clone.clone(),
+                    error: e.to_string(),
+                    succeeded: 0,
+                })
+                .emit(&app_handle)
+                .ok();
+            }
+        }
+        Ok(EnsureOutcome {
+            extracted: outcome?,
+            already_loose,
+        })
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Extraction task failed: {}", e)))?;
+    unregister_job(&job_id);
+    result
+}
+
+/// Take back the working copies ensure_model_files materialized — the
+/// requested paths, or every live extract when the list is empty (the
+/// app-exit sweep). Files that changed since extraction are reported and
+/// kept: they're the user's data now (saved supports, edits).
+#[tauri::command]
+#[specta::specta]
+pub async fn cleanup_ephemeral_files(paths: Vec<String>) -> Result<BatchOutcome, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (removed, kept) = pack::cleanup_ephemeral(&paths);
+        Ok(BatchOutcome {
+            succeeded: removed.len() as u32,
+            errors: kept
+                .into_iter()
+                .map(|p| format!("{}: changed since extraction — kept on disk", p))
+                .collect(),
+        })
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Cleanup task failed: {}", e)))?
+}
+
+/// Which model folders a bulk pack would touch: everything with loose model
+/// files under the given designer facet and/or checked group names. The
+/// frontend shows the count in the confirm dialog, then feeds the same list
+/// to pack_models — one resumable job for a whole designer.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_pack_candidates(
+    app_handle: AppHandle,
+    designer: Option<String>,
+    groups: Vec<String>,
+) -> Result<Vec<String>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::pack_candidate_dirs(&conn, designer.as_deref(), &groups)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Pack candidate task failed: {}", e)))?
 }
 
 /// Restore packed models to loose files (archive + sidecar removed), the

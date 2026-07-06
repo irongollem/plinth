@@ -9,14 +9,14 @@ mod settings;
 
 use catalog::commands::{
     add_catalog_tag, add_group_tag, apply_normalize, assign_files_to_pose, batch_move_models,
-    cancel_catalog_job, clear_file_pose, combine_catalog_groups, delete_duplicate_files,
-    detach_catalog_group_source, finalize_normalize, get_catalog_designers,
-    get_catalog_group_members, get_catalog_group_sources, get_catalog_model_files,
-    get_catalog_releases, get_catalog_stats, get_catalog_tags, get_duplicate_groups,
-    get_file_variants, merge_duplicate_files, pack_models, plan_normalize, remove_catalog_tag,
-    remove_group_tag, rename_catalog_group, search_catalog, search_catalog_groups,
-    set_group_cover, set_model_preview, start_catalog_scan, start_duplicate_scan,
-    supports_file_links, unpack_models, update_model_metadata,
+    cancel_catalog_job, cleanup_ephemeral_files, clear_file_pose, combine_catalog_groups,
+    delete_duplicate_files, detach_catalog_group_source, ensure_model_files, finalize_normalize,
+    get_catalog_designers, get_catalog_group_members, get_catalog_group_sources,
+    get_catalog_model_files, get_catalog_releases, get_catalog_stats, get_catalog_tags,
+    get_duplicate_groups, get_file_variants, get_pack_candidates, merge_duplicate_files,
+    pack_models, plan_normalize, remove_catalog_tag, remove_group_tag, rename_catalog_group,
+    search_catalog, search_catalog_groups, set_group_cover, set_model_preview, start_catalog_scan,
+    start_duplicate_scan, supports_file_links, unpack_models, update_model_metadata,
 };
 use file::commands::{
     add_model, cancel_compression, create_release, finalize_release, import_release,
@@ -105,6 +105,9 @@ fn create_specta_builder() -> Builder {
             get_file_variants,
             pack_models,
             unpack_models,
+            get_pack_candidates,
+            ensure_model_files,
+            cleanup_ephemeral_files,
         ])
         .events(collect_events![
             CompressionStatus,
@@ -186,8 +189,17 @@ pub fn run() {
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app_handle, event| {
+            // Last chance to take back this session's ephemeral extracts
+            // (files materialized from pack archives for print/preview).
+            // Guarded by the same size+mtime check as every cleanup, and by
+            // the pack_cleanup_after setting.
+            if let tauri::RunEvent::Exit = event {
+                catalog::pack::sweep_ephemeral_on_exit();
+            }
+        });
 }
 
 #[cfg(test)]

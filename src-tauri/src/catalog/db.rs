@@ -1617,6 +1617,50 @@ pub fn dir_size_bytes(conn: &Connection, dir: &str) -> Result<i64, AppError> {
     .map_err(map_err)
 }
 
+/// Model folders eligible for packing: every model dir that still has at
+/// least one loose model file, optionally narrowed to one designer and/or
+/// an explicit set of displayed group names (the card checkboxes). This is
+/// what lets "pack this whole designer" be one resumable job instead of a
+/// drawer visit per model.
+pub fn pack_candidate_dirs(
+    conn: &Connection,
+    designer: Option<&str>,
+    groups: &[String],
+) -> Result<Vec<String>, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Pack candidate query failed: {}", e));
+    let mut sql = String::from(
+        "SELECT DISTINCT m.dir_path FROM models m
+         LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
+         LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)
+         WHERE EXISTS (SELECT 1 FROM files f
+                       WHERE f.dir_path = m.dir_path AND f.archive_path IS NULL)",
+    );
+    let mut bound: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    if let Some(name) = designer.map(str::trim).filter(|d| !d.is_empty()) {
+        sql.push_str(" AND lower(COALESCE(u.designer, m.designer, '')) = lower(?)");
+        bound.push(Box::new(name.to_string()));
+    }
+    if !groups.is_empty() {
+        let placeholders = vec!["lower(?)"; groups.len()].join(", ");
+        sql.push_str(&format!(
+            " AND lower(COALESCE(r.display_name, m.group_name, m.name)) IN ({})",
+            placeholders
+        ));
+        for group in groups {
+            bound.push(Box::new(group.clone()));
+        }
+    }
+    sql.push_str(" ORDER BY m.dir_path");
+    let params_ref: Vec<&dyn rusqlite::types::ToSql> = bound.iter().map(|b| b.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(map_err)?;
+    let rows = stmt
+        .query_map(params_ref.as_slice(), |row| row.get(0))
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
 /// Every packed model dir. The normalizer and movers consult this to skip
 /// what they can't safely reorganize (their index re-keying doesn't rewrite
 /// archive_path/packs yet — unpack first).

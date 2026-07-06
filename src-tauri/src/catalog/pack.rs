@@ -27,11 +27,13 @@ use crate::catalog::scanner::{is_hidden, read_json};
 use crate::error::AppError;
 use crate::file::compressors::{ArchivePlan, CompressOptions, compress_planned};
 use crate::manifest::{self, ManifestFile};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const PACK_ARCHIVE_NAME: &str = "model.plinthpack";
@@ -339,6 +341,17 @@ pub fn unpack_model(model_dir: &Path) -> Result<Vec<PackFileEntry>, AppError> {
     manifest::extract_component_archive(&archive_path, model_dir, &files)?;
     fs::remove_file(&archive_path)?;
     fs::remove_file(&sidecar_path)?;
+    // Anything extracted ephemerally from this dir is now a permanent loose
+    // file — forget it, or a later cleanup would delete real data
+    if let Ok(mut registry) = EPHEMERAL_EXTRACTS.lock() {
+        let prefix = model_dir.to_string_lossy().into_owned();
+        registry.retain(|path, _| {
+            Path::new(path)
+                .parent()
+                .map(|p| p.to_string_lossy() != prefix)
+                .unwrap_or(true)
+        });
+    }
     Ok(sidecar.files)
 }
 
@@ -350,6 +363,216 @@ pub fn read_sidecar(model_dir: &Path) -> Result<Option<PackSidecar>, AppError> {
     }
     let sidecar: PackSidecar = read_json(&sidecar_path)?;
     Ok(Some(sidecar))
+}
+
+// ---- ephemeral extraction: use packed files without unpacking ----
+
+/// What extract_paths_ephemeral wrote for one path. Cleanup deletes a file
+/// only while its size+mtime still match this record — a file the slicer or
+/// user overwrote is theirs now, never silently destroyed. In-memory on
+/// purpose: if the app dies, the worst leftover is a loose file the scanner
+/// indexes honestly (loose wins) and the next pack re-absorbs.
+struct EphemeralRecord {
+    size_bytes: u64,
+    modified_at: i64,
+}
+
+static EPHEMERAL_EXTRACTS: Lazy<Mutex<HashMap<String, EphemeralRecord>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn record_stat(metadata: &fs::Metadata) -> EphemeralRecord {
+    EphemeralRecord {
+        size_bytes: metadata.len(),
+        modified_at: metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    }
+}
+
+/// Materialize just the `wanted` paths from a packed model dir's archive —
+/// the "print two files from a 40-file bundle" path. The archive and
+/// sidecar are NOT touched: they stay authoritative, and the extracted
+/// files are temporary working copies tracked for cleanup_ephemeral.
+/// Dedup-elided entries are read from their checksum twin inside the zip,
+/// so no extra files materialize. Paths already on disk are skipped and NOT
+/// recorded — a loose file we didn't create is not ours to delete. Cancel
+/// rolls back this call's own extracts.
+pub fn extract_paths_ephemeral(
+    model_dir: &Path,
+    wanted: &[String],
+    cancel: &AtomicBool,
+    mut on_progress: impl FnMut(u32) -> bool,
+) -> Result<Vec<String>, AppError> {
+    let sidecar = read_sidecar(model_dir)?.ok_or_else(|| {
+        AppError::NotFoundError(format!("'{}' is not packed (no pack.json)", model_dir.display()))
+    })?;
+    if !sidecar.is_readable() {
+        return Err(AppError::InvalidInput(format!(
+            "'{}' has an unreadable pack.json (format {} v{})",
+            model_dir.display(),
+            sidecar.format,
+            sidecar.version
+        )));
+    }
+    let archive_path = model_dir.join(PACK_ARCHIVE_NAME);
+    let file = fs::File::open(&archive_path)
+        .map_err(|e| AppError::IoError(format!("Failed to open {}: {}", archive_path.display(), e)))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| AppError::InvalidInput(format!("Not a readable archive: {}", e)))?;
+
+    let by_name: HashMap<&str, &PackFileEntry> =
+        sidecar.files.iter().map(|f| (f.name.as_str(), f)).collect();
+    // first STORED entry per checksum = where an elided twin's bytes live
+    let mut donor_by_checksum: HashMap<&str, &str> = HashMap::new();
+    for entry in sidecar.files.iter().filter(|f| f.stored) {
+        donor_by_checksum
+            .entry(entry.checksum.as_str())
+            .or_insert(entry.name.as_str());
+    }
+
+    let rollback = |paths: &[String]| {
+        cleanup_ephemeral(paths);
+    };
+    let mut extracted: Vec<String> = Vec::new();
+    for (n, path_str) in wanted.iter().enumerate() {
+        if cancel.load(Ordering::SeqCst) {
+            rollback(&extracted);
+            return Err(AppError::UserCancelled("Extraction cancelled".to_string()));
+        }
+        let path = Path::new(path_str);
+        if path.exists() {
+            continue;
+        }
+        let rel = path.strip_prefix(model_dir).map_err(|_| {
+            AppError::InvalidInput(format!(
+                "'{}' is not inside '{}'",
+                path.display(),
+                model_dir.display()
+            ))
+        })?;
+        let name = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        let Some(entry) = by_name.get(name.as_str()) else {
+            rollback(&extracted);
+            return Err(AppError::NotFoundError(format!(
+                "'{}' is not in this model's pack archive",
+                name
+            )));
+        };
+        let source_name = if entry.stored {
+            entry.name.as_str()
+        } else {
+            match donor_by_checksum.get(entry.checksum.as_str()) {
+                Some(donor) => donor,
+                None => {
+                    rollback(&extracted);
+                    return Err(AppError::InvalidInput(format!(
+                        "Archive is missing '{}' and no twin with its checksum exists",
+                        entry.name
+                    )));
+                }
+            }
+        };
+
+        let temp = model_dir.join(format!(".plinth-extract-{}-{}.tmp", std::process::id(), n));
+        let mut write_one = || -> Result<(), AppError> {
+            let mut zf = archive.by_name(source_name).map_err(|e| {
+                AppError::FileProcessingError(format!("Archive entry '{}': {}", source_name, e))
+            })?;
+            let mut out = fs::File::create(&temp)?;
+            std::io::copy(&mut zf, &mut out)
+                .map_err(|e| AppError::IoError(format!("Failed extracting '{}': {}", name, e)))?;
+            Ok(())
+        };
+        if let Err(e) = write_one() {
+            fs::remove_file(&temp).ok();
+            rollback(&extracted);
+            return Err(e);
+        }
+        if let Err(e) = fs::rename(&temp, path) {
+            fs::remove_file(&temp).ok();
+            rollback(&extracted);
+            return Err(AppError::IoError(format!(
+                "Failed to place '{}': {}",
+                path.display(),
+                e
+            )));
+        }
+        if let (Ok(metadata), Ok(mut registry)) = (fs::metadata(path), EPHEMERAL_EXTRACTS.lock()) {
+            registry.insert(path_str.clone(), record_stat(&metadata));
+        }
+        extracted.push(path_str.clone());
+        if !on_progress((entry.size_bytes / 1024) as u32) {
+            rollback(&extracted);
+            return Err(AppError::UserCancelled("Extraction cancelled".to_string()));
+        }
+    }
+    Ok(extracted)
+}
+
+/// Delete ephemeral extracts — the requested `paths`, or everything the
+/// registry holds when empty. Returns (removed, kept): a file whose size or
+/// mtime drifted from its record was overwritten since extraction, so it's
+/// kept on disk, reported, and dropped from the registry (it's user data
+/// now, not our working copy).
+pub fn cleanup_ephemeral(paths: &[String]) -> (Vec<String>, Vec<String>) {
+    let Ok(mut registry) = EPHEMERAL_EXTRACTS.lock() else {
+        return (Vec::new(), Vec::new());
+    };
+    let targets: Vec<String> = if paths.is_empty() {
+        registry.keys().cloned().collect()
+    } else {
+        paths.to_vec()
+    };
+    let mut removed = Vec::new();
+    let mut kept = Vec::new();
+    for path in targets {
+        let Some(record) = registry.get(&path) else {
+            continue; // never ours, or already cleaned
+        };
+        match fs::metadata(&path) {
+            Err(_) => {
+                registry.remove(&path); // already gone
+            }
+            Ok(metadata) => {
+                let fresh = record_stat(&metadata);
+                if fresh.size_bytes == record.size_bytes
+                    && fresh.modified_at == record.modified_at
+                {
+                    if fs::remove_file(&path).is_ok() {
+                        registry.remove(&path);
+                        removed.push(path);
+                    }
+                    // a locked file (Windows: slicer still reading) stays
+                    // registered — the exit sweep retries
+                } else {
+                    registry.remove(&path);
+                    kept.push(path);
+                }
+            }
+        }
+    }
+    (removed, kept)
+}
+
+/// App-exit sweep: this session's leftover extracts go away when the user
+/// keeps cleanup-after on (the default). Best-effort by design — anything
+/// that survives is just a loose file the catalog shows honestly.
+pub fn sweep_ephemeral_on_exit() {
+    let cleanup = crate::settings::SETTINGS_CACHE
+        .lock()
+        .ok()
+        .and_then(|s| s.pack_cleanup_after)
+        .unwrap_or(true);
+    if cleanup {
+        cleanup_ephemeral(&[]);
+    }
 }
 
 /// Decompress every stored entry and compare against the checksum taken from
@@ -592,6 +815,76 @@ mod tests {
         assert!(dir.join(PACK_SIDECAR_NAME).is_file());
         // the fresh archive is real: unpack restores everything
         unpack_model(&dir).unwrap();
+        assert!(dir.join("body.stl").is_file());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ephemeral_extract_materializes_only_what_was_asked() {
+        let dir = temp_dir("ephemeral");
+        seed_model(&dir);
+        let cancel = AtomicBool::new(false);
+        pack_model("0.0.0-test", &dir, None, &cancel, no_progress).unwrap();
+
+        // ask for the elided twin specifically: bytes must come from its
+        // stored checksum donor without materializing the donor itself
+        let shield = dir.join("shield.stl").to_string_lossy().into_owned();
+        let extracted =
+            extract_paths_ephemeral(&dir, &[shield.clone()], &cancel, |_| true).unwrap();
+        assert_eq!(extracted, vec![shield.clone()]);
+        assert_eq!(fs::read(dir.join("shield.stl")).unwrap(), b"shared-arm-bytes!");
+        assert!(!dir.join("body.stl").exists(), "unrequested files stay packed");
+        assert!(!dir.join("sword.stl").exists(), "the donor is not materialized");
+        assert!(dir.join(PACK_ARCHIVE_NAME).is_file(), "archive stays authoritative");
+        assert!(dir.join(PACK_SIDECAR_NAME).is_file());
+
+        // untouched extract cleans up; nothing else is harmed
+        let (removed, kept) = cleanup_ephemeral(&[shield.clone()]);
+        assert_eq!(removed, vec![shield]);
+        assert!(kept.is_empty());
+        assert!(!dir.join("shield.stl").exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cleanup_keeps_files_that_changed_since_extraction() {
+        let dir = temp_dir("ephemeral_kept");
+        seed_model(&dir);
+        let cancel = AtomicBool::new(false);
+        pack_model("0.0.0-test", &dir, None, &cancel, no_progress).unwrap();
+
+        let body = dir.join("body.stl").to_string_lossy().into_owned();
+        extract_paths_ephemeral(&dir, &[body.clone()], &cancel, |_| true).unwrap();
+        // the slicer saved supports over our working copy
+        fs::write(dir.join("body.stl"), b"user-edited-bytes-now-much-longer").unwrap();
+
+        let (removed, kept) = cleanup_ephemeral(&[body.clone()]);
+        assert!(removed.is_empty());
+        assert_eq!(kept, vec![body.clone()]);
+        assert!(dir.join("body.stl").is_file(), "changed file survives");
+        // dropped from the registry: a second cleanup won't touch it either
+        let (removed, kept) = cleanup_ephemeral(&[body]);
+        assert!(removed.is_empty() && kept.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn full_unpack_forgets_ephemeral_records_for_the_dir() {
+        let dir = temp_dir("ephemeral_unpack");
+        seed_model(&dir);
+        let cancel = AtomicBool::new(false);
+        pack_model("0.0.0-test", &dir, None, &cancel, no_progress).unwrap();
+
+        let body = dir.join("body.stl").to_string_lossy().into_owned();
+        extract_paths_ephemeral(&dir, &[body.clone()], &cancel, |_| true).unwrap();
+        unpack_model(&dir).unwrap();
+
+        // the file is permanent now — cleanup must not delete it
+        let (removed, kept) = cleanup_ephemeral(&[body]);
+        assert!(removed.is_empty() && kept.is_empty());
         assert!(dir.join("body.stl").is_file());
 
         fs::remove_dir_all(&dir).ok();

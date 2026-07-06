@@ -260,6 +260,15 @@ pub struct FileVariant {
     pub support_status: Option<String>,
 }
 
+/// What ensure_model_files did: the paths it materialized from archives
+/// (ephemeral working copies, candidates for cleanup_ephemeral_files) vs
+/// how many of the requested paths were already loose on disk.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct EnsureOutcome {
+    pub extracted: Vec<String>,
+    pub already_loose: u32,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
 pub struct ExtensionStat {
     pub extension: String,
