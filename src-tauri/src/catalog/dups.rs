@@ -247,6 +247,7 @@ mod tests {
                 extension: "stl".into(),
                 size_bytes: 18,
                 modified_at: 1,
+                ..Default::default()
             })
             .collect();
         let models = vec![ModelRow {
@@ -271,7 +272,7 @@ mod tests {
             group_name: None,
         }];
         db::test_init(&conn);
-        db::replace_catalog(&mut conn, &rows, &models, &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &rows, &models, &[], &[], &[]).unwrap();
 
         let cancel = AtomicBool::new(false);
         let groups = find_duplicates(&conn, &cancel, |_, _| {}).unwrap();
@@ -309,10 +310,11 @@ mod tests {
                 extension: "stl".into(),
                 size_bytes: 16,
                 modified_at: 1,
+                ..Default::default()
             })
             .collect();
         db::test_init(&conn);
-        db::replace_catalog(&mut conn, &rows, &[], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &rows, &[], &[], &[], &[]).unwrap();
 
         let cancel = AtomicBool::new(false);
         let groups = find_duplicates(&conn, &cancel, |_, _| {}).unwrap();

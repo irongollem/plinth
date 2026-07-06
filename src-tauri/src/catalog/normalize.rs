@@ -441,6 +441,10 @@ pub fn plan(
     let root_str = root.to_string_lossy().into_owned();
     let rows = member_rows(conn, None)?;
     let all_dirs: HashSet<&str> = rows.iter().map(|r| r.dir.as_str()).collect();
+    // Packed models can't be reorganized: their files exist only inside the
+    // archive, and the apply path's index re-keying doesn't rewrite
+    // archive_path/packs rows
+    let packed_dirs = super::db::packed_model_dirs(conn)?;
 
     // group by display name, case-insensitive, preserving first spelling
     let mut groups: BTreeMap<String, Vec<&MemberRow>> = BTreeMap::new();
@@ -497,6 +501,17 @@ pub fn plan(
             skipped.push(NormalizeSkip {
                 group_name: display,
                 reason: format!("{} is outside the catalog root", outside),
+            });
+            continue;
+        }
+
+        if dirs
+            .iter()
+            .any(|d| packed_dirs.iter().any(|p| is_under(d, p) || is_under(p, d)))
+        {
+            skipped.push(NormalizeSkip {
+                group_name: display,
+                reason: "packed (compressed at rest) — unpack the model to reorganize it".into(),
             });
             continue;
         }
@@ -1464,6 +1479,7 @@ mod tests {
             extension: ext,
             size_bytes: 4,
             modified_at: 0,
+            ..Default::default()
         }
     }
 
@@ -1519,7 +1535,7 @@ mod tests {
             file_row(&sup.join("bog.lys"), &sup),
             file_row(&unsup.join("bog.stl"), &unsup),
         ];
-        db::replace_catalog(&mut conn, &files, &[sup_row, unsup_row], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &files, &[sup_row, unsup_row], &[], &[], &[]).unwrap();
 
         let plan = plan(&conn, &root, None, None).unwrap();
         assert_eq!(plan.groups.len(), 1);
@@ -1598,7 +1614,7 @@ mod tests {
             file_row(&old.join("A/galeb duhr.stl"), &old.join("A")),
             file_row(&old.join("B/galeb duhr.stl"), &old.join("B")),
         ];
-        db::replace_catalog(&mut conn, &files, &[row_a, row_b], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &files, &[row_a, row_b], &[], &[], &[]).unwrap();
 
         let plan = plan(&conn, &root, None, None).unwrap();
         let group = &plan.groups[0];
@@ -1679,7 +1695,7 @@ mod tests {
             file_row(&pt2.join("oval.stl"), &pt2),
             file_row(&pt2.join("square.stl"), &pt2),
         ];
-        db::replace_catalog(&mut conn, &files, &[row_1, row_2], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &files, &[row_1, row_2], &[], &[], &[]).unwrap();
 
         let plan = plan(&conn, &root, None, None).unwrap();
         let group = &plan.groups[0];
@@ -1757,7 +1773,7 @@ mod tests {
             file_row(&nested.join("centaur_A.lys"), &nested),
             file_row(&nested.join("shared_base.stl"), &nested),
         ];
-        db::replace_catalog(&mut conn, &files, &[row_a], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &files, &[row_a], &[], &[], &[]).unwrap();
 
         let plan = plan(&conn, &root, None, None).unwrap();
         let group = &plan.groups[0];
@@ -1828,7 +1844,7 @@ mod tests {
             file_row(&sup.join("names.lys"), &sup),
             file_row(&unsup.join("names.stl"), &unsup),
         ];
-        db::replace_catalog(&mut conn, &files, &[sup_row, unsup_row], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &files, &[sup_row, unsup_row], &[], &[], &[]).unwrap();
 
         let plan = plan(&conn, &root, None, None).unwrap();
         let group = &plan.groups[0];
@@ -1888,7 +1904,7 @@ mod tests {
         row.release_date = Some("2026-05".into());
         row.support_status = Some("supported".into());
         let files = vec![file_row(&sup.join("centaur.lys"), &sup)];
-        db::replace_catalog(&mut conn, &files, &[row], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &files, &[row], &[], &[], &[]).unwrap();
 
         let plan = plan(&conn, &root, None, None).unwrap();
         assert_eq!(
@@ -1952,6 +1968,7 @@ mod tests {
             &mut conn,
             &files,
             &[base_row, row_a, row_b, unsup_row],
+            &[],
             &[],
             &[],
         )
@@ -2051,7 +2068,7 @@ mod tests {
                 support_status: None,
             },
         ];
-        db::replace_catalog(&mut conn, &files, &[sup_row, unsup_row], &[], &assignments)
+        db::replace_catalog(&mut conn, &files, &[sup_row, unsup_row], &[], &assignments, &[])
             .unwrap();
 
         let plan = plan(&conn, &root, None, None).unwrap();
@@ -2161,6 +2178,7 @@ mod tests {
             &[sup_clone_row, unsup_clone_row, loose_row],
             &[],
             &[],
+            &[],
         )
         .unwrap();
 
@@ -2222,7 +2240,7 @@ mod tests {
             file_row(&sup.join("cmd.stl"), &sup),
             file_row(&foreign.join("peryton.stl"), &foreign),
         ];
-        db::replace_catalog(&mut conn, &files, &[knight, peryton], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &files, &[knight, peryton], &[], &[], &[]).unwrap();
 
         let plan = plan(&conn, &root, None, Some("Little Knights")).unwrap();
         let group = &plan.groups[0];

@@ -131,6 +131,64 @@ pub struct DuplicateCancelledStatus {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
+pub enum PackStatus {
+    Started(PackStartedStatus),
+    Progress(PackProgressStatus),
+    Completed(PackCompletedStatus),
+    Failed(PackFailedStatus),
+    Cancelled(PackCancelledStatus),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct PackStartedStatus {
+    pub job_id: String,
+    /// "pack" or "unpack" — one event stream serves both directions.
+    pub action: String,
+    pub total_models: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct PackProgressStatus {
+    pub job_id: String,
+    /// "compress" | "verify" | "extract" — what the current model is doing.
+    pub phase: String,
+    pub current_model: String,
+    /// 1-based position of the current model in the batch.
+    pub model_index: u32,
+    pub total_models: u32,
+    pub processed_size_kb: u32,
+    pub total_size_kb: u32,
+    pub percent: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct PackCompletedStatus {
+    pub job_id: String,
+    pub action: String,
+    pub succeeded: u32,
+    pub total_models: u32,
+    /// Loose files left in place because they changed since compression —
+    /// surfaced so nothing silently stays behind.
+    pub kept_files: Vec<String>,
+    pub elapsed_seconds: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct PackFailedStatus {
+    pub job_id: String,
+    pub error: String,
+    /// Models finished before the failure — their state change is real and
+    /// re-running the batch resumes after them.
+    pub succeeded: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct PackCancelledStatus {
+    pub job_id: String,
+    pub succeeded: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
 pub enum RenderStatus {
     Started(RenderStartedStatus),
     Progress(RenderProgressStatus),

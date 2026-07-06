@@ -17,6 +17,8 @@ pub(crate) static SETTINGS_CACHE: Lazy<Mutex<Settings>> = Lazy::new(|| {
         known_designers: None,
         print_action: None,
         release_field_defaults: None,
+        pack_level: None,
+        pack_cleanup_after: None,
     })
 });
 
@@ -99,6 +101,13 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         .get("release_field_defaults")
         .and_then(|v| serde_json::from_value(v).ok());
 
+    let pack_level = store
+        .get("pack_level")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+
+    let pack_cleanup_after = store.get("pack_cleanup_after").and_then(|v| v.as_bool());
+
     // Seed the lexicon on first load so the UI has something to show and the
     // scanner has something to match; the user's saved list wins thereafter.
     let known_designers = store
@@ -123,6 +132,8 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         known_designers: Some(known_designers),
         print_action,
         release_field_defaults,
+        pack_level,
+        pack_cleanup_after,
     };
 
     {
@@ -201,6 +212,12 @@ pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(
         &store,
         "release_field_defaults",
         settings.release_field_defaults.as_ref().map(|v| json!(v)),
+    );
+    set_or_delete(&store, "pack_level", settings.pack_level.map(|v| json!(v)));
+    set_or_delete(
+        &store,
+        "pack_cleanup_after",
+        settings.pack_cleanup_after.map(|v| json!(v)),
     );
 
     store.save().map_err(|e| e.to_string())?;

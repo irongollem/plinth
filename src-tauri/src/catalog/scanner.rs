@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use super::{FileRow, FileVariantRow, ModelRow, IMAGE_EXTENSIONS, MODEL_EXTENSIONS};
+use super::{pack, FileRow, FileVariantRow, ModelRow, PackRow, IMAGE_EXTENSIONS, MODEL_EXTENSIONS};
 
 /// A `model.json` sidecar as the scanner reads it: the classic StlModel
 /// fields plus the rich 3pk metadata (all optional, so a plain sidecar still
@@ -68,6 +68,8 @@ pub struct ScanOutcome {
     pub metadata_tags: Vec<(String, String)>,
     /// Per-file pose/variant assignments imported from model.json file_poses.
     pub metadata_file_variants: Vec<FileVariantRow>,
+    /// Packed model dirs found via pack.json sidecars.
+    pub packs: Vec<PackRow>,
 }
 
 /// Per-directory accumulator built during the walk.
@@ -111,6 +113,7 @@ pub fn scan(
     // BTreeMap: deterministic order, and ancestor lookups for releases
     let mut dirs: BTreeMap<String, DirInfo> = BTreeMap::new();
     let mut releases: BTreeMap<String, ReleaseInfo> = BTreeMap::new();
+    let mut packs: BTreeMap<String, pack::PackSidecar> = BTreeMap::new();
     let mut seen: u32 = 0;
 
     for entry in WalkDir::new(root)
@@ -158,6 +161,8 @@ pub fn scan(
                 extension,
                 size_bytes,
                 modified_at,
+                archive_path: None,
+                content_hash: None,
             });
 
             let info = dirs.entry(dir_path.clone()).or_default();
@@ -183,6 +188,14 @@ pub fn scan(
             if let Ok(parsed) = read_json::<ModelJson>(path) {
                 dirs.entry(dir_path).or_default().metadata = Some(parsed);
             }
+        } else if file_name == pack::PACK_SIDECAR_NAME {
+            // A packed model: the sidecar stands in for the model files that
+            // now live inside model.plinthpack (synthesized after the walk)
+            if let Ok(parsed) = read_json::<pack::PackSidecar>(path) {
+                if parsed.is_readable() {
+                    packs.insert(dir_path, parsed);
+                }
+            }
         } else if file_name == "release.json" {
             if let Ok(parsed) = read_json::<Release>(path) {
                 releases.insert(
@@ -196,6 +209,81 @@ pub fn scan(
         }
     }
     on_progress(seen, "");
+
+    // Materialize packed models into the same rows loose ones produce: each
+    // pack.json entry becomes a FileRow at the path the file would occupy,
+    // feeding the identical DirInfo accumulation so leaf models, support
+    // inference and file_poses restoration work unchanged. Loose wins: a
+    // path that was walked as a real file (crash mid-pack, ephemeral
+    // extract) is already indexed and its pack entry is skipped.
+    let mut pack_rows: Vec<PackRow> = Vec::new();
+    if !packs.is_empty() {
+        let walked: std::collections::HashSet<String> =
+            files.iter().map(|f| f.path.clone()).collect();
+        for (model_dir, sidecar) in &packs {
+            if cancel.load(Ordering::SeqCst) {
+                return Err(AppError::UserCancelled("Scan cancelled".to_string()));
+            }
+            let archive_path = Path::new(model_dir)
+                .join(pack::PACK_ARCHIVE_NAME)
+                .to_string_lossy()
+                .into_owned();
+            for entry in &sidecar.files {
+                let path = pack::entry_disk_path(Path::new(model_dir), &entry.name);
+                let path_str = path.to_string_lossy().into_owned();
+                if walked.contains(path_str.as_str()) {
+                    continue;
+                }
+                let Some(dir_path) = path.parent().map(|p| p.to_string_lossy().into_owned())
+                else {
+                    continue;
+                };
+                let file_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let extension = path
+                    .extension()
+                    .map(|e| e.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                if !MODEL_EXTENSIONS.contains(&extension.as_str()) {
+                    continue;
+                }
+                let is_presupported_format =
+                    matches!(extension.as_str(), "lys" | "chitu" | "chitubox");
+                let name_support = support_from_filename(&file_name);
+                let size_bytes = entry.size_bytes as i64;
+
+                files.push(FileRow {
+                    path: path_str,
+                    dir_path: dir_path.clone(),
+                    file_name,
+                    extension,
+                    size_bytes,
+                    modified_at: entry.modified_at,
+                    archive_path: Some(archive_path.clone()),
+                    content_hash: Some(entry.checksum.clone()),
+                });
+
+                let info = dirs.entry(dir_path).or_default();
+                info.model_files += 1;
+                info.model_bytes += size_bytes;
+                if is_presupported_format {
+                    info.has_presupported_format = true;
+                }
+                if let Some(status) = name_support {
+                    info.filename_support.get_or_insert(status);
+                }
+            }
+            pack_rows.push(PackRow {
+                model_dir: model_dir.clone(),
+                archive_path,
+                archive_size_bytes: sidecar.archive_size_bytes as i64,
+                archive_checksum: Some(sidecar.archive_checksum.clone()),
+                packed_at: Some(sidecar.packed_at),
+            });
+        }
+    }
 
     // Assemble one model per directory that directly holds model files
     let mut models = Vec::new();
@@ -352,6 +440,7 @@ pub fn scan(
         models,
         metadata_tags,
         metadata_file_variants,
+        packs: pack_rows,
     })
 }
 
@@ -749,13 +838,13 @@ fn date_from_segment(segment: &str) -> Option<String> {
     None
 }
 
-fn is_hidden(path: &Path) -> bool {
+pub(crate) fn is_hidden(path: &Path) -> bool {
     path.file_name()
         .map(|n| n.to_string_lossy().starts_with('.'))
         .unwrap_or(false)
 }
 
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, AppError> {
+pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, AppError> {
     let text = std::fs::read_to_string(path)?;
     Ok(serde_json::from_str(&text)?)
 }

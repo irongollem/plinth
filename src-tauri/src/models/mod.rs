@@ -24,6 +24,12 @@ pub struct Settings {
     /// "remember" checkboxes), keyed by field id — e.g. "designer" so
     /// creators don't retype their own name every release.
     pub release_field_defaults: Option<std::collections::HashMap<String, String>>,
+    /// Zstd level for compressed-at-rest packing (None = 3, zstd's default:
+    /// near-Deflate speed, much better ratio). Advanced knob; -7..=22.
+    pub pack_level: Option<i32>,
+    /// After a packed model's files were extracted for printing/preview,
+    /// remove them again once the action is done (None = true).
+    pub pack_cleanup_after: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

@@ -3,6 +3,7 @@ pub mod db;
 pub mod dups;
 pub mod layout;
 pub mod normalize;
+pub mod pack;
 pub mod scanner;
 
 use serde::{Deserialize, Serialize};
@@ -17,7 +18,7 @@ pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif"];
 
 // ---- internal scan rows ----
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FileRow {
     pub path: String,
     pub dir_path: String,
@@ -25,6 +26,23 @@ pub struct FileRow {
     pub extension: String,
     pub size_bytes: i64,
     pub modified_at: i64,
+    /// Set when the file's bytes live inside a model.plinthpack instead of
+    /// loose on disk — `path` is then the location the file WOULD occupy,
+    /// which keeps every path-keyed table stable across pack/unpack.
+    pub archive_path: Option<String>,
+    /// `blake3:<hex>` known at scan time (pack sidecars carry one per file),
+    /// letting packed files join duplicate detection without disk reads.
+    pub content_hash: Option<String>,
+}
+
+/// One packed model dir, from its pack.json sidecar.
+#[derive(Debug, Clone)]
+pub struct PackRow {
+    pub model_dir: String,
+    pub archive_path: String,
+    pub archive_size_bytes: i64,
+    pub archive_checksum: Option<String>,
+    pub packed_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +121,11 @@ pub struct CatalogEntry {
     /// maps and a detach removes. Differs from the card's group_name when
     /// the member is only in the card via a rename/combine.
     pub source_group: String,
+    /// True when every model file in this member's folder lives inside a
+    /// pack archive (compressed at rest) — byte-needing actions must unpack
+    /// or extract first.
+    #[serde(default)]
+    pub packed: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
@@ -129,6 +152,9 @@ pub struct CatalogGroup {
     pub file_count: u32,
     pub total_size_bytes: f64,
     pub preview_path: Option<String>,
+    /// True when every member of the group is compressed at rest.
+    #[serde(default)]
+    pub packed: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
@@ -197,6 +223,10 @@ pub struct CatalogFile {
     pub file_name: String,
     pub extension: String,
     pub size_bytes: f64,
+    /// True when the bytes live inside the model's pack archive — `path` is
+    /// then where the file lands when extracted, not a file on disk.
+    #[serde(default)]
+    pub packed: bool,
 }
 
 /// The user-editable metadata for one model, saved together from the drawer.
@@ -244,6 +274,16 @@ pub struct CatalogStats {
     pub total_size_bytes: f64,
     pub extensions: Vec<ExtensionStat>,
     pub last_scan_epoch: Option<f64>,
+    /// Compressed-at-rest accounting: how many models are packed, what their
+    /// files would occupy loose, and what the archives actually take.
+    /// total_size_bytes reports logical sizes, so the UI derives real disk
+    /// usage as total − packed_logical + packed_archive.
+    #[serde(default)]
+    pub packed_models: u32,
+    #[serde(default)]
+    pub packed_logical_bytes: f64,
+    #[serde(default)]
+    pub packed_archive_bytes: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

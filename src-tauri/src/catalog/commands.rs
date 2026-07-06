@@ -1,8 +1,10 @@
 use crate::error::AppError;
 use crate::models::events::{
     DuplicateCancelledStatus, DuplicateCompletedStatus, DuplicateFailedStatus,
-    DuplicateProgressStatus, DuplicateStartedStatus, DuplicateStatus, ScanCancelledStatus,
-    ScanCompletedStatus, ScanFailedStatus, ScanProgressStatus, ScanStartedStatus, ScanStatus,
+    DuplicateProgressStatus, DuplicateStartedStatus, DuplicateStatus, PackCancelledStatus,
+    PackCompletedStatus, PackFailedStatus, PackProgressStatus, PackStartedStatus, PackStatus,
+    ScanCancelledStatus, ScanCompletedStatus, ScanFailedStatus, ScanProgressStatus,
+    ScanStartedStatus, ScanStatus,
 };
 use once_cell::sync::Lazy;
 use rusqlite::Connection;
@@ -16,9 +18,10 @@ use tauri_specta::Event;
 use uuid::Uuid;
 
 use super::{
-    db, dups, normalize, scanner, BatchOutcome, CatalogEntry, CatalogFile, CatalogGroupResult,
-    CatalogSearchResult, CatalogStats, DesignerCount, DuplicateGroup, FileVariant, ModelMetaUpdate,
-    MoveOperation, NormalizeOp, NormalizePlan, ReleaseSummary, TagCount,
+    db, dups, normalize, pack, scanner, BatchOutcome, CatalogEntry, CatalogFile,
+    CatalogGroupResult, CatalogSearchResult, CatalogStats, DesignerCount, DuplicateGroup,
+    FileVariant, ModelMetaUpdate, MoveOperation, NormalizeOp, NormalizePlan, ReleaseSummary,
+    TagCount,
 };
 
 /// Scan and duplicate jobs share one registry; both cancel through
@@ -116,6 +119,7 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
                 &outcome.models,
                 &outcome.metadata_tags,
                 &outcome.metadata_file_variants,
+                &outcome.packs,
             )?;
             Ok((outcome.files.len() as u32, outcome.models.len() as u32))
         })();
@@ -238,6 +242,245 @@ pub async fn cancel_catalog_job(job_id: String) -> Result<(), AppError> {
             job_id
         ))),
     }
+}
+
+/// Compress each model dir into a model.plinthpack (compressed at rest),
+/// sequentially — per-model atomicity keeps the crash surface to one model,
+/// and a cancelled or crashed batch resumes by re-running the same selection
+/// (already-packed models just finish their bookkeeping and count as done).
+/// Cancel via cancel_catalog_job; progress via PackStatus events.
+#[tauri::command]
+#[specta::specta]
+pub async fn pack_models(
+    app_handle: AppHandle,
+    model_dirs: Vec<String>,
+) -> Result<String, AppError> {
+    if model_dirs.is_empty() {
+        return Err(AppError::InvalidInput("No models to pack".to_string()));
+    }
+    // Zstd level from settings (async store read) before the blocking job
+    let level = crate::settings::get_settings(app_handle.clone())
+        .await
+        .ok()
+        .and_then(|s| s.pack_level)
+        .map(i64::from);
+    let app_version = app_handle.package_info().version.to_string();
+
+    let job_id = Uuid::new_v4().to_string();
+    let cancel = register_job(&job_id)?;
+    let total_models = model_dirs.len() as u32;
+    PackStatus::Started(PackStartedStatus {
+        job_id: job_id.clone(),
+        action: "pack".to_string(),
+        total_models,
+    })
+    .emit(&app_handle)
+    .ok();
+
+    let job_id_clone = job_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = Instant::now();
+        let mut succeeded = 0u32;
+        let mut kept_files: Vec<String> = Vec::new();
+        let result: Result<(), AppError> = (|| {
+            let mut conn = open_db(&app_handle)?;
+            // Batch-wide percent: compress + verify each stream the model's
+            // bytes once, so the denominator is twice the loose total
+            let mut total_kb: u64 = 0;
+            for dir in &model_dirs {
+                total_kb += (db::dir_size_bytes(&conn, dir)?.max(0) as u64) / 1024;
+            }
+            let total_kb = (total_kb * 2).max(1);
+            let mut processed_kb: u64 = 0;
+            let mut last_emit = Instant::now() - PROGRESS_EMIT_INTERVAL;
+
+            for (index, dir) in model_dirs.iter().enumerate() {
+                if cancel.load(Ordering::SeqCst) {
+                    return Err(AppError::UserCancelled("Pack cancelled".to_string()));
+                }
+                let outcome = pack::pack_model(
+                    &app_version,
+                    Path::new(dir),
+                    level,
+                    &cancel,
+                    |phase, kb| {
+                        processed_kb += kb as u64;
+                        if last_emit.elapsed() >= PROGRESS_EMIT_INTERVAL {
+                            last_emit = Instant::now();
+                            PackStatus::Progress(PackProgressStatus {
+                                job_id: job_id_clone.clone(),
+                                phase: match phase {
+                                    pack::PackPhase::Compress => "compress".to_string(),
+                                    pack::PackPhase::Verify => "verify".to_string(),
+                                },
+                                current_model: dir.clone(),
+                                model_index: index as u32 + 1,
+                                total_models,
+                                processed_size_kb: processed_kb.min(u32::MAX as u64) as u32,
+                                total_size_kb: total_kb.min(u32::MAX as u64) as u32,
+                                percent: ((processed_kb * 100) / total_kb).min(100) as u32,
+                            })
+                            .emit(&app_handle)
+                            .ok();
+                        }
+                        true
+                    },
+                )?;
+                db::mark_packed(&mut conn, dir, &outcome.sidecar)?;
+                kept_files.extend(outcome.kept);
+                succeeded += 1;
+            }
+            Ok(())
+        })();
+
+        unregister_job(&job_id_clone);
+        match result {
+            Ok(()) => {
+                PackStatus::Completed(PackCompletedStatus {
+                    job_id: job_id_clone,
+                    action: "pack".to_string(),
+                    succeeded,
+                    total_models,
+                    kept_files,
+                    elapsed_seconds: started.elapsed().as_secs_f64(),
+                })
+                .emit(&app_handle)
+                .ok();
+            }
+            Err(AppError::UserCancelled(_)) => {
+                PackStatus::Cancelled(PackCancelledStatus {
+                    job_id: job_id_clone,
+                    succeeded,
+                })
+                .emit(&app_handle)
+                .ok();
+            }
+            Err(e) => {
+                PackStatus::Failed(PackFailedStatus {
+                    job_id: job_id_clone,
+                    error: e.to_string(),
+                    succeeded,
+                })
+                .emit(&app_handle)
+                .ok();
+            }
+        }
+    });
+
+    Ok(job_id)
+}
+
+/// Restore packed models to loose files (archive + sidecar removed), the
+/// mirror of pack_models: sequential, cancellable between models, index
+/// updated per model so no rescan is needed.
+#[tauri::command]
+#[specta::specta]
+pub async fn unpack_models(
+    app_handle: AppHandle,
+    model_dirs: Vec<String>,
+) -> Result<String, AppError> {
+    if model_dirs.is_empty() {
+        return Err(AppError::InvalidInput("No models to unpack".to_string()));
+    }
+    let job_id = Uuid::new_v4().to_string();
+    let cancel = register_job(&job_id)?;
+    let total_models = model_dirs.len() as u32;
+    PackStatus::Started(PackStartedStatus {
+        job_id: job_id.clone(),
+        action: "unpack".to_string(),
+        total_models,
+    })
+    .emit(&app_handle)
+    .ok();
+
+    let job_id_clone = job_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = Instant::now();
+        let mut succeeded = 0u32;
+        let result: Result<(), AppError> = (|| {
+            let mut conn = open_db(&app_handle)?;
+            for (index, dir) in model_dirs.iter().enumerate() {
+                if cancel.load(Ordering::SeqCst) {
+                    return Err(AppError::UserCancelled("Unpack cancelled".to_string()));
+                }
+                // Extraction has no per-file callback; per-model progress is
+                // plenty at this granularity
+                PackStatus::Progress(PackProgressStatus {
+                    job_id: job_id_clone.clone(),
+                    phase: "extract".to_string(),
+                    current_model: dir.clone(),
+                    model_index: index as u32 + 1,
+                    total_models,
+                    processed_size_kb: 0,
+                    total_size_kb: 0,
+                    percent: ((index as u32) * 100) / total_models.max(1),
+                })
+                .emit(&app_handle)
+                .ok();
+
+                let entries = pack::unpack_model(Path::new(dir))?;
+                // Fresh stats for the index: extraction stamps new mtimes,
+                // and recording them alongside the kept content_hash is what
+                // keeps the next rescan from dropping the hash as "changed"
+                let fresh: Vec<(String, i64, i64)> = entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let path = pack::entry_disk_path(Path::new(dir), &entry.name);
+                        let metadata = std::fs::metadata(&path).ok()?;
+                        let modified_at = metadata
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        Some((
+                            path.to_string_lossy().into_owned(),
+                            metadata.len() as i64,
+                            modified_at,
+                        ))
+                    })
+                    .collect();
+                db::mark_unpacked(&mut conn, dir, &fresh)?;
+                succeeded += 1;
+            }
+            Ok(())
+        })();
+
+        unregister_job(&job_id_clone);
+        match result {
+            Ok(()) => {
+                PackStatus::Completed(PackCompletedStatus {
+                    job_id: job_id_clone,
+                    action: "unpack".to_string(),
+                    succeeded,
+                    total_models,
+                    kept_files: Vec::new(),
+                    elapsed_seconds: started.elapsed().as_secs_f64(),
+                })
+                .emit(&app_handle)
+                .ok();
+            }
+            Err(AppError::UserCancelled(_)) => {
+                PackStatus::Cancelled(PackCancelledStatus {
+                    job_id: job_id_clone,
+                    succeeded,
+                })
+                .emit(&app_handle)
+                .ok();
+            }
+            Err(e) => {
+                PackStatus::Failed(PackFailedStatus {
+                    job_id: job_id_clone,
+                    error: e.to_string(),
+                    succeeded,
+                })
+                .emit(&app_handle)
+                .ok();
+            }
+        }
+    });
+
+    Ok(job_id)
 }
 
 #[tauri::command]
@@ -765,7 +1008,20 @@ pub async fn delete_duplicate_files(
     tauri::async_runtime::spawn_blocking(move || {
         let mut removed: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
+        // A packed file has no loose bytes to delete — removing its index row
+        // here would desync it from the archive, so refuse per path
+        let packed = {
+            let conn = open_db(&app_handle)?;
+            db::archive_paths_for(&conn, &file_paths)?
+        };
         for path in file_paths {
+            if packed.contains_key(&path) {
+                errors.push(format!(
+                    "{}: packed (compressed at rest) — unpack the model first",
+                    path
+                ));
+                continue;
+            }
             match std::fs::remove_file(&path) {
                 Ok(()) => removed.push(path),
                 // Already gone from disk still means gone from the catalog
@@ -801,7 +1057,31 @@ pub async fn merge_duplicate_files(
 ) -> Result<BatchOutcome, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let keep = PathBuf::from(&keep_path);
-        let (merged, errors) = dups::merge_duplicates(&keep, &duplicate_paths)?;
+        // Hardlink merging needs both inodes on disk; a packed side has
+        // neither. Refuse packed duplicates per path (the rest still merge),
+        // and refuse outright when the keeper itself is packed.
+        let (duplicate_paths, mut packed_errors) = {
+            let conn = open_db(&app_handle)?;
+            let mut check = duplicate_paths.clone();
+            check.push(keep_path.clone());
+            let packed = db::archive_paths_for(&conn, &check)?;
+            if packed.contains_key(&keep_path) {
+                return Err(AppError::InvalidInput(
+                    "The file to keep is packed (compressed at rest) — unpack the model first"
+                        .to_string(),
+                ));
+            }
+            let (packed_dups, loose): (Vec<String>, Vec<String>) = duplicate_paths
+                .into_iter()
+                .partition(|p| packed.contains_key(p));
+            let errors: Vec<String> = packed_dups
+                .into_iter()
+                .map(|p| format!("{}: packed (compressed at rest) — unpack the model first", p))
+                .collect();
+            (loose, errors)
+        };
+        let (merged, mut errors) = dups::merge_duplicates(&keep, &duplicate_paths)?;
+        errors.append(&mut packed_errors);
         if !merged.is_empty() {
             if let Some(identity) = dups::file_identity(&keep) {
                 // Fresh mtimes ride along: the merged paths now carry the
@@ -913,6 +1193,16 @@ pub async fn batch_move_models(
 
             if !from_path.exists() {
                 errors.push(format!("Source not found: {}", op.from));
+                continue;
+            }
+            // move_model's index re-keying doesn't rewrite archive_path or
+            // packs rows, so a packed model would end up pointing at the old
+            // location — refuse until it's unpacked
+            if db::dir_contains_pack(&conn, &op.from)? {
+                errors.push(format!(
+                    "{}: packed (compressed at rest) — unpack the model before moving it",
+                    op.from
+                ));
                 continue;
             }
             // rename() onto an existing path is platform-dependent (may
