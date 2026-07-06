@@ -61,6 +61,10 @@ pub struct RenderOptions {
     /// the part named *base* (render_mini.py --align-parts)
     #[serde(default)]
     pub align_parts: bool,
+    /// JSON overrides for the script's LOOK recipe, passed verbatim as
+    /// --config. Knob paths and defaults mirror src/utils/renderLookSchema.ts
+    #[serde(default)]
+    pub look_config: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

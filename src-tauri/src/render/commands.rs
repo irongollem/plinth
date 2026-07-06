@@ -55,6 +55,30 @@ pub async fn start_render(
         }
     }
 
+    // Broken look overrides fail HERE, not seconds later inside a Blender
+    // cold start. The script re-validates anyway (defense in depth), but a
+    // render that can only die deserves an instant, clear error.
+    if let Some(config) = options
+        .look_config
+        .as_deref()
+        .filter(|c| !c.trim().is_empty())
+    {
+        match serde_json::from_str::<serde_json::Value>(config) {
+            Ok(serde_json::Value::Object(_)) => {}
+            Ok(_) => {
+                return Err(AppError::InvalidInput(
+                    "Look overrides must be a JSON object".to_string(),
+                ))
+            }
+            Err(e) => {
+                return Err(AppError::InvalidInput(format!(
+                    "Look overrides are not valid JSON: {}",
+                    e
+                )))
+            }
+        }
+    }
+
     let blender = engine::detect_blender_cached().await?;
     let script = engine::materialize_render_script(&app_handle)?;
 

@@ -241,6 +241,15 @@ pub fn build_render_command(
     if options.align_parts {
         cmd.arg("--align-parts");
     }
+    // Inline JSON as ONE argv element — no shell is involved, so no quoting
+    // or length worries, and concurrent jobs share no temp-file state
+    if let Some(config) = options
+        .look_config
+        .as_deref()
+        .filter(|c| !c.trim().is_empty())
+    {
+        cmd.arg("--config").arg(config);
+    }
     cmd.arg("--out").arg(output_path);
     cmd
 }
@@ -318,6 +327,7 @@ mod tests {
             output_path: None,
             overwrite: true,
             align_parts: false,
+            look_config: Some(r#"{"key":{"energy":1500}}"#.to_string()),
         };
         let mut cmd = build_render_command(
             &blender,
@@ -366,6 +376,65 @@ mod tests {
             buf.extend_from_slice(&0u16.to_le_bytes());
         }
         std::fs::write(path, buf).unwrap();
+    }
+
+    /// The look overrides must survive as EXACTLY one argv element — if the
+    /// JSON ever got split on whitespace or shell-quoted, Python would see
+    /// garbage paths instead of a config.
+    #[test]
+    fn look_config_passes_as_single_arg() {
+        let blender = BlenderInfo {
+            path: "blender".to_string(),
+            version: "Blender 4.2.1".to_string(),
+        };
+        let json = r#"{"key": {"energy": 5000}, "sss_radius": [1, 0.5, 0.25]}"#;
+        let options = RenderOptions {
+            rotate: (90.0, 0.0, 0.0),
+            color: None,
+            azimuth: None,
+            elevation: None,
+            zoom: None,
+            resolution: None,
+            samples: None,
+            look: None,
+            output_path: None,
+            overwrite: false,
+            align_parts: false,
+            look_config: Some(json.to_string()),
+        };
+        let cmd = build_render_command(
+            &blender,
+            Path::new("render_mini.py"),
+            &["model.stl".to_string()],
+            &options,
+            Path::new("out.png"),
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let idx = args
+            .iter()
+            .position(|a| a == "--config")
+            .expect("--config missing");
+        assert_eq!(args[idx + 1], json);
+
+        // None and blank configs add no flag at all
+        for empty in [None, Some("  ".to_string())] {
+            let options = RenderOptions {
+                look_config: empty,
+                ..options.clone()
+            };
+            let cmd = build_render_command(
+                &blender,
+                Path::new("render_mini.py"),
+                &["model.stl".to_string()],
+                &options,
+                Path::new("out.png"),
+            );
+            assert!(!cmd.as_std().get_args().any(|a| a == "--config"));
+        }
     }
 
     #[test]
