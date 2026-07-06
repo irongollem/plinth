@@ -174,6 +174,66 @@
       <div class="flex flex-col gap-1.5">
         <span
           class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          >PACKED MODELS</span
+        >
+        <div
+          class="flex gap-1 bg-base-200 border border-base-content/10 rounded-full p-0.75 w-55"
+        >
+          <button
+            type="button"
+            class="flex-1 text-center font-semibold text-[11px] py-1.5 rounded-full cursor-pointer"
+            :class="
+              packCleanup
+                ? 'bg-primary text-primary-content'
+                : 'text-base-content/60'
+            "
+            @click="settings.pack_cleanup_after = true"
+          >
+            Clean up after use
+          </button>
+          <button
+            type="button"
+            class="flex-1 text-center font-semibold text-[11px] py-1.5 rounded-full cursor-pointer"
+            :class="
+              !packCleanup
+                ? 'bg-primary text-primary-content'
+                : 'text-base-content/60'
+            "
+            @click="settings.pack_cleanup_after = false"
+          >
+            Keep extracted
+          </button>
+        </div>
+        <label class="flex items-center gap-2 text-[11px]">
+          <span class="text-base-content/60">Compression level</span>
+          <input
+            :value="settings.pack_level ?? 3"
+            type="number"
+            min="1"
+            max="19"
+            class="input input-xs w-16 font-mono"
+            @change="
+              settings.pack_level =
+                Number.parseInt(
+                  ($event.target as HTMLInputElement).value,
+                  10,
+                ) || null
+            "
+          />
+          <span class="text-base-content/40">zstd, default 3</span>
+        </label>
+        <p class="text-[10.5px] text-base-content/40">
+          Printing or previewing a packed model extracts just the needed files
+          from its archive. Clean up after use removes those temporary copies
+          again once the action is done — the closest thing to printing straight
+          from the bundle. Higher compression levels pack smaller but slower;
+          extraction speed is unaffected.
+        </p>
+      </div>
+
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
           >APPEARANCE</span
         >
         <div
@@ -240,6 +300,9 @@ const settings = ref<Settings>({
 const printAction = computed(
   () => settings.value.print_action ?? "open-in-slicer",
 );
+
+// Unset means the default: extracted working copies are taken back after use
+const packCleanup = computed(() => settings.value.pack_cleanup_after ?? true);
 
 /* The scanner's designer lexicon, editable here; seeded server-side with
    sensible defaults. Mutating the array triggers the deep-watch auto-save. */

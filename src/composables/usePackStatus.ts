@@ -20,6 +20,11 @@ export function usePackStatus() {
   onMounted(async () => {
     unlisten = await events.packStatus.listen((event) => {
       packStatus.value = event.payload;
+      // ensure_model_files is awaited (no job_id return value), so the
+      // Started event is where cancellation learns the id
+      if ("Started" in event.payload) {
+        packJobId.value = event.payload.Started.job_id;
+      }
       if (
         "Completed" in event.payload ||
         "Failed" in event.payload ||

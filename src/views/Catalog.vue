@@ -107,6 +107,15 @@
       >
         Clean up…
       </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        :disabled="!catalogRoot || isScanning || isPacking"
+        title="Compress models into pack archives to save disk space — scoped to the designer filter when one is set. Safe to cancel; re-running resumes."
+        @click="bulkPack()"
+      >
+        Pack…
+      </button>
       <span class="flex-1"></span>
       <span class="font-mono text-[11px] text-base-content/40">
         {{ total.toLocaleString() }} result{{ total === 1 ? "" : "s" }}
@@ -119,6 +128,22 @@
         Indexing... {{ scanProgress?.files_indexed ?? 0 }} files
         <span class="opacity-50">{{ scanProgress?.current_dir }}</span>
       </span>
+    </div>
+    <!-- Bulk pack progress lives at page level: the job may span models the
+         drawer never opened -->
+    <div v-if="isPacking" class="text-xs opacity-70 flex items-center gap-2">
+      <span class="loading loading-spinner loading-xs"></span>
+      <span>
+        {{ packAction === "unpack" ? "Unpacking" : "Packing" }}…
+        <template v-if="packProgress">
+          {{ packProgress.model_index }}/{{ packProgress.total_models }} ·
+          {{ packProgress.phase }} · {{ packProgress.percent }}%
+          <span class="opacity-50">{{ packProgress.current_model }}</span>
+        </template>
+      </span>
+      <button type="button" class="btn btn-xs btn-ghost" @click="cancelPack">
+        cancel
+      </button>
     </div>
     <div v-if="scanError" class="alert alert-error text-xs py-2">
       {{ scanError }}
@@ -168,6 +193,15 @@
           @click="startCombine"
         >
           Combine into one…
+        </button>
+        <button
+          type="button"
+          class="btn btn-xs"
+          :disabled="isPacking"
+          title="Compress the selected models into pack archives"
+          @click="bulkPack(checkedGroups)"
+        >
+          Pack…
         </button>
         <button
           type="button"
@@ -396,6 +430,13 @@
               :parts="stlPaths"
               compact
             />
+            <div
+              v-else-if="viewer3dBusy"
+              class="absolute inset-0 flex items-center justify-center gap-2 bg-base-300/70 font-mono text-[10.5px]"
+            >
+              <span class="loading loading-spinner loading-xs"></span>
+              unpacking…
+            </div>
             <img
               v-else-if="drawerPreview"
               :src="convertFileSrc(drawerPreview)"
@@ -434,15 +475,18 @@
           </div>
 
           <!-- Primary actions ride right under the preview they act on.
-               A packed member's bytes live in the archive, so every
-               byte-needing action waits for an unpack (transparent
-               extraction is the next milestone). -->
+               On a packed member the needed files are extracted from the
+               archive just-in-time (ensure_model_files) — the archive stays
+               authoritative and cleanup takes the copies back. -->
           <div class="flex gap-1.5 mt-2">
             <button
               type="button"
               class="flex-1 text-center font-semibold text-[11px] tracking-wider bg-primary text-primary-content rounded-md py-2 cursor-pointer disabled:opacity-40"
-              :disabled="selected.packed"
-              :title="selected.packed ? 'Packed — unpack to print' : undefined"
+              :title="
+                selected.packed
+                  ? 'Files extract from the archive automatically'
+                  : undefined
+              "
               @click="printModel"
             >
               PRINT
@@ -455,19 +499,25 @@
                   ? 'border-primary text-primary'
                   : 'border-base-content/15'
               "
-              :disabled="!stlPaths.length || selected.packed"
+              :disabled="!stlPaths.length || viewer3dBusy"
               :title="
-                selected.packed ? 'Packed — unpack to preview' : undefined
+                selected.packed
+                  ? 'Files extract from the archive automatically'
+                  : undefined
               "
-              @click="show3d = !show3d"
+              @click="toggle3d"
             >
               3D
             </button>
             <button
               type="button"
               class="flex-1 text-center font-semibold text-[11px] tracking-wider border border-base-content/15 rounded-md py-2 cursor-pointer disabled:opacity-40"
-              :disabled="!stlPaths.length || selected.packed"
-              :title="selected.packed ? 'Packed — unpack to render' : undefined"
+              :disabled="!stlPaths.length"
+              :title="
+                selected.packed
+                  ? 'Files extract from the archive automatically'
+                  : undefined
+              "
               @click="renderSelected"
             >
               RENDER
@@ -1197,6 +1247,25 @@
             </label>
           </li>
         </ul>
+        <!-- "print straight from the bundle": packed files are extracted
+             just for this print and taken back afterwards -->
+        <label
+          v-if="printSelectionPacked"
+          class="flex items-center gap-2 text-[11px] cursor-pointer"
+        >
+          <input
+            v-model="packCleanupAfter"
+            type="checkbox"
+            class="checkbox checkbox-xs"
+            @change="persistCleanupAfter"
+          />
+          <span>
+            Clean up extracted files after sending
+            <span class="text-base-content/50">
+              — this model is packed; the slicer gets temporary copies
+            </span>
+          </span>
+        </label>
         <div class="flex items-center gap-2">
           <button
             type="button"
@@ -1219,6 +1288,10 @@
             :disabled="!printSelection.length || printBusy"
             @click="sendToSlicer"
           >
+            <span
+              v-if="printBusy"
+              class="loading loading-spinner loading-xs"
+            ></span>
             Send {{ printSelection.length }} to slicer
           </button>
         </div>
@@ -1778,8 +1851,38 @@ const basename = (path: string) => path.split(/[\\/]/).pop() ?? path;
 watch(selected, (next, prev) => {
   const nextKey = next ? memberKey(next) : null;
   const prevKey = prev ? memberKey(prev) : null;
-  if (nextKey !== prevKey) show3d.value = false;
+  if (nextKey !== prevKey) close3d();
 });
+
+/* On a packed member the viewer's STLs are extracted first (the viewport
+   readFile()s real paths); closing the viewer takes the copies back. */
+const viewer3dBusy = ref(false);
+const viewerExtracted = ref<string[]>([]);
+
+const toggle3d = async () => {
+  if (show3d.value) {
+    close3d();
+    return;
+  }
+  if (selected.value?.packed) {
+    viewer3dBusy.value = true;
+    const extracted = await ensureLoose(stlPaths.value);
+    viewer3dBusy.value = false;
+    if (extracted === null) return;
+    viewerExtracted.value = extracted;
+  }
+  show3d.value = true;
+};
+
+const close3d = () => {
+  show3d.value = false;
+  show3dModal.value = false;
+  if (viewerExtracted.value.length && packCleanupAfter.value) {
+    // the viewport holds the geometry in memory; the files can go
+    commands.cleanupEphemeralFiles(viewerExtracted.value);
+  }
+  viewerExtracted.value = [];
+};
 
 const selectEntry = async (entry: CatalogEntry) => {
   selected.value = entry;
@@ -2187,6 +2290,95 @@ const refreshSelected = async () => {
   if (updated) selected.value = updated;
 };
 
+/* ---- transparent use: materialize packed bytes just-in-time ---- */
+// Resolves when every path is readable on disk. Returns the ephemeral
+// extracts (what cleanup may take back afterwards), or null on failure.
+// Progress/cancel ride the same PackStatus stream as pack jobs.
+const ensureLoose = async (paths: string[]): Promise<string[] | null> => {
+  if (!paths.length) return [];
+  const result = await commands.ensureModelFiles(paths);
+  if (result.status !== "ok") {
+    toastStore.reportError(
+      "Failed to extract from the pack archive",
+      result.error,
+    );
+    return null;
+  }
+  return result.data.extracted;
+};
+
+// The user's cleanup-after preference, mirrored from settings; the print
+// modal's checkbox writes it back. Default true — "print straight from the
+// bundle" is the point of packing.
+const packCleanupAfter = ref(true);
+onMounted(async () => {
+  const result = await commands.getSettings();
+  if (result.status === "ok") {
+    packCleanupAfter.value = result.data.pack_cleanup_after ?? true;
+  }
+});
+const persistCleanupAfter = async () => {
+  const result = await commands.getSettings();
+  if (result.status !== "ok") return;
+  await commands.setSettings({
+    ...result.data,
+    pack_cleanup_after: packCleanupAfter.value,
+  });
+};
+
+// Deleting the copies right after openWithDefaultApp returns would race the
+// slicer's own read. The delay covers a normal open; a file the slicer still
+// holds (Windows) refuses deletion and stays registered for the exit sweep,
+// and the size+mtime guard keeps anything the slicer saved over.
+const SLICER_CLEANUP_DELAY_MS = 15_000;
+const scheduleSlicerCleanup = (paths: string[]) => {
+  setTimeout(async () => {
+    const result = await commands.cleanupEphemeralFiles(paths);
+    if (result.status === "ok") {
+      for (const kept of result.data.errors) toastStore.addToast(kept, "info");
+    }
+  }, SLICER_CLEANUP_DELAY_MS);
+};
+
+/* ---- bulk pack: compress everything under the current scope ---- */
+// Scope order: explicit card selection > the designer facet > the whole
+// catalog. The backend job is sequential and per-folder atomic, so a
+// cancelled designer-wide run resumes by clicking Pack… again.
+const bulkPack = async (groupNames: string[] = []) => {
+  if (isPacking.value) return;
+  const candidates = await commands.getPackCandidates(
+    groupNames.length ? null : designerFilter.value || null,
+    groupNames,
+  );
+  if (candidates.status !== "ok") {
+    toastStore.reportError("Failed to list pack candidates", candidates.error);
+    return;
+  }
+  const dirs = candidates.data;
+  if (!dirs.length) {
+    toastStore.addToast(
+      "Nothing to pack — everything in scope is already packed",
+      "info",
+    );
+    return;
+  }
+  const scope = groupNames.length
+    ? `${groupNames.length} selected model${groupNames.length === 1 ? "" : "s"}`
+    : designerFilter.value
+      ? `every ${designerFilter.value} model`
+      : "the whole catalog";
+  const confirmed = await confirm(
+    `Compress ${dirs.length} folder${dirs.length === 1 ? "" : "s"} — ${scope} — into pack archives?\n\n` +
+      "Runs one folder at a time and is safe to cancel: finished folders stay packed, and re-running Pack… resumes where it left off.",
+    { title: "Pack models", kind: "info" },
+  );
+  if (!confirmed) return;
+  const result = await startPack(dirs);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to start packing", result.error);
+  }
+};
+
 /* ---- compressed at rest: pack/unpack the open model ---- */
 // Packing is per member FOLDER (nested variant folders pack themselves), so
 // the group-level action fans out to every member dir in the relevant state.
@@ -2252,8 +2444,16 @@ watch(packFinishedCount, async () => {
 // Carries the model's dir_path AND variant_key so the finished render comes
 // back as THIS pose's preview, not the whole folder's (poses in one dump
 // folder share a dir_path — only the variant_key tells them apart)
-const renderSelected = () => {
+const renderSelected = async () => {
   if (!selected.value) return;
+  if (selected.value.packed) {
+    // Blender reads the STLs from disk in the Render tab, so they must
+    // exist before the handoff. No active cleanup here: the render needs
+    // them until it finishes elsewhere — the exit sweep (or the next
+    // manual cleanup) takes them back.
+    const extracted = await ensureLoose(stlPaths.value);
+    if (extracted === null) return;
+  }
   releasesStore.requestRender(
     stlPaths.value,
     selected.value.dir_path,
@@ -2289,6 +2489,11 @@ const showPrintModal = ref(false);
 const printSelection = ref<string[]>([]);
 const printBusy = ref(false);
 
+// any ticked file still inside the archive → the modal offers cleanup-after
+const printSelectionPacked = computed(() =>
+  files.value.some((f) => f.packed && printSelection.value.includes(f.path)),
+);
+
 const togglePrintFile = (path: string) => {
   printSelection.value = printSelection.value.includes(path)
     ? printSelection.value.filter((p) => p !== path)
@@ -2316,12 +2521,19 @@ const sendToSlicer = async () => {
   if (!printSelection.value.length) return;
   printBusy.value = true;
   try {
+    // Packed files materialize just-in-time — only the ticked entries are
+    // pulled from the archive, "print straight from the bundle"
+    const extracted = await ensureLoose(printSelection.value);
+    if (extracted === null) return;
     // Our own command, not the opener plugin: its open_path is
     // fire-and-forget and reports success even when the OS has no app
     // for the file type — a print button that silently does nothing
     const result = await commands.openWithDefaultApp(printSelection.value);
     if (result.status === "ok") {
       showPrintModal.value = false;
+      if (extracted.length && packCleanupAfter.value) {
+        scheduleSlicerCleanup(extracted);
+      }
       return;
     }
     // No slicer owns the extension: show why, then still be useful —
