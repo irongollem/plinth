@@ -232,6 +232,8 @@ const settings = ref<Settings>({
   known_designers: null,
   print_action: null,
   release_field_defaults: null,
+  pack_level: null,
+  pack_cleanup_after: null,
 });
 
 // Unset means the default behavior: hand files straight to the slicer

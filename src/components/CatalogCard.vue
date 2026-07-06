@@ -52,6 +52,14 @@ const previewUrl = computed(() =>
         @click.stop
         @change="$emit('toggleCheck', group)"
       />
+      <!-- compressed at rest: the whole group lives in pack archives -->
+      <span
+        v-if="group.packed"
+        class="badge badge-xs font-mono bg-base-100/80 absolute top-1.5 right-1.5"
+        title="Packed — compressed at rest"
+      >
+        📦
+      </span>
       <!-- support variants at a glance -->
       <div
         v-if="group.support_statuses.length"

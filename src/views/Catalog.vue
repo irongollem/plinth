@@ -433,11 +433,16 @@
             </button>
           </div>
 
-          <!-- Primary actions ride right under the preview they act on -->
+          <!-- Primary actions ride right under the preview they act on.
+               A packed member's bytes live in the archive, so every
+               byte-needing action waits for an unpack (transparent
+               extraction is the next milestone). -->
           <div class="flex gap-1.5 mt-2">
             <button
               type="button"
-              class="flex-1 text-center font-semibold text-[11px] tracking-wider bg-primary text-primary-content rounded-md py-2 cursor-pointer"
+              class="flex-1 text-center font-semibold text-[11px] tracking-wider bg-primary text-primary-content rounded-md py-2 cursor-pointer disabled:opacity-40"
+              :disabled="selected.packed"
+              :title="selected.packed ? 'Packed — unpack to print' : undefined"
               @click="printModel"
             >
               PRINT
@@ -450,7 +455,10 @@
                   ? 'border-primary text-primary'
                   : 'border-base-content/15'
               "
-              :disabled="!stlPaths.length"
+              :disabled="!stlPaths.length || selected.packed"
+              :title="
+                selected.packed ? 'Packed — unpack to preview' : undefined
+              "
               @click="show3d = !show3d"
             >
               3D
@@ -458,12 +466,76 @@
             <button
               type="button"
               class="flex-1 text-center font-semibold text-[11px] tracking-wider border border-base-content/15 rounded-md py-2 cursor-pointer disabled:opacity-40"
-              :disabled="!stlPaths.length"
+              :disabled="!stlPaths.length || selected.packed"
+              :title="selected.packed ? 'Packed — unpack to render' : undefined"
               @click="renderSelected"
             >
               RENDER
             </button>
           </div>
+
+          <!-- Compressed-at-rest state: a running job, the packed banner,
+               or the offer to pack -->
+          <div
+            v-if="isPacking"
+            class="mt-2 border border-base-content/15 rounded-md px-2 py-1.5 flex items-center gap-2 font-mono text-[10.5px]"
+          >
+            <span class="loading loading-spinner loading-xs shrink-0"></span>
+            <span class="flex-1 truncate">
+              {{ packAction === "unpack" ? "Unpacking" : "Packing" }}
+              <template v-if="packProgress">
+                · {{ packProgress.model_index }}/{{
+                  packProgress.total_models
+                }}
+                · {{ packProgress.phase }} · {{ packProgress.percent }}%
+              </template>
+            </span>
+            <button
+              type="button"
+              class="btn btn-xs btn-ghost"
+              @click="cancelPack"
+            >
+              cancel
+            </button>
+          </div>
+          <div
+            v-else-if="selected.packed || packedDirs.length"
+            class="mt-2 border border-primary/30 bg-primary/5 rounded-md px-2 py-1.5 flex items-center gap-2 font-mono text-[10.5px]"
+          >
+            <span title="Compressed at rest">📦</span>
+            <span class="flex-1 truncate">
+              {{
+                packableDirs.length
+                  ? `${packedDirs.length} of ${packedDirs.length + packableDirs.length} folders packed`
+                  : "Packed — files live in a compressed archive"
+              }}
+            </span>
+            <button
+              v-if="packableDirs.length"
+              type="button"
+              class="btn btn-xs btn-ghost"
+              title="Compress the remaining folders too"
+              @click="packSelectedGroup"
+            >
+              pack rest
+            </button>
+            <button
+              type="button"
+              class="btn btn-xs"
+              @click="unpackSelectedGroup"
+            >
+              Unpack
+            </button>
+          </div>
+          <button
+            v-else-if="packableDirs.length"
+            type="button"
+            class="mt-2 w-full font-mono text-[10.5px] text-base-content/40 hover:text-base-content/70 border border-dashed border-base-content/15 rounded-md py-1 cursor-pointer"
+            title="Compress this model's files into pack archives to save disk space — it stays in the catalog and unpacks on demand"
+            @click="packSelectedGroup"
+          >
+            📦 pack — save disk space
+          </button>
           <div class="py-3.5 flex flex-col gap-2.5">
             <div>
               <!-- Group title: the logical model; rename applies to the whole
@@ -917,6 +989,13 @@
                 >
                   ▸ {{ fileVariantMap[file.path] }}
                 </span>
+                <span
+                  v-if="file.packed"
+                  class="shrink-0"
+                  title="in the pack archive — extracted on unpack"
+                >
+                  📦
+                </span>
                 <span class="opacity-60 shrink-0">{{
                   formatFileSize(file.size_bytes)
                 }}</span>
@@ -947,6 +1026,19 @@
             >{{ stats.total_models }} models · {{ stats.total_files }} files ·
             {{ formatFileSize(stats.total_size_bytes) }}</template
           >
+        </span>
+        <span
+          v-if="stats.packed_models"
+          title="Models compressed at rest: what their files would occupy loose vs what the archives take"
+        >
+          📦 {{ stats.packed_models }} packed ·
+          {{
+            formatFileSize(
+              (stats.packed_logical_bytes ?? 0) -
+                (stats.packed_archive_bytes ?? 0),
+            )
+          }}
+          saved
         </span>
       </template>
       <span class="flex-1"></span>
@@ -1362,6 +1454,7 @@ import ModalView from "../components/ModalView.vue";
 import StlViewport from "../components/StlViewport.vue";
 import { useCatalogJobs } from "../composables/useCatalogJobs";
 import { useFileSelect } from "../composables/useFileSelect";
+import { usePackStatus } from "../composables/usePackStatus";
 import { useReleasesStore } from "../stores/releasesStore";
 import { useToastStore } from "../stores/toastStore";
 import { formatFileSize } from "../utils/format";
@@ -1397,6 +1490,18 @@ const {
   startDuplicateScan,
   cancelDuplicateScan,
 } = useCatalogJobs();
+const {
+  isPacking,
+  packProgress,
+  packError,
+  packSummary,
+  packCancelled,
+  packAction,
+  packFinishedCount,
+  startPack,
+  startUnpack,
+  cancelPack,
+} = usePackStatus();
 
 const catalogRoot = ref("");
 const query = ref("");
@@ -2081,6 +2186,68 @@ const refreshSelected = async () => {
     : undefined;
   if (updated) selected.value = updated;
 };
+
+/* ---- compressed at rest: pack/unpack the open model ---- */
+// Packing is per member FOLDER (nested variant folders pack themselves), so
+// the group-level action fans out to every member dir in the relevant state.
+const packableDirs = computed(() => [
+  ...new Set(members.value.filter((m) => !m.packed).map((m) => m.dir_path)),
+]);
+const packedDirs = computed(() => [
+  ...new Set(members.value.filter((m) => m.packed).map((m) => m.dir_path)),
+]);
+
+const packSelectedGroup = async () => {
+  const group = selectedGroup.value;
+  if (!group || !packableDirs.value.length || isPacking.value) return;
+  const confirmed = await confirm(
+    `Compress “${group.group_name}” (${formatFileSize(group.total_size_bytes)}) into pack archives?\n\n` +
+      "The model stays in the catalog and unpacks on demand; printing, 3D preview and rendering need an unpack first.",
+    { title: "Pack model", kind: "info" },
+  );
+  if (!confirmed) return;
+  const result = await startPack(packableDirs.value);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to start packing", result.error);
+  }
+};
+
+const unpackSelectedGroup = async () => {
+  if (!packedDirs.value.length || isPacking.value) return;
+  const result = await startUnpack(packedDirs.value);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to start unpacking", result.error);
+  }
+};
+
+// Any terminal state changed disk state for the folders that DID finish —
+// refresh files, members and stats regardless of how the job ended
+watch(packFinishedCount, async () => {
+  if (packSummary.value) {
+    const { action, succeeded, kept_files } = packSummary.value;
+    toastStore.addToast(
+      `${action === "unpack" ? "Unpacked" : "Packed"} ${succeeded} folder${succeeded === 1 ? "" : "s"}`,
+      "success",
+    );
+    // files that changed between compression and delete stay loose — say so
+    for (const kept of kept_files) {
+      toastStore.addToast(
+        `Kept on disk (changed while packing): ${kept}`,
+        "info",
+      );
+    }
+  } else if (packError.value) {
+    toastStore.reportError("Pack job failed", packError.value);
+  } else if (packCancelled.value) {
+    toastStore.addToast(
+      `Cancelled — ${packCancelled.value.succeeded} folder${packCancelled.value.succeeded === 1 ? "" : "s"} already done (re-run to resume)`,
+      "info",
+    );
+  }
+  await refreshSelected();
+  await refreshMeta();
+  if (selected.value) await selectEntry(selected.value);
+});
 
 // Carries the model's dir_path AND variant_key so the finished render comes
 // back as THIS pose's preview, not the whole folder's (poses in one dump
