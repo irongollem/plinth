@@ -12,6 +12,18 @@ USAGE (headless, no UI):
     blender -b -P render_mini.py -- MODEL.stl --rotate 0,0,0     # already upright
     blender -b -P render_mini.py -- MODEL.stl --color 0.8,0.54,0.35 --azimuth -15
 
+LOOK OVERRIDES (--config, for people who know their way around a light rig):
+    blender -b -P render_mini.py -- MODEL.stl --config look.json
+    blender -b -P render_mini.py -- MODEL.stl --config '{"key":{"energy":1500}}'
+  The argument is a JSON file path or inline JSON (leading '{'). It deep-merges
+  onto the LOOK recipe below — any subset of its keys, e.g.
+    {"roughness": 0.4, "key": {"energy": 1500}, "rich": {"gamma": 0.85}}
+  Precedence: LOOK defaults < --config < explicit CLI flags (--color etc.).
+  Unknown keys and type mismatches are warned about and skipped, never fatal.
+  Light-color semantics per look: flat uses key/fill/rim.color; resin uses
+  resin.fill_color/rim_color (its key follows key.color); rich uses rich.*.
+  The contact sheet inherits the config too (the merge happens before parse).
+
 ORIENTATION PICKER (contact sheet of candidate rotations):
     blender -b -P render_mini.py -- MODEL.stl --contact-sheet
     blender -b -P render_mini.py -- MODEL.stl --contact-sheet --sheet-cols 3 --out sheet.png
@@ -91,8 +103,57 @@ CANDIDATE_ROTATIONS = [
 ]
 
 # ----------------------------- arg parsing --------------------------------
+def load_config(arg):
+    """--config accepts inline JSON (leading '{') or a path to a JSON file."""
+    try:
+        obj = json.loads(arg) if arg.lstrip().startswith("{") else json.load(open(arg, encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"[render_mini] config error: {e}")
+    if not isinstance(obj, dict):
+        raise SystemExit("[render_mini] config error: top level must be a JSON object")
+    return obj
+
+def merge_config(dst, src, path=""):
+    """Deep-merge user overrides onto the LOOK recipe, in place.
+
+    Unknown keys and type mismatches warn and skip — a look file from a
+    newer/older app version must degrade gracefully, not kill the render.
+    JSON has no tuples, so lists coerce where the default is a tuple; int
+    defaults (samples/res) round, float defaults stay float.
+    """
+    for key, val in src.items():
+        where = f"{path}.{key}" if path else key
+        if key not in dst:
+            print(f"[render_mini] config: ignored unknown key '{where}'")
+            continue
+        cur = dst[key]
+        number = isinstance(val, (int, float)) and not isinstance(val, bool)
+        if isinstance(cur, dict):
+            if isinstance(val, dict): merge_config(cur, val, where)
+            else: print(f"[render_mini] config: ignored '{where}' (expected an object)")
+        elif isinstance(cur, tuple):
+            if (isinstance(val, list) and len(val) == len(cur)
+                    and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in val)):
+                dst[key] = tuple(float(x) for x in val)
+            else:
+                print(f"[render_mini] config: ignored '{where}' (expected {len(cur)} numbers)")
+        elif isinstance(cur, int) and not isinstance(cur, bool):
+            if number: dst[key] = int(round(val))
+            else: print(f"[render_mini] config: ignored '{where}' (expected a number)")
+        elif isinstance(cur, float):
+            if number: dst[key] = float(val)
+            else: print(f"[render_mini] config: ignored '{where}' (expected a number)")
+        else:
+            dst[key] = val
+
 def parse():
     argv = sys.argv[sys.argv.index("--")+1:] if "--" in sys.argv else []
+    # PASS 1 — apply --config onto LOOK before anything reads it: the cfg
+    # defaults below bake base_color/res/samples in at parse time, so a
+    # merge that ran later would silently lose those overrides.
+    for i, a in enumerate(argv):
+        if a == "--config" and i + 1 < len(argv):
+            merge_config(LOOK, load_config(argv[i + 1]))
     cfg = dict(paths=[], out=None, rotate=(90,0,0), color=LOOK["base_color"],
                azimuth=-15.0, elev=0.22, zoom=1.15, res=LOOK["res"], samples=LOOK["samples"],
                look="flat", contact=False, sheet_cols=3, sheet_res=420, sheet_samples=24,
@@ -109,6 +170,7 @@ def parse():
         elif a == "--res":           i+=1; cfg["res"]=int(argv[i])
         elif a == "--samples":       i+=1; cfg["samples"]=int(argv[i])
         elif a == "--look":          i+=1; cfg["look"]=argv[i]
+        elif a == "--config":        i+=1  # consumed in pass 1 above
         elif a == "--contact-sheet": cfg["contact"]=True
         elif a == "--align-parts":   cfg["align"]=True
         elif a == "--sheet-cols":    i+=1; cfg["sheet_cols"]=int(argv[i])
