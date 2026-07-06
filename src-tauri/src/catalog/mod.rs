@@ -45,6 +45,8 @@ pub struct ModelRow {
     pub support_status: Option<String>,
     pub release_date: Option<String>,
     pub sculptor: Option<String>,
+    pub base_round_mm: Option<u32>,
+    pub base_square_mm: Option<u32>,
     /// The logical model this row is a variant of; rows sharing it collapse
     /// into one catalog group (see db::search_groups).
     pub group_name: Option<String>,
@@ -88,6 +90,9 @@ pub struct CatalogEntry {
     /// user-overridable per model. sculptor (the individual artist) has no
     /// folder signal, so it comes only from the user or an imported manifest.
     pub sculptor: Option<String>,
+    /// Base sizes in mm, number only: round diameter / square side.
+    pub base_round_mm: Option<u32>,
+    pub base_square_mm: Option<u32>,
     /// Set only on members synthesized from file→pose assignments: a stable
     /// `{dir_path}\u{1f}{pose}` handle ("...\u{1f}" for the residual
     /// unassigned member). None means a whole-folder member — its dir_path
@@ -207,6 +212,10 @@ pub struct ModelMetaUpdate {
     pub designer: Option<String>,
     pub sculptor: Option<String>,
     pub release_name: Option<String>,
+    #[serde(default)]
+    pub base_round_mm: Option<u32>,
+    #[serde(default)]
+    pub base_square_mm: Option<u32>,
 }
 
 /// A user's per-file pose assignment for a "dump everything in one folder"

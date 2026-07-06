@@ -78,6 +78,12 @@ pub struct ManifestModel {
     pub support_status: Option<String>,
     pub release_date: Option<String>,
     pub release_name: Option<String>,
+    /// Base sizes in mm, number only (round diameter / square side).
+    /// Additive in v1 — older manifests simply lack them.
+    #[serde(default)]
+    pub base_round_mm: Option<u32>,
+    #[serde(default)]
+    pub base_square_mm: Option<u32>,
     /// Preview path inside `release.3pk`.
     pub preview: Option<String>,
     pub files: Vec<ManifestFile>,
@@ -230,6 +236,8 @@ mod tests {
                     support_status: Some("unsupported".into()),
                     release_date: Some("2026-05".into()),
                     release_name: Some("Dungeon Classics".into()),
+                    base_round_mm: None,
+                    base_square_mm: None,
                     preview: Some("images/galeb duhr A.png".into()),
                     files: vec![ManifestFile {
                         name: "A/body.stl".into(),

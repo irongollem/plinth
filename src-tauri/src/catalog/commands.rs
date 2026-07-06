@@ -533,6 +533,8 @@ pub async fn update_model_metadata(
             meta.sculptor.clone(),
             meta.release_name.clone(),
             meta.variant.clone(),
+            meta.base_round_mm,
+            meta.base_square_mm,
         )?;
         // designer/sculptor/release are facts about the MODEL — they apply
         // to every member of the group, not just the one being edited

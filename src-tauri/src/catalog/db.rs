@@ -202,6 +202,35 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
         }
         Ok(())
     };
+    // Same shape-check for INTEGER columns. TEXT affinity would round-trip
+    // "25" as a string and rusqlite's u32 reads would then fail on type —
+    // base sizes are numbers and must be stored as numbers.
+    let add_integer_columns = |table: &str, columns: &[&str]| -> Result<(), AppError> {
+        let existing: Vec<String> = conn
+            .prepare(&format!("PRAGMA table_info({})", table))
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| row.get::<_, String>(1))
+                    .and_then(|rows| rows.collect())
+            })
+            .map_err(|e| AppError::ConfigError(format!("Failed to inspect {}: {}", table, e)))?;
+        for column in columns {
+            if existing.iter().any(|c| c == column) {
+                continue;
+            }
+            if let Err(e) = conn.execute(
+                &format!("ALTER TABLE {} ADD COLUMN {} INTEGER", table, column),
+                [],
+            ) {
+                if !e.to_string().contains("duplicate column name") {
+                    return Err(AppError::ConfigError(format!(
+                        "Failed to migrate {} (add {}): {}",
+                        table, column, e
+                    )));
+                }
+            }
+        }
+        Ok(())
+    };
     add_text_columns(
         "models",
         &[
@@ -214,6 +243,8 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             "variant",
         ],
     )?;
+    add_integer_columns("models", &["base_round_mm", "base_square_mm"])?;
+    add_integer_columns("model_user_meta", &["base_round_mm", "base_square_mm"])?;
     // designer already exists on models (from the release); these are the
     // per-model user overrides plus the artist, release-name and variant.
     add_text_columns(
@@ -339,9 +370,10 @@ pub fn replace_catalog(
                 "INSERT OR REPLACE INTO models
                  (dir_path, name, description, designer, release_name, preview_path,
                   source, uuid, file_count, total_size_bytes, pose, scale, support_status,
-                  release_date, group_name, sculptor, variant, indexed_at)
+                  release_date, group_name, sculptor, variant, base_round_mm,
+                  base_square_mm, indexed_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                  ?16, ?17, strftime('%s','now'))",
+                  ?16, ?17, ?18, ?19, strftime('%s','now'))",
             )
             .map_err(map_err)?;
         for m in models {
@@ -363,7 +395,9 @@ pub fn replace_catalog(
                     m.release_date,
                     m.group_name,
                     m.sculptor,
-                    m.variant
+                    m.variant,
+                    m.base_round_mm,
+                    m.base_square_mm
                 ])
                 .map_err(map_err)?;
         }
@@ -573,7 +607,9 @@ fn entry_select_sql(where_sql: &str, tail_sql: &str) -> String {
                 COALESCE(u.release_date, m.release_date),
                 u.custom_name, COALESCE(u.sculptor, m.sculptor),
                 COALESCE(u.variant, m.variant),
-                COALESCE(m.group_name, m.name)
+                COALESCE(m.group_name, m.name),
+                COALESCE(u.base_round_mm, m.base_round_mm),
+                COALESCE(u.base_square_mm, m.base_square_mm)
          FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path {} {}",
         where_sql, tail_sql
     )
@@ -603,6 +639,8 @@ fn map_entry_row(row: &rusqlite::Row) -> rusqlite::Result<CatalogEntry> {
         sculptor: row.get(14)?,
         variant: row.get(15)?,
         source_group: row.get(16)?,
+        base_round_mm: row.get(17)?,
+        base_square_mm: row.get(18)?,
         // Whole-folder member; expand_file_variants stamps a key on any
         // synthetic pose members it derives from this row.
         variant_key: None,
@@ -1612,6 +1650,7 @@ fn require_model(conn: &Connection, dir_path: &str) -> Result<(), AppError> {
 
 /// Upsert the user-editable fields (rescan-safe, see model_user_meta).
 /// A None custom_name clears the override, reverting to the scanner name.
+#[allow(clippy::too_many_arguments)]
 pub fn update_model_user_meta(
     conn: &Connection,
     dir_path: &str,
@@ -1624,13 +1663,16 @@ pub fn update_model_user_meta(
     sculptor: Option<String>,
     release_name: Option<String>,
     variant: Option<String>,
+    base_round_mm: Option<u32>,
+    base_square_mm: Option<u32>,
 ) -> Result<(), AppError> {
     require_model(conn, dir_path)?;
     conn.execute(
         "INSERT INTO model_user_meta
              (dir_path, custom_name, pose, scale, support_status, release_date,
-              designer, sculptor, release_name, variant)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+              designer, sculptor, release_name, variant, base_round_mm,
+              base_square_mm)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(dir_path) DO UPDATE SET
              custom_name = excluded.custom_name,
              pose = excluded.pose,
@@ -1640,7 +1682,9 @@ pub fn update_model_user_meta(
              designer = excluded.designer,
              sculptor = excluded.sculptor,
              release_name = excluded.release_name,
-             variant = excluded.variant",
+             variant = excluded.variant,
+             base_round_mm = excluded.base_round_mm,
+             base_square_mm = excluded.base_square_mm",
         params![
             dir_path,
             custom_name,
@@ -1651,7 +1695,9 @@ pub fn update_model_user_meta(
             designer,
             sculptor,
             release_name,
-            variant
+            variant,
+            base_round_mm,
+            base_square_mm
         ],
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to update metadata: {}", e)))?;
@@ -2137,6 +2183,8 @@ mod tests {
                 release_date: None,
                 variant: None,
                 sculptor: None,
+                base_round_mm: None,
+                base_square_mm: None,
                 group_name: Some("Giant Newt".into()),
             },
             ModelRow {
@@ -2156,6 +2204,8 @@ mod tests {
                 release_date: None,
                 variant: None,
                 sculptor: None,
+                base_round_mm: None,
+                base_square_mm: None,
                 group_name: Some("Bugbear".into()),
             },
         ];
@@ -2470,6 +2520,8 @@ mod tests {
             release_date: None,
             variant: None,
             sculptor: None,
+            base_round_mm: None,
+            base_square_mm: None,
             group_name: Some("mob".into()),
         }];
         replace_catalog(&mut conn, &files, &models, &[], &[]).unwrap();
@@ -2567,6 +2619,8 @@ mod tests {
             release_date: None,
             variant: None,
             sculptor: None,
+            base_round_mm: None,
+            base_square_mm: None,
             group_name: Some(group.into()),
         };
         let models = vec![
@@ -2587,6 +2641,8 @@ mod tests {
             None,
             None,
             Some("A. Artist".into()),
+            None,
+            None,
             None,
             None,
         )
@@ -2662,6 +2718,8 @@ mod tests {
             release_date: None,
             variant: Some("Great Swords".into()),
             sculptor: None,
+            base_round_mm: None,
+            base_square_mm: None,
             group_name: Some("Dark Wardens".into()),
         }];
         replace_catalog(&mut conn, &files, &models, &[], &[]).unwrap();
@@ -2731,6 +2789,8 @@ mod tests {
             release_date: None,
             variant: None,
             sculptor: None,
+            base_round_mm: None,
+            base_square_mm: None,
             group_name: Some("mob".into()),
         }];
         replace_catalog(&mut conn, &files, &models, &[], &[]).unwrap();
@@ -2824,6 +2884,8 @@ mod tests {
             Some("A. Sculptor".into()),
             Some("Order of the Unicorn".into()),
             Some("mounted".into()),
+            None,
+            None,
         )
         .unwrap();
         set_model_preview(&conn, "/lib/newt", "/appdata/previews/abc.png").unwrap();
@@ -2877,6 +2939,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
         let page = search(&conn, "newt", &[], 10, 0).unwrap();
@@ -2899,7 +2963,8 @@ mod tests {
         );
 
         assert!(update_model_user_meta(
-            &conn, "/nope", None, None, None, None, None, None, None, None, None
+            &conn, "/nope", None, None, None, None, None, None, None, None, None, None,
+            None
         )
         .is_err());
         assert!(set_model_preview(&conn, "/nope", "/x.png").is_err());
@@ -2960,6 +3025,8 @@ mod tests {
             release_date: None,
             variant: None,
             sculptor: None,
+            base_round_mm: None,
+            base_square_mm: None,
             group_name: Some("galeb duhr".into()),
         };
         let models = vec![
@@ -3023,6 +3090,8 @@ mod tests {
             release_date: date.map(String::from),
             variant: None,
             sculptor: None,
+            base_round_mm: None,
+            base_square_mm: None,
             group_name: None,
         };
         let models = vec![
@@ -3232,6 +3301,8 @@ mod tests {
             support_status: Some(support.into()),
             release_date: None,
             sculptor: None,
+            base_round_mm: None,
+            base_square_mm: None,
             group_name: Some(group.into()),
         };
         let models = vec![
@@ -3291,6 +3362,8 @@ mod tests {
             &conn,
             "/lib/newt",
             Some("Shiny Newt".into()),
+            None,
+            None,
             None,
             None,
             None,

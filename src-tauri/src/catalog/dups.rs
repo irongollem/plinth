@@ -266,6 +266,8 @@ mod tests {
             support_status: None,
             release_date: None,
             sculptor: None,
+            base_round_mm: None,
+            base_square_mm: None,
             group_name: None,
         }];
         db::test_init(&conn);

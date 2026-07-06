@@ -41,6 +41,8 @@ struct MemberRow {
     uuid: Option<String>,
     scale: Option<String>,
     sculptor: Option<String>,
+    base_round_mm: Option<u32>,
+    base_square_mm: Option<u32>,
 }
 
 fn member_rows(conn: &Connection, group: Option<&str>) -> Result<Vec<MemberRow>, AppError> {
@@ -56,7 +58,9 @@ fn member_rows(conn: &Connection, group: Option<&str>) -> Result<Vec<MemberRow>,
                 COALESCE(u.pose, m.pose),
                 m.description, m.uuid,
                 COALESCE(u.scale, m.scale),
-                COALESCE(u.sculptor, m.sculptor)
+                COALESCE(u.sculptor, m.sculptor),
+                COALESCE(u.base_round_mm, m.base_round_mm),
+                COALESCE(u.base_square_mm, m.base_square_mm)
          FROM models m
          LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
          LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)";
@@ -74,6 +78,8 @@ fn member_rows(conn: &Connection, group: Option<&str>) -> Result<Vec<MemberRow>,
             uuid: row.get(9)?,
             scale: row.get(10)?,
             sculptor: row.get(11)?,
+            base_round_mm: row.get(12)?,
+            base_square_mm: row.get(13)?,
         })
     }
     let rows = match group {
@@ -1126,6 +1132,8 @@ fn write_leaf_json(
         "designer": first_some(&refs, |r| r.designer.as_ref()),
         "sculptor": first_some(&refs, |r| r.sculptor.as_ref()),
         "release_name": first_some(&refs, |r| r.release.as_ref()),
+        "base_round_mm": refs.iter().find_map(|r| r.base_round_mm),
+        "base_square_mm": refs.iter().find_map(|r| r.base_square_mm),
         "file_poses": file_poses,
     });
     let pretty = serde_json::to_string_pretty(&json)
@@ -1218,6 +1226,8 @@ mod tests {
             release_date: Some("7/2026".into()),
             variant: None,
             sculptor: None,
+            base_round_mm: None,
+            base_square_mm: None,
             group_name: Some(group.into()),
         }
     }

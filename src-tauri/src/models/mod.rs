@@ -121,6 +121,13 @@ pub struct StlModel {
     pub sculptor: Option<String>,
     #[serde(default)]
     pub release_name: Option<String>,
+    /// Base sizes in mm, number only ("25", never "25mm"): round is the
+    /// diameter, square the side. Both optional — plenty of models ship
+    /// without a base at all. Additive to model.json/3pk.
+    #[serde(default)]
+    pub base_round_mm: Option<u32>,
+    #[serde(default)]
+    pub base_square_mm: Option<u32>,
     /// Per-file pose/variant assignments (a curated dump folder), restored
     /// into file_variants on scan. Names are file basenames.
     #[serde(default)]

@@ -724,6 +724,34 @@
                     placeholder="YYYY-MM"
                   />
                 </label>
+                <label class="flex flex-col gap-0.5">
+                  <span
+                    class="font-mono text-[9px] text-base-content/40"
+                    title="Round base diameter in millimetres — just the number"
+                    >BASE ROUND MM</span
+                  >
+                  <input
+                    v-model="metaDraft.base_round_mm"
+                    type="number"
+                    min="1"
+                    class="input input-xs font-mono"
+                    placeholder="e.g. 25"
+                  />
+                </label>
+                <label class="flex flex-col gap-0.5">
+                  <span
+                    class="font-mono text-[9px] text-base-content/40"
+                    title="Square base side in millimetres — just the number"
+                    >BASE SQUARE MM</span
+                  >
+                  <input
+                    v-model="metaDraft.base_square_mm"
+                    type="number"
+                    min="1"
+                    class="input input-xs font-mono"
+                    placeholder="e.g. 25"
+                  />
+                </label>
                 <label class="flex flex-col gap-0.5 col-span-2">
                   <span class="font-mono text-[9px] text-base-content/40"
                     >RELEASE</span
@@ -1342,6 +1370,12 @@ import { formatFileSize } from "../utils/format";
 
 const PAGE_SIZE = 60;
 const orNull = (value: string) => value.trim() || null;
+// Base sizes are entered as the bare number ("25", never "25mm"); a
+// stray unit or junk parses to null rather than storing garbage
+const mmOrNull = (value: string) => {
+  const n = Number.parseInt(value.trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
 
 const toastStore = useToastStore();
 const releasesStore = useReleasesStore();
@@ -1423,6 +1457,8 @@ const metaDraft = ref({
   designer: "",
   sculptor: "",
   release_name: "",
+  base_round_mm: "",
+  base_square_mm: "",
 });
 
 // A synthesized member's variant_key is `dir\u{1f}variant\u{1f}pose`; keep the
@@ -2556,6 +2592,8 @@ watch(selected, (entry) => {
     designer: entry?.designer ?? "",
     sculptor: entry?.sculptor ?? "",
     release_name: entry?.release_name ?? "",
+    base_round_mm: entry?.base_round_mm?.toString() ?? "",
+    base_square_mm: entry?.base_square_mm?.toString() ?? "",
   };
   // fresh member: drop any ticks, and seed the assign boxes with this member's
   // facets so filing more files under the same bucket is one tap
@@ -2577,7 +2615,9 @@ const metaDirty = computed(() => {
     draft.release_date !== (entry.release_date ?? "") ||
     draft.designer !== (entry.designer ?? "") ||
     draft.sculptor !== (entry.sculptor ?? "") ||
-    draft.release_name !== (entry.release_name ?? "")
+    draft.release_name !== (entry.release_name ?? "") ||
+    draft.base_round_mm !== (entry.base_round_mm?.toString() ?? "") ||
+    draft.base_square_mm !== (entry.base_square_mm?.toString() ?? "")
   );
 });
 
@@ -2629,6 +2669,8 @@ const saveMetadata = async () => {
     designer: orNull(draft.designer),
     sculptor: orNull(draft.sculptor),
     release_name: orNull(draft.release_name),
+    base_round_mm: mmOrNull(draft.base_round_mm),
+    base_square_mm: mmOrNull(draft.base_square_mm),
   });
   if (result.status !== "ok") {
     toastStore.reportError("Failed to save details", result.error);
@@ -2786,6 +2828,8 @@ const addToDraftRelease = async () => {
         designer: variant.designer,
         sculptor: variant.sculptor,
         release_name: variant.release_name,
+        base_round_mm: variant.base_round_mm,
+        base_square_mm: variant.base_square_mm,
         file_poses: filePoses,
       });
     }
