@@ -128,8 +128,8 @@ pub fn build_manifest(
                     .release_name
                     .clone()
                     .or_else(|| Some(release.name.clone())),
-                base_round_mm: model.base_round_mm,
-                base_square_mm: model.base_square_mm,
+                base_round_mm: model.base_round_mm.clone(),
+                base_square_mm: model.base_square_mm.clone(),
                 preview: model.images.first().and_then(|rel| to_archive_name(rel)),
                 files,
             });

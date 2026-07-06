@@ -202,35 +202,6 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
         }
         Ok(())
     };
-    // Same shape-check for INTEGER columns. TEXT affinity would round-trip
-    // "25" as a string and rusqlite's u32 reads would then fail on type —
-    // base sizes are numbers and must be stored as numbers.
-    let add_integer_columns = |table: &str, columns: &[&str]| -> Result<(), AppError> {
-        let existing: Vec<String> = conn
-            .prepare(&format!("PRAGMA table_info({})", table))
-            .and_then(|mut stmt| {
-                stmt.query_map([], |row| row.get::<_, String>(1))
-                    .and_then(|rows| rows.collect())
-            })
-            .map_err(|e| AppError::ConfigError(format!("Failed to inspect {}: {}", table, e)))?;
-        for column in columns {
-            if existing.iter().any(|c| c == column) {
-                continue;
-            }
-            if let Err(e) = conn.execute(
-                &format!("ALTER TABLE {} ADD COLUMN {} INTEGER", table, column),
-                [],
-            ) {
-                if !e.to_string().contains("duplicate column name") {
-                    return Err(AppError::ConfigError(format!(
-                        "Failed to migrate {} (add {}): {}",
-                        table, column, e
-                    )));
-                }
-            }
-        }
-        Ok(())
-    };
     add_text_columns(
         "models",
         &[
@@ -243,8 +214,12 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             "variant",
         ],
     )?;
-    add_integer_columns("models", &["base_round_mm", "base_square_mm"])?;
-    add_integer_columns("model_user_meta", &["base_round_mm", "base_square_mm"])?;
+    // Base sizes are canonical dimension STRINGS ("25", "60x35") — TEXT.
+    // Named without the _mm suffix to sidestep the short-lived INTEGER
+    // columns an early build may have created: INTEGER affinity would
+    // coerce "25" back to a number and break typed string reads.
+    add_text_columns("models", &["base_round", "base_square"])?;
+    add_text_columns("model_user_meta", &["base_round", "base_square"])?;
     // designer already exists on models (from the release); these are the
     // per-model user overrides plus the artist, release-name and variant.
     add_text_columns(
@@ -370,8 +345,8 @@ pub fn replace_catalog(
                 "INSERT OR REPLACE INTO models
                  (dir_path, name, description, designer, release_name, preview_path,
                   source, uuid, file_count, total_size_bytes, pose, scale, support_status,
-                  release_date, group_name, sculptor, variant, base_round_mm,
-                  base_square_mm, indexed_at)
+                  release_date, group_name, sculptor, variant, base_round,
+                  base_square, indexed_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
                   ?16, ?17, ?18, ?19, strftime('%s','now'))",
             )
@@ -608,8 +583,8 @@ fn entry_select_sql(where_sql: &str, tail_sql: &str) -> String {
                 u.custom_name, COALESCE(u.sculptor, m.sculptor),
                 COALESCE(u.variant, m.variant),
                 COALESCE(m.group_name, m.name),
-                COALESCE(u.base_round_mm, m.base_round_mm),
-                COALESCE(u.base_square_mm, m.base_square_mm)
+                COALESCE(u.base_round, m.base_round),
+                COALESCE(u.base_square, m.base_square)
          FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path {} {}",
         where_sql, tail_sql
     )
@@ -1663,15 +1638,15 @@ pub fn update_model_user_meta(
     sculptor: Option<String>,
     release_name: Option<String>,
     variant: Option<String>,
-    base_round_mm: Option<u32>,
-    base_square_mm: Option<u32>,
+    base_round_mm: Option<String>,
+    base_square_mm: Option<String>,
 ) -> Result<(), AppError> {
     require_model(conn, dir_path)?;
     conn.execute(
         "INSERT INTO model_user_meta
              (dir_path, custom_name, pose, scale, support_status, release_date,
-              designer, sculptor, release_name, variant, base_round_mm,
-              base_square_mm)
+              designer, sculptor, release_name, variant, base_round,
+              base_square)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(dir_path) DO UPDATE SET
              custom_name = excluded.custom_name,
@@ -1683,8 +1658,8 @@ pub fn update_model_user_meta(
              sculptor = excluded.sculptor,
              release_name = excluded.release_name,
              variant = excluded.variant,
-             base_round_mm = excluded.base_round_mm,
-             base_square_mm = excluded.base_square_mm",
+             base_round = excluded.base_round,
+             base_square = excluded.base_square",
         params![
             dir_path,
             custom_name,

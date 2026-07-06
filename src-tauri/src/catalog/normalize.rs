@@ -41,8 +41,8 @@ struct MemberRow {
     uuid: Option<String>,
     scale: Option<String>,
     sculptor: Option<String>,
-    base_round_mm: Option<u32>,
-    base_square_mm: Option<u32>,
+    base_round_mm: Option<String>,
+    base_square_mm: Option<String>,
 }
 
 fn member_rows(conn: &Connection, group: Option<&str>) -> Result<Vec<MemberRow>, AppError> {
@@ -59,8 +59,8 @@ fn member_rows(conn: &Connection, group: Option<&str>) -> Result<Vec<MemberRow>,
                 m.description, m.uuid,
                 COALESCE(u.scale, m.scale),
                 COALESCE(u.sculptor, m.sculptor),
-                COALESCE(u.base_round_mm, m.base_round_mm),
-                COALESCE(u.base_square_mm, m.base_square_mm)
+                COALESCE(u.base_round, m.base_round),
+                COALESCE(u.base_square, m.base_square)
          FROM models m
          LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
          LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)";
@@ -355,11 +355,16 @@ fn numbered_name(name: &str, taken: &HashMap<String, String>) -> String {
 /// 2. pose suffix, when the member has a pose and it frees the name
 ///    (identically-named files from pose dirs A/B/C)
 /// 3. numbered name — never skip, never lose a file
+///
+/// `pose_recorded`: the pose came FROM file_variants (fan-out) — emitting
+/// a metadata-only op to re-record it would leave the plan permanently
+/// non-empty and the structure badge permanently 'dirty'.
 #[allow(clippy::too_many_arguments)]
 fn place_file(
     current: String,
     file: &FileRowLite,
     pose: Option<&str>,
+    pose_recorded: bool,
     leaf: &str,
     used_names: &mut HashMap<String, String>,
     ops: &mut Vec<NormalizeOp>,
@@ -373,7 +378,7 @@ fn place_file(
         // would delete the only copy — nothing to move, keep it, record
         // the pose if one rides along.
         if kept_original == &file.path {
-            if pose.is_some() {
+            if pose.is_some() && !pose_recorded {
                 let to = format!("{}{}{}", leaf, MAIN_SEPARATOR, target_name);
                 ops.push(NormalizeOp {
                     from: current,
@@ -415,7 +420,7 @@ fn place_file(
             kind: "file".into(),
             pose: pose.map(String::from),
         });
-    } else if pose.is_some() {
+    } else if pose.is_some() && !pose_recorded {
         // nothing moves, but the pose still lands as file-level metadata
         ops.push(NormalizeOp {
             from: current,
@@ -616,6 +621,7 @@ pub fn plan(
                             f.path.clone(),
                             &f,
                             None,
+                            false,
                             &model_dir_str,
                             &mut used_names,
                             &mut ops,
@@ -818,6 +824,7 @@ pub fn plan(
                                 current,
                                 &f,
                                 member.pose.as_deref(),
+                                false,
                                 leaf,
                                 &mut used_names,
                                 &mut ops,
@@ -839,6 +846,7 @@ pub fn plan(
                         current,
                         &f,
                         member.pose.as_deref(),
+                        false,
                         leaf,
                         &mut used_names,
                         &mut ops,
@@ -866,6 +874,7 @@ pub fn plan(
                         intent.current.clone(),
                         &intent.file,
                         intent.pose.as_deref(),
+                        true,
                         leaf,
                         &mut used_names,
                         &mut ops,
@@ -1365,14 +1374,8 @@ fn write_leaf_json(
         "designer": pick(|r| r.designer.as_ref()),
         "sculptor": pick(|r| r.sculptor.as_ref()),
         "release_name": pick(|r| r.release.as_ref()),
-        "base_round_mm": leaf_members
-            .iter()
-            .find_map(|r| r.base_round_mm)
-            .or_else(|| group_refs.iter().find_map(|r| r.base_round_mm)),
-        "base_square_mm": leaf_members
-            .iter()
-            .find_map(|r| r.base_square_mm)
-            .or_else(|| group_refs.iter().find_map(|r| r.base_square_mm)),
+        "base_round_mm": pick(|r| r.base_round_mm.as_ref()),
+        "base_square_mm": pick(|r| r.base_square_mm.as_ref()),
         "file_poses": file_poses,
     });
     let pretty = serde_json::to_string_pretty(&json)
@@ -2089,6 +2092,13 @@ mod tests {
         );
         // the emptied dump dir is gone
         assert!(!old.exists());
+
+        // idempotence — THE bug that kept the badge stuck on 'fix folder
+        // structure': re-recording already-recorded poses made the plan
+        // permanently non-empty
+        let again = super::plan(&conn, &root, None, None).unwrap();
+        assert_eq!(again.groups.len(), 0, "ghost ops: {:?}", again.groups);
+        assert_eq!(again.clean_groups, 1);
 
         fs::remove_dir_all(&root).ok();
     }

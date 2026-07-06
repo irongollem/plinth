@@ -42,9 +42,9 @@ struct ModelJson {
     #[serde(default)]
     release_name: Option<String>,
     #[serde(default)]
-    base_round_mm: Option<u32>,
+    base_round_mm: Option<String>,
     #[serde(default)]
-    base_square_mm: Option<u32>,
+    base_square_mm: Option<String>,
     /// Per-file variant/pose split, restored into file_variants on scan.
     #[serde(default)]
     file_poses: Vec<FilePoseJson>,
@@ -315,8 +315,8 @@ pub fn scan(
             release_date: meta_field(|m| m.release_date.clone())
                 .or_else(|| inferred.as_ref().and_then(|i| i.release_date.clone())),
             sculptor: meta_field(|m| m.sculptor.clone()),
-            base_round_mm: meta.and_then(|m| m.base_round_mm),
-            base_square_mm: meta.and_then(|m| m.base_square_mm),
+            base_round_mm: meta_field(|m| m.base_round_mm.clone()),
+            base_square_mm: meta_field(|m| m.base_square_mm.clone()),
             group_name: Some(group_name),
         });
 

@@ -78,12 +78,12 @@ pub struct ManifestModel {
     pub support_status: Option<String>,
     pub release_date: Option<String>,
     pub release_name: Option<String>,
-    /// Base sizes in mm, number only (round diameter / square side).
-    /// Additive in v1 — older manifests simply lack them.
+    /// Base sizes in mm as canonical dimension strings ("25", or
+    /// "60x35" for ovals/rectangles). Additive in v1.
     #[serde(default)]
-    pub base_round_mm: Option<u32>,
+    pub base_round_mm: Option<String>,
     #[serde(default)]
-    pub base_square_mm: Option<u32>,
+    pub base_square_mm: Option<String>,
     /// Preview path inside `release.3pk`.
     pub preview: Option<String>,
     pub files: Vec<ManifestFile>,

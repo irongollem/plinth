@@ -521,6 +521,10 @@ pub async fn update_model_metadata(
         meta.designer = tidy(meta.designer);
         meta.sculptor = tidy(meta.sculptor);
         meta.release_name = tidy(meta.release_name);
+        // canonical dimension strings: "25" or "60x35" (oval/rectangle),
+        // unit implied — junk becomes "not set" rather than stored garbage
+        meta.base_round_mm = meta.base_round_mm.and_then(|v| canonical_mm(&v));
+        meta.base_square_mm = meta.base_square_mm.and_then(|v| canonical_mm(&v));
         db::update_model_user_meta(
             &conn,
             &dir_path,
@@ -627,6 +631,22 @@ pub async fn assign_files_to_pose(
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Assign task failed: {}", e)))?
+}
+
+/// "25", "60x35", "60 X 35", "60×35" -> canonical "25"/"60x35";
+/// anything else (units, words, zeros) is "not set".
+fn canonical_mm(value: &str) -> Option<String> {
+    let cleaned = value.trim().to_lowercase().replace('×', "x");
+    let parts: Vec<&str> = cleaned.split('x').map(str::trim).collect();
+    let nums: Vec<u32> = parts
+        .iter()
+        .map(|p| p.parse::<u32>().ok().filter(|n| *n > 0))
+        .collect::<Option<Vec<_>>>()?;
+    match nums.as_slice() {
+        [d] => Some(d.to_string()),
+        [a, b] => Some(format!("{}x{}", a, b)),
+        _ => None,
+    }
 }
 
 /// Trim a user-entered optional value; whitespace-only means "not set".

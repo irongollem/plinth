@@ -727,29 +727,27 @@
                 <label class="flex flex-col gap-0.5">
                   <span
                     class="font-mono text-[9px] text-base-content/40"
-                    title="Round base diameter in millimetres — just the number"
+                    title="Round/oval base in millimetres — just numbers: 25, or 60x35 for an oval"
                     >BASE ROUND MM</span
                   >
                   <input
                     v-model="metaDraft.base_round_mm"
-                    type="number"
-                    min="1"
+                    type="text"
                     class="input input-xs font-mono"
-                    placeholder="e.g. 25"
+                    placeholder="25 or 60x35"
                   />
                 </label>
                 <label class="flex flex-col gap-0.5">
                   <span
                     class="font-mono text-[9px] text-base-content/40"
-                    title="Square base side in millimetres — just the number"
+                    title="Square/rectangular base in millimetres — just numbers: 25, or 50x25 for a rectangle"
                     >BASE SQUARE MM</span
                   >
                   <input
                     v-model="metaDraft.base_square_mm"
-                    type="number"
-                    min="1"
+                    type="text"
                     class="input input-xs font-mono"
-                    placeholder="e.g. 25"
+                    placeholder="25 or 50x25"
                   />
                 </label>
                 <label class="flex flex-col gap-0.5 col-span-2">
@@ -1370,11 +1368,17 @@ import { formatFileSize } from "../utils/format";
 
 const PAGE_SIZE = 60;
 const orNull = (value: string) => value.trim() || null;
-// Base sizes are entered as the bare number ("25", never "25mm"); a
-// stray unit or junk parses to null rather than storing garbage
+// Base sizes are canonical dimension strings: "25" for regular bases,
+// "60x35" for ovals/rectangles — bare numbers, unit implied. Junk (units,
+// words, zeros) parses to null rather than storing garbage. Mirrors the
+// Rust boundary's canonical_mm.
 const mmOrNull = (value: string) => {
-  const n = Number.parseInt(value.trim(), 10);
-  return Number.isFinite(n) && n > 0 ? n : null;
+  const parts = value.trim().toLowerCase().replace(/×/g, "x").split("x");
+  const nums = parts.map((p: string) => Number.parseInt(p.trim(), 10));
+  if (nums.some((n: number) => !Number.isFinite(n) || n <= 0)) return null;
+  if (nums.length === 1) return String(nums[0]);
+  if (nums.length === 2) return `${nums[0]}x${nums[1]}`;
+  return null;
 };
 
 const toastStore = useToastStore();
@@ -2592,8 +2596,8 @@ watch(selected, (entry) => {
     designer: entry?.designer ?? "",
     sculptor: entry?.sculptor ?? "",
     release_name: entry?.release_name ?? "",
-    base_round_mm: entry?.base_round_mm?.toString() ?? "",
-    base_square_mm: entry?.base_square_mm?.toString() ?? "",
+    base_round_mm: entry?.base_round_mm ?? "",
+    base_square_mm: entry?.base_square_mm ?? "",
   };
   // fresh member: drop any ticks, and seed the assign boxes with this member's
   // facets so filing more files under the same bucket is one tap
@@ -2616,8 +2620,8 @@ const metaDirty = computed(() => {
     draft.designer !== (entry.designer ?? "") ||
     draft.sculptor !== (entry.sculptor ?? "") ||
     draft.release_name !== (entry.release_name ?? "") ||
-    draft.base_round_mm !== (entry.base_round_mm?.toString() ?? "") ||
-    draft.base_square_mm !== (entry.base_square_mm?.toString() ?? "")
+    draft.base_round_mm !== (entry.base_round_mm ?? "") ||
+    draft.base_square_mm !== (entry.base_square_mm ?? "")
   );
 });
 
