@@ -365,7 +365,12 @@
         </div>
       </div>
 
-      <RenderAdvanced v-model="advanced" :look="look" />
+      <RenderAdvanced
+        v-model="advanced"
+        :look="look"
+        @export="exportLook"
+        @import="importLook"
+      />
 
       <div>
         <label class="label text-sm" for="render-output">Output</label>
@@ -543,7 +548,7 @@
 
 <script setup lang="ts">
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { save } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { storeToRefs } from "pinia";
 import { computed, onMounted, reactive, ref, watch } from "vue";
@@ -889,6 +894,10 @@ const bakeBranding = async (path: string) => {
 // stage, not to the studio.
 const STICKY_KEY = "plinth.renderSettings";
 const VIEW_DEFAULTS = { azimuth: -15, elevation: 0.22, zoom: 1.15 };
+// Valid values for restore/import — must match the <select> options above
+const RESOLUTION_OPTIONS = new Set([512, 1024, 1600, 2048]);
+const SAMPLES_OPTIONS = new Set([32, 96, 256]);
+const LOOK_OPTIONS = new Set(["rich", "flat", "resin"]);
 
 const persistRenderSettings = () => {
   localStorage.setItem(
@@ -917,10 +926,10 @@ const loadRenderSettings = () => {
       matchCamera.value = saved.matchCamera;
     if (typeof saved.alignParts === "boolean")
       alignParts.value = saved.alignParts;
-    if ([512, 1024, 1600, 2048].includes(saved.resolution))
+    if (RESOLUTION_OPTIONS.has(saved.resolution))
       resolution.value = saved.resolution;
-    if ([32, 96, 256].includes(saved.samples)) samples.value = saved.samples;
-    if (["rich", "flat", "resin"].includes(saved.look)) look.value = saved.look;
+    if (SAMPLES_OPTIONS.has(saved.samples)) samples.value = saved.samples;
+    if (LOOK_OPTIONS.has(saved.look)) look.value = saved.look;
     if (typeof saved.colorHex === "string" && saved.colorHex.startsWith("#"))
       colorHex.value = saved.colorHex;
     // Schema-validated: knobs that vanish in an update (or hand-edited
@@ -949,6 +958,153 @@ const loadRenderSettings = () => {
   } catch {
     // a corrupt blob must never break the studio — fall back to defaults
     localStorage.removeItem(STICKY_KEY);
+  }
+};
+
+/* ------------------------- shareable look files ------------------------- */
+// A look file carries everything that shapes the rendered PIXELS — look,
+// resin color, camera, quality, and the advanced overrides. Branding stays
+// out on purpose: logo paths are machine-local, and title/credit belong to
+// a model, not to a look.
+const LOOK_FILE_KIND = "stl-pack-look";
+const LOOK_FILE_VERSION = 1;
+
+const exportLook = async () => {
+  const path = await save({
+    defaultPath: "render-look.json",
+    filters: [{ name: "stl-pack look", extensions: ["json"] }],
+  });
+  if (!path) return;
+  const payload = {
+    kind: LOOK_FILE_KIND,
+    version: LOOK_FILE_VERSION,
+    look: look.value,
+    colorHex: colorHex.value,
+    view: { ...view.value },
+    resolution: resolution.value,
+    samples: samples.value,
+    overrides: advanced.value,
+  };
+  const result = await commands.writeLookJson(
+    path,
+    JSON.stringify(payload, null, 2),
+  );
+  if (result.status === "ok") {
+    toastStore.addToast("Look exported — share the .json freely", "success");
+  } else {
+    toastStore.reportError("Failed to export look", result.error);
+  }
+};
+
+const importLook = async () => {
+  const selected = await open({
+    multiple: false,
+    filters: [{ name: "stl-pack look", extensions: ["json"] }],
+    title: "Import look file",
+  });
+  if (typeof selected !== "string") return;
+  const result = await commands.readLookJson(selected);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to import look", result.error);
+    return;
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(result.data);
+  } catch {
+    toastStore.addToast("That file is not valid JSON", "error");
+    return;
+  }
+  const file = (raw ?? {}) as Record<string, unknown>;
+  if (file.kind !== LOOK_FILE_KIND) {
+    toastStore.addToast("That file is not an stl-pack look", "error");
+    return;
+  }
+  if (typeof file.version === "number" && file.version > LOOK_FILE_VERSION) {
+    toastStore.addToast(
+      "This look was made by a newer version of the app — update to import it",
+      "error",
+    );
+    return;
+  }
+
+  // Same defensive posture as loadRenderSettings: apply what validates,
+  // skip the rest, and SAY how much was skipped — a silently half-applied
+  // look would render differently than on the machine that shared it
+  const ignored: string[] = [];
+  const applyIf = (present: boolean, valid: boolean, name: string) => {
+    if (present && !valid) ignored.push(name);
+    return present && valid;
+  };
+
+  if (
+    applyIf(
+      file.look !== undefined,
+      typeof file.look === "string" && LOOK_OPTIONS.has(file.look),
+      "look",
+    )
+  ) {
+    look.value = file.look as "rich" | "flat" | "resin";
+  }
+  if (
+    applyIf(
+      file.colorHex !== undefined,
+      typeof file.colorHex === "string" &&
+        /^#[0-9a-f]{6}$/i.test(file.colorHex),
+      "resin color",
+    )
+  ) {
+    colorHex.value = file.colorHex as string;
+  }
+  const v = (file.view ?? {}) as Record<string, unknown>;
+  if (
+    applyIf(
+      file.view !== undefined,
+      [v.azimuth, v.elevation, v.zoom].every(
+        (n) => typeof n === "number" && Number.isFinite(n),
+      ),
+      "camera",
+    )
+  ) {
+    view.value = {
+      azimuth: v.azimuth as number,
+      elevation: v.elevation as number,
+      zoom: v.zoom as number,
+    };
+    viewport.value?.setView(view.value);
+  }
+  if (
+    applyIf(
+      file.resolution !== undefined,
+      RESOLUTION_OPTIONS.has(file.resolution as number),
+      "resolution",
+    )
+  ) {
+    resolution.value = file.resolution as number;
+  }
+  if (
+    applyIf(
+      file.samples !== undefined,
+      SAMPLES_OPTIONS.has(file.samples as number),
+      "quality",
+    )
+  ) {
+    samples.value = file.samples as number;
+  }
+  const { overrides, dropped } = sanitizeOverrides(file.overrides);
+  advanced.value = overrides;
+  ignored.push(...dropped);
+
+  if (ignored.length) {
+    toastStore.addToast(
+      `Look imported — ignored ${ignored.length} unknown or invalid setting${
+        ignored.length === 1 ? "" : "s"
+      } (${ignored.join(", ")})`,
+      "info",
+      8000,
+    );
+  } else {
+    toastStore.addToast("Look imported", "success");
   }
 };
 

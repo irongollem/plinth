@@ -215,6 +215,71 @@ pub async fn write_png_base64(path: String, data: String) -> Result<(), AppError
     .map_err(|e| AppError::ConfigError(format!("Image write task failed: {}", e)))?
 }
 
+/// Read a shareable look file for import. The webview's fs capability is
+/// read-only and dialog-driven anyway; this narrow command keeps the same
+/// posture: .json only, 1 MB cap (a look file is ~1 KB — anything bigger is
+/// a mis-pick), parsing/validation stays client-side where the schema lives.
+#[tauri::command]
+#[specta::specta]
+pub async fn read_look_json(path: String) -> Result<String, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = Path::new(&path);
+        if !target
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        {
+            return Err(AppError::InvalidInput(
+                "Look files are .json documents".to_string(),
+            ));
+        }
+        let meta = std::fs::metadata(target)
+            .map_err(|e| AppError::IoError(format!("Failed to read look file {}: {}", path, e)))?;
+        if meta.len() > 1_000_000 {
+            return Err(AppError::InvalidInput(
+                "That file is too large to be a look file".to_string(),
+            ));
+        }
+        std::fs::read_to_string(target)
+            .map_err(|e| AppError::IoError(format!("Failed to read look file {}: {}", path, e)))
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Look read task failed: {}", e)))?
+}
+
+/// Write a shareable look file where the save dialog pointed. Mirrors
+/// write_png_base64's guarded style: the contents must parse as JSON (the
+/// caller builds them, but a corrupt write would burn the person it was
+/// shared WITH), and temp + rename means no half-written file survives.
+#[tauri::command]
+#[specta::specta]
+pub async fn write_look_json(path: String, contents: String) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = PathBuf::from(&path);
+        if !target
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        {
+            return Err(AppError::InvalidInput(
+                "Look files are .json documents".to_string(),
+            ));
+        }
+        if serde_json::from_str::<serde_json::Value>(&contents).is_err() {
+            return Err(AppError::InvalidInput(
+                "Refusing to write a corrupt look file".to_string(),
+            ));
+        }
+        let tmp = target.with_extension("json.tmp");
+        std::fs::write(&tmp, &contents)
+            .map_err(|e| AppError::IoError(format!("Failed to write look file: {}", e)))?;
+        std::fs::rename(&tmp, &target).map_err(|e| {
+            std::fs::remove_file(&tmp).ok();
+            AppError::IoError(format!("Failed to finalize look file: {}", e))
+        })
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Look write task failed: {}", e)))?
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn cancel_render(job_id: String) -> Result<(), AppError> {

@@ -24,7 +24,8 @@ use file::commands::{
 };
 use models::events::{CompressionStatus, DuplicateStatus, PackStatus, RenderStatus, ScanStatus};
 use render::commands::{
-    cancel_render, detect_blender, read_image_base64, start_render, write_png_base64,
+    cancel_render, detect_blender, read_image_base64, read_look_json, start_render,
+    write_look_json, write_png_base64,
 };
 use std::env;
 use std::sync::Mutex;
@@ -66,6 +67,8 @@ fn create_specta_builder() -> Builder {
             cancel_render,
             read_image_base64,
             write_png_base64,
+            read_look_json,
+            write_look_json,
             get_pending_3dpak,
             start_catalog_scan,
             start_duplicate_scan,

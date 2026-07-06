@@ -111,6 +111,12 @@
         </div>
       </section>
       <div class="flex gap-1.5 pt-2 border-t border-base-content/10">
+        <button type="button" class="btn btn-xs flex-1" @click="emit('export')">
+          Export look…
+        </button>
+        <button type="button" class="btn btn-xs flex-1" @click="emit('import')">
+          Import look…
+        </button>
         <button
           type="button"
           class="btn btn-xs btn-ghost"
@@ -145,6 +151,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "update:modelValue", value: LookOverrides): void;
+  (e: "export"): void;
+  (e: "import"): void;
 }>();
 
 const tweakCount = computed(() => Object.keys(props.modelValue).length);
