@@ -164,6 +164,50 @@ struct FileRowLite {
     file_name: String,
 }
 
+/// One file's facet assignments (the drawer's file->pose/variant filing).
+struct FileFacets {
+    variant: Option<String>,
+    pose: Option<String>,
+    support: Option<String>,
+}
+
+fn file_facets_in_dir(
+    conn: &Connection,
+    dir: &str,
+) -> Result<HashMap<String, FileFacets>, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Facet query failed: {}", e));
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, variant, pose, support_status FROM file_variants
+             WHERE dir_path = ?1",
+        )
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map([dir], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                FileFacets {
+                    variant: row.get(1)?,
+                    pose: row.get(2)?,
+                    support: row.get(3)?,
+                },
+            ))
+        })
+        .map_err(map_err)?
+        .collect::<Result<HashMap<_, _>, _>>()
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
+/// A file routed to its own leaf because its FILE-level facets say so —
+/// how per-file variant assignments materialize as variant folders.
+struct FanOutIntent {
+    current: String,
+    file: FileRowLite,
+    pose: Option<String>,
+}
+
 /// Rebuild `computed` segment by segment from `root`, adopting the exact
 /// casing of any directory that already exists along the way. Metadata
 /// carries display case (an old sidecar said "AELVES - THE FARWOOD"; the
@@ -323,6 +367,23 @@ fn place_file(
 ) {
     let mut target_name = file.file_name.clone();
     if let Some(kept_original) = used_names.get(&target_name.to_lowercase()) {
+        // The claimant can be THIS file: fan-out leaves seed the registry
+        // from files already sitting there, and a file staying in place
+        // then collides with itself. A self-collision planned as a 'drop'
+        // would delete the only copy — nothing to move, keep it, record
+        // the pose if one rides along.
+        if kept_original == &file.path {
+            if pose.is_some() {
+                let to = format!("{}{}{}", leaf, MAIN_SEPARATOR, target_name);
+                ops.push(NormalizeOp {
+                    from: current,
+                    to,
+                    kind: "pose".into(),
+                    pose: pose.map(String::from),
+                });
+            }
+            return;
+        }
         if same_content(Path::new(kept_original), Path::new(&file.path)) {
             ops.push(NormalizeOp {
                 from: current,
@@ -568,6 +629,57 @@ pub fn plan(
             }
         }
 
+        // ---- file-level VARIANT assignments materialize as folders.
+        // A dump folder split in the drawer ("tons of variants" filed onto
+        // files) has ONE member row with variant NULL — member-level
+        // bucketing would flatten everything into Supported/ and the
+        // variants would exist only as invisible metadata. Such members
+        // fan out per FILE: each file's effective facets pick its leaf.
+        let mut fan_out: HashSet<usize> = HashSet::new();
+        let mut fanout_by_leaf: BTreeMap<String, Vec<FanOutIntent>> = BTreeMap::new();
+        for (i, member) in members.iter().enumerate() {
+            let facets = file_facets_in_dir(conn, &member.dir)?;
+            let has_file_variants = facets
+                .values()
+                .any(|f| f.variant.as_deref().is_some_and(|v| !v.trim().is_empty()));
+            if !has_file_variants {
+                continue;
+            }
+            fan_out.insert(i);
+            for f in disk_files(Path::new(&member.dir)) {
+                if f.file_name == "model.json" || f.file_name == "release.json" {
+                    continue;
+                }
+                let file_facets = facets.get(&f.path);
+                let variant = file_facets
+                    .and_then(|ff| ff.variant.as_deref())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(layout::title_case)
+                    .or_else(|| member.variant.as_deref().map(layout::title_case));
+                let support = file_facets
+                    .and_then(|ff| ff.support.clone())
+                    .or_else(|| member.support.clone());
+                let pose = file_facets
+                    .and_then(|ff| ff.pose.clone())
+                    .filter(|p| !p.trim().is_empty());
+                let leaf =
+                    layout::member_dir(&model_dir, support.as_deref(), variant.as_deref())
+                        .to_string_lossy()
+                        .into_owned();
+                // translate through the phase-1 move, same as merges
+                let current = format!("{}{}", cur[i], &f.path[member.dir.len()..]);
+                fanout_by_leaf.entry(leaf).or_default().push(FanOutIntent {
+                    current,
+                    file: f,
+                    pose,
+                });
+            }
+            if !old_dirs.contains(&cur[i]) {
+                old_dirs.push(cur[i].clone());
+            }
+        }
+
         // ---- phase 2: reshape into Supported/Unsupported[/variant] leaves
         // "Sword" and "sword" are the same variant: unify case-variant
         // spellings onto the first one seen, or they'd bucket into two
@@ -587,10 +699,18 @@ pub fn plan(
             })
             .collect();
 
-        // bucket member indexes by their desired leaf
-        let mut buckets: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        // bucket member indexes by their desired leaf; fan-out members
+        // route per-file instead, and their leaves still need a bucket so
+        // collision handling is shared with everything else landing there
+        let mut buckets: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (i, d) in desired.iter().enumerate() {
-            buckets.entry(d.as_str()).or_default().push(i);
+            if fan_out.contains(&i) {
+                continue;
+            }
+            buckets.entry(d.clone()).or_default().push(i);
+        }
+        for leaf in fanout_by_leaf.keys() {
+            buckets.entry(leaf.clone()).or_default();
         }
 
         for (leaf, idxs) in &buckets {
@@ -600,6 +720,7 @@ pub fn plan(
             // normal, not an error. Nothing may dir-rename onto it;
             // everything merges INTO it per-file, colliding against
             // whatever it already holds.
+            let leaf = leaf.as_str();
             let occupant = idxs
                 .iter()
                 .copied()
@@ -651,6 +772,9 @@ pub fn plan(
             }
 
             for &i in &order {
+                if fan_out.contains(&i) {
+                    continue;
+                }
                 let member = members[i];
                 let from_dir = &cur[i];
                 let is_occupant = Some(i) == occupant;
@@ -671,10 +795,10 @@ pub fn plan(
                     && (!leaf_on_disk || from_dir.eq_ignore_ascii_case(leaf));
 
                 if is_occupant || can_rename {
-                    if from_dir != *leaf {
+                    if from_dir != leaf {
                         ops.push(NormalizeOp {
                             from: from_dir.clone(),
-                            to: (*leaf).to_string(),
+                            to: leaf.to_string(),
                             kind: "dir".into(),
                             pose: None,
                         });
@@ -731,6 +855,22 @@ pub fn plan(
                 }
                 if !old_dirs.contains(&cur[i]) {
                     old_dirs.push(cur[i].clone());
+                }
+            }
+
+            // files fanning out to THIS leaf, colliding against members'
+            // files and the leaf's existing contents alike
+            if let Some(intents) = fanout_by_leaf.get(leaf) {
+                for intent in intents {
+                    place_file(
+                        intent.current.clone(),
+                        &intent.file,
+                        intent.pose.as_deref(),
+                        leaf,
+                        &mut used_names,
+                        &mut ops,
+                        &mut notes,
+                    );
                 }
             }
         }
@@ -797,6 +937,15 @@ pub fn apply_ops(conn: &mut Connection, ops: &[NormalizeOp]) -> Result<BatchOutc
         if op.kind == "drop" {
             let from = Path::new(&op.from);
             let to = Path::new(&op.to);
+            // belt over braces: dropping a path onto itself is guaranteed
+            // data loss, whatever the plan believed
+            if op.from.eq_ignore_ascii_case(&op.to) {
+                errors.push(format!(
+                    "Refusing to drop a file onto itself: {}",
+                    op.from
+                ));
+                continue;
+            }
             if !to.is_file() {
                 errors.push(format!(
                     "Kept copy missing, duplicate left in place: {}",
@@ -949,30 +1098,68 @@ pub fn finalize(
         // lost its identity: sidecars went into dying pose folders while
         // the variant folders holding every file got nothing, and the next
         // scan shattered them into heuristic per-variant cards.
+        // Leaves are discovered ON DISK: the canonical shape is
+        // M[/Build[/Variant]], and any of those dirs directly holding model
+        // files gets the authoritative sidecar. Disk-driven because member
+        // rows may describe pre-fan-out dump dirs that no longer exist
+        // (file-level variant materialization) — metadata goes where the
+        // FILES landed.
         let member_refs: Vec<&MemberRow> = members.iter().collect();
         let variant_case = canonical_variants(&member_refs);
-        let mut leaves: BTreeMap<String, Vec<&MemberRow>> = BTreeMap::new();
+        let holds_models = |dir: &Path| {
+            disk_files(dir).iter().any(|f| {
+                Path::new(&f.file_name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| {
+                        super::MODEL_EXTENSIONS.contains(&e.to_lowercase().as_str())
+                    })
+            })
+        };
+        // (leaf path, support, variant)
+        let mut leaf_specs: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+        if holds_models(&model_dir) {
+            leaf_specs.push((model_dir_str.clone(), None, None));
+        }
+        if let Ok(entries) = std::fs::read_dir(&model_dir) {
+            for entry in entries.flatten().filter(|e| e.path().is_dir()) {
+                let build_name = entry.file_name().to_string_lossy().into_owned();
+                let support = match build_name.to_ascii_lowercase().as_str() {
+                    "supported" => "supported",
+                    "unsupported" => "unsupported",
+                    _ => continue, // extras folders (Images/) carry no sidecar
+                };
+                let build_path = entry.path();
+                if holds_models(&build_path) {
+                    leaf_specs.push((
+                        build_path.to_string_lossy().into_owned(),
+                        Some(support.to_string()),
+                        None,
+                    ));
+                }
+                if let Ok(subs) = std::fs::read_dir(&build_path) {
+                    for sub in subs.flatten().filter(|e| e.path().is_dir()) {
+                        if holds_models(&sub.path()) {
+                            leaf_specs.push((
+                                sub.path().to_string_lossy().into_owned(),
+                                Some(support.to_string()),
+                                Some(sub.file_name().to_string_lossy().into_owned()),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        // members stranded outside the model dir (skipped/failed apply)
+        // are still described where they are
         for member in &members {
-            // same case unification as plan — the sidecar must land in the
-            // ONE leaf both spellings map to
-            let variant = member
-                .variant
-                .as_deref()
-                .and_then(|v| variant_case.get(&v.to_lowercase()).map(String::as_str));
-            let computed = layout::member_dir(&model_dir, member.support.as_deref(), variant);
-            let leaf = if computed.is_dir() {
-                computed.to_string_lossy().into_owned()
-            } else if Path::new(&member.dir).is_dir() {
-                // apply skipped/failed this member — describe it where it is
-                member.dir.clone()
-            } else {
-                warnings.push(format!(
-                    "{}: neither the target folder nor the source exists",
-                    member.dir
+            if !is_under(&member.dir, &model_dir_str) && Path::new(&member.dir).is_dir() {
+                leaf_specs.push((
+                    member.dir.clone(),
+                    member.support.clone(),
+                    member.variant.clone(),
                 ));
-                continue;
-            };
-            leaves.entry(leaf).or_default().push(member);
+            }
         }
 
         // Images anywhere under the model dir ON DISK — the root itself,
@@ -981,15 +1168,43 @@ pub fn finalize(
         // The disk, not the files table: the scanner never indexes images,
         // so an index lookup wrote empty images lists and the sidecar
         // (being authoritative) then ERASED previews that heuristics used
-        // to find. Excludes anything inside a leaf: that image is the
-        // leaf's OWN preview (own_images below).
-        let leaf_dirs: Vec<&str> = leaves.keys().map(String::as_str).collect();
+        // to find. Excludes anything inside a build/variant leaf: that
+        // image is the leaf's OWN preview (own_images below).
+        let leaf_dirs: Vec<&str> = leaf_specs
+            .iter()
+            .map(|(path, _, _)| path.as_str())
+            .filter(|p| *p != model_dir_str)
+            .collect();
         let root_images: Vec<String> = disk_images_under(&model_dir, &leaf_dirs);
 
-        for (leaf, leaf_members) in &leaves {
-            if let Err(e) =
-                write_leaf_json(conn, leaf, leaf_members, &model_dir_str, &root_images)
-            {
+        for (leaf, support, variant) in &leaf_specs {
+            // members whose canonical target IS this leaf contribute their
+            // member-level facts (pose, uuid); the group fills in the rest
+            let leaf_members: Vec<&MemberRow> = members
+                .iter()
+                .filter(|m| {
+                    if m.dir == *leaf {
+                        return true;
+                    }
+                    let v = m
+                        .variant
+                        .as_deref()
+                        .and_then(|v| variant_case.get(&v.to_lowercase()).map(String::as_str));
+                    layout::member_dir(&model_dir, m.support.as_deref(), v)
+                        .to_string_lossy()
+                        == *leaf.as_str()
+                })
+                .collect();
+            if let Err(e) = write_leaf_json(
+                conn,
+                leaf,
+                support.as_deref(),
+                variant.as_deref(),
+                &leaf_members,
+                &member_refs,
+                &model_dir_str,
+                &root_images,
+            ) {
                 warnings.push(format!("{}: {}", leaf, e));
             }
         }
@@ -1017,10 +1232,14 @@ pub fn finalize(
 /// level). File-level poses beat a dir-level pose: when file_poses exist
 /// the dir pose is omitted (and its user override cleared) so the two
 /// mechanisms can't fight after a rescan.
+#[allow(clippy::too_many_arguments)]
 fn write_leaf_json(
     conn: &Connection,
     leaf: &str,
+    support: Option<&str>,
+    variant: Option<&str>,
     leaf_members: &[&MemberRow],
+    group_refs: &[&MemberRow],
     model_dir: &str,
     root_images: &[String],
 ) -> Result<(), AppError> {
@@ -1035,7 +1254,7 @@ fn write_leaf_json(
         .map_err(map_err)?;
     let mut tags: Vec<String> = Vec::new();
     let mut tag_dirs: Vec<&str> = vec![leaf];
-    tag_dirs.extend(leaf_members.iter().map(|m| m.dir.as_str()));
+    tag_dirs.extend(group_refs.iter().map(|m| m.dir.as_str()));
     for dir in tag_dirs {
         let rows: Vec<String> = tag_stmt
             .query_map([dir], |row| row.get(0))
@@ -1099,7 +1318,11 @@ fn write_leaf_json(
         vec![]
     };
 
-    let refs: Vec<&MemberRow> = leaf_members.to_vec();
+    // leaf-specific facts win; the group fills in what the leaf lacks
+    // (a fan-out leaf has NO member row of its own)
+    let pick = |get: fn(&MemberRow) -> Option<&String>| {
+        first_some(leaf_members, get).or_else(|| first_some(group_refs, get))
+    };
     let dir_pose = if file_poses.is_empty() && leaf_members.len() == 1 {
         leaf_members[0].pose.clone()
     } else {
@@ -1117,23 +1340,39 @@ fn write_leaf_json(
         }
     }
 
+    let name = leaf_members
+        .first()
+        .or_else(|| group_refs.first())
+        .map(|m| m.gname.clone())
+        .unwrap_or_default();
     let json = serde_json::json!({
-        "id": first_some(&refs, |r| r.uuid.as_ref()),
-        "name": leaf_members[0].gname,
-        "description": first_some(&refs, |r| r.description.as_ref()),
+        "id": first_some(leaf_members, |r| r.uuid.as_ref()),
+        "name": name,
+        "description": pick(|r| r.description.as_ref()),
         "tags": tags,
         "images": images,
-        "variant": first_some(&refs, |r| r.variant.as_ref())
-            .map(|v| layout::title_case(&v)),
+        // the PATH is the authority for build/variant — that's what the
+        // leaf physically is; member facets only fill gaps
+        "variant": variant
+            .map(layout::title_case)
+            .or_else(|| pick(|r| r.variant.as_ref()).map(|v| layout::title_case(&v))),
         "pose": dir_pose,
-        "scale": first_some(&refs, |r| r.scale.as_ref()),
-        "support_status": first_some(&refs, |r| r.support.as_ref()),
-        "release_date": first_some(&refs, |r| r.date.as_ref()),
-        "designer": first_some(&refs, |r| r.designer.as_ref()),
-        "sculptor": first_some(&refs, |r| r.sculptor.as_ref()),
-        "release_name": first_some(&refs, |r| r.release.as_ref()),
-        "base_round_mm": refs.iter().find_map(|r| r.base_round_mm),
-        "base_square_mm": refs.iter().find_map(|r| r.base_square_mm),
+        "scale": pick(|r| r.scale.as_ref()),
+        "support_status": support
+            .map(String::from)
+            .or_else(|| pick(|r| r.support.as_ref())),
+        "release_date": pick(|r| r.date.as_ref()),
+        "designer": pick(|r| r.designer.as_ref()),
+        "sculptor": pick(|r| r.sculptor.as_ref()),
+        "release_name": pick(|r| r.release.as_ref()),
+        "base_round_mm": leaf_members
+            .iter()
+            .find_map(|r| r.base_round_mm)
+            .or_else(|| group_refs.iter().find_map(|r| r.base_round_mm)),
+        "base_square_mm": leaf_members
+            .iter()
+            .find_map(|r| r.base_square_mm)
+            .or_else(|| group_refs.iter().find_map(|r| r.base_square_mm)),
         "file_poses": file_poses,
     });
     let pretty = serde_json::to_string_pretty(&json)
@@ -1743,6 +1982,113 @@ mod tests {
         .unwrap();
         assert_eq!(gs_meta["variant"], "Great Swords");
         assert_eq!(gs_meta["file_poses"].as_array().unwrap().len(), 2);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn file_level_variants_materialize_as_folders() {
+        // Unicorn Cavalry: 'tons of variants' filed onto FILES in the
+        // drawer, but the member row itself carries variant NULL — so the
+        // old plan flattened everything into Supported/ and the variants
+        // existed only as invisible metadata. Files with variant
+        // assignments must fan out to their own variant folders.
+        let root = std::env::temp_dir().join(format!("plinth_norm_fan_{}", std::process::id()));
+        fs::remove_dir_all(&root).ok();
+        let old = root.join("unicorn cavalry");
+        let sup = old.join("Supported");
+        let unsup = old.join("Unsupported");
+        fs::create_dir_all(&sup).unwrap();
+        fs::create_dir_all(&unsup).unwrap();
+        fs::write(sup.join("uc_spear_a.lys"), b"sa").unwrap();
+        fs::write(sup.join("uc_heavy_b.lys"), b"hb").unwrap();
+        fs::write(sup.join("uc_loose.lys"), b"loose").unwrap();
+        fs::write(unsup.join("uc.stl"), b"raw").unwrap();
+
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::test_init(&conn);
+        let mut sup_row = model_row(&sup, "Unicorn Cavalry", "Unicorn Cavalry");
+        sup_row.support_status = Some("supported".into());
+        let mut unsup_row = model_row(&unsup, "Unicorn Cavalry", "Unicorn Cavalry");
+        unsup_row.support_status = Some("unsupported".into());
+        let files = vec![
+            file_row(&sup.join("uc_spear_a.lys"), &sup),
+            file_row(&sup.join("uc_heavy_b.lys"), &sup),
+            file_row(&sup.join("uc_loose.lys"), &sup),
+            file_row(&unsup.join("uc.stl"), &unsup),
+        ];
+        let assignments = vec![
+            crate::catalog::FileVariantRow {
+                path: sup.join("uc_spear_a.lys").to_string_lossy().into_owned(),
+                variant: Some("Spear".into()),
+                pose: Some("A".into()),
+                support_status: None,
+            },
+            crate::catalog::FileVariantRow {
+                path: sup.join("uc_heavy_b.lys").to_string_lossy().into_owned(),
+                variant: Some("heavy spear".into()),
+                pose: Some("B".into()),
+                support_status: None,
+            },
+        ];
+        db::replace_catalog(&mut conn, &files, &[sup_row, unsup_row], &[], &assignments)
+            .unwrap();
+
+        let plan = plan(&conn, &root, None, None).unwrap();
+        let group = &plan.groups[0];
+        let target = root.join("Bestiarum/2026-07 Dread Swamp/Unicorn Cavalry");
+
+        let outcome = apply_ops(&mut conn, &group.ops).unwrap();
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        // variants became FOLDERS (with the casing convention applied),
+        // the unassigned file stays at the build root
+        assert!(target.join("Supported/Spear/uc_spear_a.lys").is_file());
+        assert!(target.join("Supported/Heavy Spear/uc_heavy_b.lys").is_file());
+        assert!(target.join("Supported/uc_loose.lys").is_file());
+        assert!(target.join("Unsupported/uc.stl").is_file());
+
+        let warnings = finalize(
+            &conn,
+            &root,
+            &["Unicorn Cavalry".to_string()],
+            &group.old_dirs,
+        )
+        .unwrap();
+        assert!(warnings.is_empty(), "{:?}", warnings);
+        // every leaf that holds files carries the authoritative sidecar,
+        // fan-out variant folders included — no member row points at them
+        for (leaf, variant) in [
+            ("Supported", serde_json::Value::Null),
+            ("Supported/Spear", "Spear".into()),
+            ("Supported/Heavy Spear", "Heavy Spear".into()),
+            ("Unsupported", serde_json::Value::Null),
+        ] {
+            let meta: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(target.join(leaf).join("model.json"))
+                    .unwrap_or_else(|_| panic!("{} must carry a sidecar", leaf)),
+            )
+            .unwrap();
+            assert_eq!(meta["name"], "Unicorn Cavalry", "{}", leaf);
+            assert_eq!(meta["variant"], variant, "{}", leaf);
+        }
+        // pose metadata followed the files to their new homes
+        let poses: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT path, pose FROM file_variants WHERE COALESCE(pose,'') != '' ORDER BY path")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(poses.iter().any(|(p, pose)| p.contains("Spear/uc_spear_a") && pose == "A"));
+        assert!(
+            poses
+                .iter()
+                .any(|(p, pose)| p.contains("Heavy Spear/uc_heavy_b") && pose == "B")
+        );
+        // the emptied dump dir is gone
+        assert!(!old.exists());
 
         fs::remove_dir_all(&root).ok();
     }
