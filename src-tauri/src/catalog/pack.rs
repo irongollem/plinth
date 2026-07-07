@@ -34,7 +34,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub const PACK_ARCHIVE_NAME: &str = "model.plinthpack";
 pub const PACK_SIDECAR_NAME: &str = "pack.json";
@@ -112,11 +112,38 @@ pub enum PackPhase {
     Verify,
 }
 
+/// Temp names carry PID + a process-wide sequence: PID alone collided when
+/// two jobs in one process (a pack and an extract, or a double-clicked pack)
+/// touched the same dir — one truncating the other's live temp.
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn temp_name(kind: &str) -> String {
+    format!(
+        ".plinth-{}-{}-{}.tmp",
+        kind,
+        std::process::id(),
+        TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// The files.content_hash column stores BARE hex (the duplicate scanner's
+/// format); sidecars and manifests carry "blake3:<hex>". Strip at the index
+/// boundary or packed files never group with their loose twins.
+pub fn bare_hash(checksum: &str) -> &str {
+    checksum.strip_prefix("blake3:").unwrap_or(checksum)
+}
+
 /// A packed entry's real on-disk location: entry names use '/' regardless of
 /// platform, so split into components rather than joining the raw string.
+/// Traversal segments are dropped defensively — our own writer never emits
+/// them, but a sidecar is just a JSON file anyone can edit, and an entry
+/// named "../../x" must not resolve outside the model dir.
 pub fn entry_disk_path(model_dir: &Path, name: &str) -> PathBuf {
     let mut path = model_dir.to_path_buf();
-    for segment in name.split('/').filter(|s| !s.is_empty()) {
+    for segment in name
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+    {
         path.push(segment);
     }
     path
@@ -230,14 +257,25 @@ pub fn pack_model(
         )));
     }
     if archive_path.is_file() {
-        // Orphan archive from a crash between the two renames — the loose
-        // files are still complete, so discard it and pack fresh.
-        fs::remove_file(&archive_path)?;
+        // Archive without sidecar, loose files present. Two very different
+        // situations look like this: a crash between the two renames (loose
+        // set complete — the archive is a discardable duplicate) and a LOST
+        // sidecar plus a stray loose file (the archive holds the only copy
+        // of everything else). Only the archive itself can tell them apart:
+        // discard it only when every entry is covered by a loose file, else
+        // rebuild the sidecar from it and finish as a repair.
+        if orphan_covered_by_loose(model_dir, &archive_path) {
+            fs::remove_file(&archive_path)?;
+        } else {
+            let sidecar = rebuild_sidecar(model_dir)?;
+            let kept = delete_packed_originals(model_dir, &sidecar.files)?;
+            return Ok(PackOutcome { sidecar, kept });
+        }
     }
 
     // Compress to a hidden temp (invisible to the scanner) in the model dir —
     // same volume, so the final rename is a metadata op even on SMB
-    let temp_archive = model_dir.join(format!(".plinth-pack-{}.tmp", std::process::id()));
+    let temp_archive = model_dir.join(temp_name("pack"));
     let writer = fs::File::create(&temp_archive)
         .map_err(|e| AppError::IoError(format!("Failed to create pack temp: {}", e)))?;
     let compressed = compress_planned(
@@ -298,22 +336,154 @@ pub fn pack_model(
     // archive would look like a packed model with its data missing.
     fs::rename(&temp_archive, &archive_path)
         .map_err(|e| AppError::IoError(format!("Failed to finalize archive: {}", e)))?;
-    let temp_sidecar = model_dir.join(format!(".plinth-packjson-{}.tmp", std::process::id()));
-    let json = serde_json::to_string_pretty(&sidecar)
-        .map_err(|e| AppError::JsonError(format!("Failed to encode pack.json: {}", e)))?;
-    fs::write(&temp_sidecar, json)?;
-    fs::remove_file(&sidecar_path).ok(); // rename-over-existing fails on Windows
-    fs::rename(&temp_sidecar, &sidecar_path)
-        .map_err(|e| AppError::IoError(format!("Failed to finalize pack.json: {}", e)))?;
+    write_sidecar(model_dir, &sidecar)?;
 
     let kept = delete_packed_originals(model_dir, &sidecar.files)?;
     Ok(PackOutcome { sidecar, kept })
 }
 
+/// Whether every file entry in a sidecar-less archive already exists loose
+/// with a matching size — the signature of a crash between the archive and
+/// sidecar renames, where the archive is a discardable duplicate. Names and
+/// sizes come from the central directory, so nothing is decompressed. An
+/// unreadable archive is trivially "covered": it holds nothing recoverable.
+fn orphan_covered_by_loose(model_dir: &Path, archive_path: &Path) -> bool {
+    let Ok(file) = fs::File::open(archive_path) else {
+        return true;
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return true;
+    };
+    for i in 0..archive.len() {
+        let Ok(entry) = archive.by_index(i) else {
+            return true;
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        let path = entry_disk_path(model_dir, entry.name());
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.len() == entry.size() => continue,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Atomically place a pack.json next to the archive (hidden temp + rename;
+/// an existing sidecar is removed first because rename-over-existing fails
+/// on Windows).
+fn write_sidecar(model_dir: &Path, sidecar: &PackSidecar) -> Result<(), AppError> {
+    let sidecar_path = model_dir.join(PACK_SIDECAR_NAME);
+    let temp_sidecar = model_dir.join(temp_name("packjson"));
+    let json = serde_json::to_string_pretty(sidecar)
+        .map_err(|e| AppError::JsonError(format!("Failed to encode pack.json: {}", e)))?;
+    fs::write(&temp_sidecar, json)?;
+    fs::remove_file(&sidecar_path).ok();
+    fs::rename(&temp_sidecar, &sidecar_path)
+        .map_err(|e| AppError::IoError(format!("Failed to finalize pack.json: {}", e)))?;
+    Ok(())
+}
+
+/// Self-heal: rebuild a lost or unreadable pack.json from the archive
+/// itself. The zip's central directory gives the names; the checksums are
+/// recomputed by decompressing each entry (one full read — the slow path,
+/// only ever taken for a damaged dir). Two honest limitations, both
+/// inherent: dedup-elided names lived only in the sidecar and are gone
+/// (their bytes remain under the twin's name), and original mtimes weren't
+/// archived, so entries take the archive's own mtime.
+pub fn rebuild_sidecar(model_dir: &Path) -> Result<PackSidecar, AppError> {
+    let archive_path = model_dir.join(PACK_ARCHIVE_NAME);
+    let metadata = fs::metadata(&archive_path)
+        .map_err(|e| AppError::IoError(format!("Failed to stat {}: {}", archive_path.display(), e)))?;
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let file = fs::File::open(&archive_path)
+        .map_err(|e| AppError::IoError(format!("Failed to open {}: {}", archive_path.display(), e)))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| AppError::InvalidInput(format!("Not a readable archive: {}", e)))?;
+
+    let mut files: Vec<PackFileEntry> = Vec::new();
+    for i in 0..archive.len() {
+        let mut zf = archive
+            .by_index(i)
+            .map_err(|e| AppError::FileProcessingError(format!("Archive entry {}: {}", i, e)))?;
+        if zf.is_dir() {
+            continue;
+        }
+        let name = zf.name().to_string();
+        // an entry that would escape the model dir is hostile or corrupt —
+        // refuse the whole rebuild rather than record it
+        if name.split('/').any(|s| s == "..") || name.starts_with('/') {
+            return Err(AppError::InvalidInput(format!(
+                "Archive entry '{}' escapes the model dir — refusing to rebuild pack.json",
+                name
+            )));
+        }
+        let mut hasher = blake3::Hasher::new();
+        let mut buffer = [0u8; 64 * 1024];
+        let mut size_bytes: u64 = 0;
+        loop {
+            let read = zf.read(&mut buffer).map_err(|e| {
+                AppError::FileProcessingError(format!("Failed reading '{}': {}", name, e))
+            })?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            size_bytes += read as u64;
+        }
+        files.push(PackFileEntry {
+            name,
+            checksum: format!("blake3:{}", hasher.finalize().to_hex()),
+            size_bytes,
+            modified_at,
+            stored: true,
+        });
+    }
+    if files.is_empty() {
+        return Err(AppError::InvalidInput(format!(
+            "'{}' holds no files — nothing to rebuild",
+            archive_path.display()
+        )));
+    }
+
+    let sidecar = PackSidecar {
+        format: PACK_FORMAT.to_string(),
+        version: PACK_VERSION,
+        // provenance, not load-bearing: marks that this sidecar was
+        // reconstructed rather than written at pack time
+        generator: "plinth/sidecar-rebuild".to_string(),
+        archive: PACK_ARCHIVE_NAME.to_string(),
+        archive_checksum: manifest::hash_file(&archive_path)?,
+        archive_size_bytes: metadata.len(),
+        packed_at: modified_at,
+        files,
+    };
+    write_sidecar(model_dir, &sidecar)?;
+    Ok(sidecar)
+}
+
+/// What unpack_model did: the sidecar's entries, plus any diverged loose
+/// files that were moved aside as "<name> (edited)" instead of being
+/// truncated by the extraction.
+#[derive(Debug)]
+pub struct UnpackOutcome {
+    pub files: Vec<PackFileEntry>,
+    pub preserved: Vec<String>,
+}
+
 /// Restore a packed model to loose files and remove the archive + sidecar.
-/// Idempotent: already-present loose files are simply overwritten with the
-/// verified archive bytes, and dedup-elided names are rematerialized.
-pub fn unpack_model(model_dir: &Path) -> Result<Vec<PackFileEntry>, AppError> {
+/// Idempotent: identical already-present loose files are overwritten with
+/// the verified archive bytes, and dedup-elided names are rematerialized.
+/// A loose file that DIVERGED from its archived version (user edits, saved
+/// supports — exactly what the pack delete-guard kept) is moved aside as
+/// "<name> (edited)" first, never truncated.
+pub fn unpack_model(model_dir: &Path) -> Result<UnpackOutcome, AppError> {
     let archive_path = model_dir.join(PACK_ARCHIVE_NAME);
     let sidecar_path = model_dir.join(PACK_SIDECAR_NAME);
     if !sidecar_path.is_file() {
@@ -330,6 +500,27 @@ pub fn unpack_model(model_dir: &Path) -> Result<Vec<PackFileEntry>, AppError> {
             sidecar.format,
             sidecar.version
         )));
+    }
+    let mut preserved: Vec<String> = Vec::new();
+    for entry in &sidecar.files {
+        let path = entry_disk_path(model_dir, &entry.name);
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        let identical = metadata.len() == entry.size_bytes
+            && manifest::hash_file(&path)? == entry.checksum;
+        if identical {
+            continue;
+        }
+        let aside = edited_aside_path(&path);
+        fs::rename(&path, &aside).map_err(|e| {
+            AppError::IoError(format!(
+                "Failed to preserve edited '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+        preserved.push(aside.to_string_lossy().into_owned());
     }
     let files: Vec<ManifestFile> = sidecar
         .files
@@ -352,7 +543,31 @@ pub fn unpack_model(model_dir: &Path) -> Result<Vec<PackFileEntry>, AppError> {
                 .unwrap_or(true)
         });
     }
-    Ok(sidecar.files)
+    Ok(UnpackOutcome {
+        files: sidecar.files,
+        preserved,
+    })
+}
+
+/// A non-clobbering sibling name for a diverged loose file: "body (edited).stl",
+/// numbered when even that exists.
+fn edited_aside_path(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    let extension = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let parent = path.parent().unwrap_or(Path::new(""));
+    let mut candidate = parent.join(format!("{} (edited){}", stem, extension));
+    let mut n = 2;
+    while candidate.exists() {
+        candidate = parent.join(format!("{} (edited {}){}", stem, n, extension));
+        n += 1;
+    }
+    candidate
 }
 
 /// Read the sidecar of a packed model dir, if there is one.
@@ -375,12 +590,15 @@ pub fn read_sidecar(model_dir: &Path) -> Result<Option<PackSidecar>, AppError> {
 struct EphemeralRecord {
     size_bytes: u64,
     modified_at: i64,
+    /// `blake3:<hex>` of what was extracted — the tie-breaker when the mtime
+    /// disagrees or was unreadable (coarse SMB/FAT timestamps).
+    checksum: String,
 }
 
 static EPHEMERAL_EXTRACTS: Lazy<Mutex<HashMap<String, EphemeralRecord>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-fn record_stat(metadata: &fs::Metadata) -> EphemeralRecord {
+fn record_stat(metadata: &fs::Metadata, checksum: &str) -> EphemeralRecord {
     EphemeralRecord {
         size_bytes: metadata.len(),
         modified_at: metadata
@@ -389,6 +607,7 @@ fn record_stat(metadata: &fs::Metadata) -> EphemeralRecord {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0),
+        checksum: checksum.to_string(),
     }
 }
 
@@ -437,7 +656,7 @@ pub fn extract_paths_ephemeral(
         cleanup_ephemeral(paths);
     };
     let mut extracted: Vec<String> = Vec::new();
-    for (n, path_str) in wanted.iter().enumerate() {
+    for path_str in wanted {
         if cancel.load(Ordering::SeqCst) {
             rollback(&extracted);
             return Err(AppError::UserCancelled("Extraction cancelled".to_string()));
@@ -480,7 +699,7 @@ pub fn extract_paths_ephemeral(
             }
         };
 
-        let temp = model_dir.join(format!(".plinth-extract-{}-{}.tmp", std::process::id(), n));
+        let temp = model_dir.join(temp_name("extract"));
         let mut write_one = || -> Result<(), AppError> {
             let mut zf = archive.by_name(source_name).map_err(|e| {
                 AppError::FileProcessingError(format!("Archive entry '{}': {}", source_name, e))
@@ -505,7 +724,7 @@ pub fn extract_paths_ephemeral(
             )));
         }
         if let (Ok(metadata), Ok(mut registry)) = (fs::metadata(path), EPHEMERAL_EXTRACTS.lock()) {
-            registry.insert(path_str.clone(), record_stat(&metadata));
+            registry.insert(path_str.clone(), record_stat(&metadata, &entry.checksum));
         }
         extracted.push(path_str.clone());
         if !on_progress((entry.size_bytes / 1024) as u32) {
@@ -541,10 +760,16 @@ pub fn cleanup_ephemeral(paths: &[String]) -> (Vec<String>, Vec<String>) {
                 registry.remove(&path); // already gone
             }
             Ok(metadata) => {
-                let fresh = record_stat(&metadata);
-                if fresh.size_bytes == record.size_bytes
-                    && fresh.modified_at == record.modified_at
-                {
+                let fresh = record_stat(&metadata, &record.checksum);
+                // size + mtime match proves it's still our extract; a
+                // disagreeing/unreadable mtime falls back to the content
+                // hash (coarse SMB/FAT timestamps must not orphan copies)
+                let ours = fresh.size_bytes == record.size_bytes
+                    && ((fresh.modified_at != 0 && fresh.modified_at == record.modified_at)
+                        || manifest::hash_file(Path::new(&path))
+                            .map(|h| h == record.checksum)
+                            .unwrap_or(false));
+                if ours {
                     if fs::remove_file(&path).is_ok() {
                         registry.remove(&path);
                         removed.push(path);
@@ -622,9 +847,11 @@ fn verify_archive(
     Ok(())
 }
 
-/// Delete the loose originals the (verified) archive now owns. A file whose
-/// size or mtime no longer matches its pack entry changed since compression —
-/// it is kept and reported, never silently destroyed.
+/// Delete the loose originals the (verified) archive now owns. Deletion
+/// requires proof the file is the one that was archived: size + mtime match,
+/// or — when the mtime disagrees or is unreadable (rebuilt sidecars, coarse
+/// SMB/FAT timestamps) — a content-hash match. Anything unproven is kept
+/// and reported, never silently destroyed.
 fn delete_packed_originals(
     model_dir: &Path,
     files: &[PackFileEntry],
@@ -641,7 +868,11 @@ fn delete_packed_originals(
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        if metadata.len() == entry.size_bytes && modified_at == entry.modified_at {
+        let size_matches = metadata.len() == entry.size_bytes;
+        let proven = size_matches
+            && ((modified_at != 0 && modified_at == entry.modified_at)
+                || manifest::hash_file(&path)? == entry.checksum);
+        if proven {
             fs::remove_file(&path)
                 .map_err(|e| AppError::IoError(format!("Failed to remove {}: {}", path.display(), e)))?;
         } else {
@@ -714,8 +945,9 @@ mod tests {
         assert!(dir.join(PACK_SIDECAR_NAME).is_file());
         assert!(dir.join("render.png").is_file(), "images stay loose");
 
-        let entries = unpack_model(&dir).unwrap();
-        assert_eq!(entries.len(), 3);
+        let outcome = unpack_model(&dir).unwrap();
+        assert_eq!(outcome.files.len(), 3);
+        assert!(outcome.preserved.is_empty());
         assert!(!dir.join(PACK_ARCHIVE_NAME).exists());
         assert!(!dir.join(PACK_SIDECAR_NAME).exists());
         assert_eq!(
@@ -888,6 +1120,135 @@ mod tests {
         assert!(dir.join("body.stl").is_file());
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unpack_preserves_a_diverged_loose_file_as_edited() {
+        let dir = temp_dir("unpack_preserve");
+        seed_model(&dir);
+        let cancel = AtomicBool::new(false);
+        pack_model("0.0.0-test", &dir, None, &cancel, no_progress).unwrap();
+        // the user's newer version of a packed file (e.g. slicer-saved
+        // supports written over an ephemeral extract that cleanup kept)
+        fs::write(dir.join("body.stl"), b"user-edited-newer-bytes!!").unwrap();
+
+        let outcome = unpack_model(&dir).unwrap();
+        assert_eq!(outcome.preserved.len(), 1);
+        assert!(outcome.preserved[0].ends_with("body (edited).stl"));
+        assert_eq!(
+            fs::read(dir.join("body (edited).stl")).unwrap(),
+            b"user-edited-newer-bytes!!",
+            "the user's newer bytes survive, moved aside"
+        );
+        assert_eq!(
+            fs::read(dir.join("body.stl")).unwrap(),
+            b"unique-body-bytes-here",
+            "the archived version extracts under the original name"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lost_sidecar_with_stray_loose_file_never_discards_the_archive() {
+        let dir = temp_dir("lost_sidecar");
+        seed_model(&dir);
+        let cancel = AtomicBool::new(false);
+        pack_model("0.0.0-test", &dir, None, &cancel, no_progress).unwrap();
+        // the damage scenario: pack.json lost while ONE stray loose model
+        // file exists — the archive holds the only copy of everything else
+        fs::remove_file(dir.join(PACK_SIDECAR_NAME)).unwrap();
+        fs::write(dir.join("stray.stl"), b"user-dropped-this-in").unwrap();
+
+        let outcome = pack_model("0.0.0-test", &dir, None, &cancel, no_progress).unwrap();
+        // archive survives, sidecar is rebuilt from it, the stray stays loose
+        assert!(dir.join(PACK_ARCHIVE_NAME).is_file(), "archive never deleted");
+        assert!(dir.join(PACK_SIDECAR_NAME).is_file(), "sidecar rebuilt");
+        assert!(dir.join("stray.stl").is_file(), "stray file untouched");
+        assert_eq!(outcome.sidecar.generator, "plinth/sidecar-rebuild");
+        // and the archive still round-trips its contents
+        let unpacked = unpack_model(&dir).unwrap();
+        assert_eq!(unpacked.files.len(), 2, "stored entries recovered");
+        assert_eq!(
+            fs::read(dir.join("body.stl")).unwrap(),
+            b"unique-body-bytes-here"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn true_crash_orphan_with_complete_loose_set_is_discarded_and_repacked() {
+        let dir = temp_dir("true_orphan");
+        seed_model(&dir);
+        let cancel = AtomicBool::new(false);
+        // build a REAL archive of the same files (crash after archive
+        // rename, before sidecar rename: loose set complete)
+        pack_model("0.0.0-test", &dir, None, &cancel, no_progress).unwrap();
+        let unpacked = unpack_model(&dir).unwrap();
+        assert!(unpacked.preserved.is_empty());
+        // recreate the crash state: archive present, no sidecar, loose complete
+        pack_model("0.0.0-test", &dir, None, &cancel, no_progress).unwrap();
+        let archive_bytes = fs::read(dir.join(PACK_ARCHIVE_NAME)).unwrap();
+        let outcome = unpack_model(&dir).unwrap();
+        assert!(outcome.preserved.is_empty());
+        fs::write(dir.join(PACK_ARCHIVE_NAME), archive_bytes).unwrap();
+
+        let outcome = pack_model("0.0.0-test", &dir, None, &cancel, no_progress).unwrap();
+        assert_ne!(outcome.sidecar.generator, "plinth/sidecar-rebuild");
+        assert_eq!(outcome.sidecar.files.len(), 3, "fresh pack of the loose set");
+        assert!(!dir.join("body.stl").exists(), "originals deleted after repack");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn scanner_rebuilds_a_lost_sidecar_from_the_archive() {
+        let root = temp_dir("selfheal");
+        let model = root.join("Knight");
+        fs::create_dir_all(&model).unwrap();
+        seed_model(&model);
+        let cancel = AtomicBool::new(false);
+        pack_model("0.0.0-test", &model, None, &cancel, no_progress).unwrap();
+        fs::remove_file(model.join(PACK_SIDECAR_NAME)).unwrap();
+
+        let outcome = super::super::scanner::scan(&root, &cancel, &[], |_, _| {}).unwrap();
+        // the elided twin's name lived only in the lost sidecar — the rebuild
+        // recovers the two stored entries, not the third name
+        assert_eq!(outcome.packs.len(), 1, "model healed back into the catalog");
+        assert_eq!(outcome.models.len(), 1);
+        assert_eq!(outcome.models[0].file_count, 2);
+        let healed = read_sidecar(&model).unwrap().expect("sidecar rewritten to disk");
+        assert_eq!(healed.generator, "plinth/sidecar-rebuild");
+        assert!(healed.files.iter().all(|f| f.stored));
+
+        // and the healed pack still round-trips
+        unpack_model(&model).unwrap();
+        assert_eq!(fs::read(model.join("body.stl")).unwrap(), b"unique-body-bytes-here");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn crash_orphan_with_loose_files_is_not_healed() {
+        let root = temp_dir("selfheal_orphan");
+        let model = root.join("Knight");
+        fs::create_dir_all(&model).unwrap();
+        seed_model(&model);
+        // crash between the archive and sidecar renames: archive + all
+        // loose files, no pack.json — pack_model's discard path owns this
+        fs::write(model.join(PACK_ARCHIVE_NAME), b"garbage-not-a-zip").unwrap();
+        let cancel = AtomicBool::new(false);
+
+        let outcome = super::super::scanner::scan(&root, &cancel, &[], |_, _| {}).unwrap();
+        assert!(outcome.packs.is_empty(), "loose files veto the rebuild");
+        assert!(
+            !model.join(PACK_SIDECAR_NAME).exists(),
+            "no sidecar materializes for the orphan"
+        );
+        assert_eq!(outcome.models[0].file_count, 3, "the loose files are the model");
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

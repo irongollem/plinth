@@ -1520,12 +1520,16 @@ pub fn stats(conn: &Connection) -> Result<CatalogStats, AppError> {
 
 /// Flip a model dir's index rows to packed, in place — the pack job calls
 /// this per model so no rescan is needed. Only the sidecar's entries are
-/// touched (files the pack kept loose because they changed stay loose rows).
+/// touched, MINUS the paths the pack kept loose because they changed since
+/// compression: their rows must keep describing the loose file, or the
+/// catalog hides user data behind a "packed" flag until the next rescan.
 /// file_identity is cleared: the loose inode it named no longer exists.
+/// content_hash is stored BARE (pack::bare_hash) — the dup scanner's format.
 pub fn mark_packed(
     conn: &mut Connection,
     model_dir: &str,
     sidecar: &super::pack::PackSidecar,
+    kept: &[String],
 ) -> Result<(), AppError> {
     let map_err =
         |e: rusqlite::Error| AppError::ConfigError(format!("Catalog pack update failed: {}", e));
@@ -1543,14 +1547,19 @@ pub fn mark_packed(
             )
             .map_err(map_err)?;
         for entry in &sidecar.files {
-            let path = super::pack::entry_disk_path(Path::new(model_dir), &entry.name);
+            let path = super::pack::entry_disk_path(Path::new(model_dir), &entry.name)
+                .to_string_lossy()
+                .into_owned();
+            if kept.contains(&path) {
+                continue;
+            }
             update
                 .execute(params![
                     archive_path,
-                    entry.checksum,
+                    super::pack::bare_hash(&entry.checksum),
                     entry.size_bytes as i64,
                     entry.modified_at,
-                    path.to_string_lossy()
+                    path
                 ])
                 .map_err(map_err)?;
         }
@@ -1826,8 +1835,11 @@ pub fn duplicate_groups(conn: &Connection) -> Result<Vec<DuplicateGroup>, AppErr
     let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Dup grouping failed: {}", e));
     let mut stmt = conn
         .prepare(
+            // group_concat skips NULLs, so the CASE gives just the packed
+            // subset (NULL when none)
             "SELECT content_hash, size_bytes, group_concat(path, char(31)),
-                    COUNT(DISTINCT COALESCE(file_identity, path))
+                    COUNT(DISTINCT COALESCE(file_identity, path)),
+                    group_concat(CASE WHEN archive_path IS NOT NULL THEN path END, char(31))
              FROM files
              WHERE content_hash IS NOT NULL
              GROUP BY content_hash HAVING COUNT(*) > 1
@@ -1838,11 +1850,15 @@ pub fn duplicate_groups(conn: &Connection) -> Result<Vec<DuplicateGroup>, AppErr
     let groups = stmt
         .query_map([], |row| {
             let joined: String = row.get(2)?;
+            let packed_joined: Option<String> = row.get(4)?;
             Ok(DuplicateGroup {
                 hash: row.get(0)?,
                 size_bytes: row.get::<_, i64>(1)? as f64,
                 paths: joined.split('\u{1f}').map(String::from).collect(),
                 distinct_copies: row.get(3)?,
+                packed_paths: packed_joined
+                    .map(|p| p.split('\u{1f}').map(String::from).collect())
+                    .unwrap_or_default(),
             })
         })
         .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
@@ -3775,7 +3791,7 @@ mod tests {
                 stored: true,
             }],
         };
-        mark_packed(&mut conn, "/lib/newt", &sidecar).unwrap();
+        mark_packed(&mut conn, "/lib/newt", &sidecar, &[]).unwrap();
 
         // file + member + group all report packed; the other model doesn't
         let listed = model_files(&conn, "/lib/newt", None).unwrap();
@@ -3784,10 +3800,11 @@ mod tests {
         assert!(newt[0].packed);
         let bugbear = group_members(&conn, "Bugbear").unwrap();
         assert!(!bugbear[0].packed);
-        // the pack checksum joins duplicate detection without a disk read
+        // the pack checksum joins duplicate detection without a disk read —
+        // stored BARE (the dup scanner's format), not "blake3:"-prefixed
         assert_eq!(
             known_hash(&conn, "/lib/newt/GiantNewt_v02.stl").as_deref(),
-            Some("blake3:def")
+            Some("def")
         );
 
         let s = stats(&conn).unwrap();
@@ -3806,15 +3823,19 @@ mod tests {
         assert!(!listed[0].packed);
         assert_eq!(
             known_hash(&conn, "/lib/newt/GiantNewt_v02.stl").as_deref(),
-            Some("blake3:def")
+            Some("def")
         );
         assert_eq!(stats(&conn).unwrap().packed_models, 0);
 
         // a rescan carrying the pack row keeps the seeded hash and does NOT
-        // resurrect a stale identity for packed rows
+        // resurrect a stale identity for packed rows (the scanner seeds
+        // bare hashes — pack::bare_hash strips the sidecar prefix)
         let mut packed_file = file_row("/lib/newt/GiantNewt_v02.stl", "/lib/newt", 2048);
         packed_file.archive_path = Some("/lib/newt/model.plinthpack".into());
-        packed_file.content_hash = Some("blake3:def".into());
+        packed_file.content_hash = Some("def".into());
+        // a loose twin the dup scanner hashed (bare hex), same size + bytes
+        let mut loose_twin = file_row("/lib/bugbear/Bugbear.stl", "/lib/bugbear", 2048);
+        loose_twin.content_hash = Some("def".into());
         let pack_row = PackRow {
             model_dir: "/lib/newt".into(),
             archive_path: "/lib/newt/model.plinthpack".into(),
@@ -3824,8 +3845,8 @@ mod tests {
         };
         replace_catalog(
             &mut conn,
-            &[packed_file],
-            &models[..1],
+            &[packed_file, loose_twin],
+            &models,
             &[],
             &[],
             &[pack_row],
@@ -3833,9 +3854,20 @@ mod tests {
         .unwrap();
         assert_eq!(
             known_hash(&conn, "/lib/newt/GiantNewt_v02.stl").as_deref(),
-            Some("blake3:def"),
+            Some("def"),
             "scan-seeded hash survives the old_hashes restore"
         );
         assert_eq!(stats(&conn).unwrap().packed_models, 1);
+
+        // the whole point of bare seeding: a packed copy and a loose twin
+        // hashed by the dup scanner (bare hex) land in ONE duplicate group,
+        // with the packed path flagged for the UI
+        let groups = duplicate_groups(&conn).unwrap();
+        assert_eq!(groups.len(), 1, "packed + loose twins group together");
+        assert_eq!(groups[0].paths.len(), 2);
+        assert_eq!(
+            groups[0].packed_paths,
+            vec!["/lib/newt/GiantNewt_v02.stl".to_string()]
+        );
     }
 }

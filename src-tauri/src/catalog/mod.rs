@@ -304,6 +304,11 @@ pub struct DuplicateGroup {
     /// paths count once, so a fully merged group reports 1 ("shared", nothing
     /// to reclaim) and reclaimable space is size_bytes × (distinct_copies − 1).
     pub distinct_copies: u32,
+    /// The subset of `paths` whose bytes live inside a pack archive — they
+    /// join detection via their stored checksums but can't be merged or
+    /// deleted until the model is unpacked; the UI greys them with a hint.
+    #[serde(default)]
+    pub packed_paths: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

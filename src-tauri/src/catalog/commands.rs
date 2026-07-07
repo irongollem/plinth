@@ -58,6 +58,18 @@ fn unregister_job(job_id: &str) {
     }
 }
 
+/// Job ids are prefixed by kind ("scan:", "dup:", "pack:", "extract:") so
+/// mutually-unsafe kinds can exclude each other: a scan's replace_catalog
+/// wholesale-rewrites the very rows a pack job updates in place, so letting
+/// them overlap leaves the index claiming loose files that only exist inside
+/// an archive.
+fn job_active(prefix: &str) -> bool {
+    ACTIVE_CATALOG_JOBS
+        .lock()
+        .map(|jobs| jobs.keys().any(|id| id.starts_with(prefix)))
+        .unwrap_or(false)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<String, AppError> {
@@ -66,6 +78,12 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
             "Catalog root '{}' is not a directory",
             root
         )));
+    }
+
+    if job_active("pack:") {
+        return Err(AppError::InvalidInput(
+            "A pack job is running — rescan when it finishes".to_string(),
+        ));
     }
 
     // Resolve the designer lexicon up front (async store read) so the
@@ -77,7 +95,7 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
         .filter(|list| !list.is_empty())
         .unwrap_or_else(crate::settings::default_designers);
 
-    let job_id = Uuid::new_v4().to_string();
+    let job_id = format!("scan:{}", Uuid::new_v4());
     let cancel = register_job(&job_id)?;
     let job_id_clone = job_id.clone();
 
@@ -160,7 +178,13 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
 #[tauri::command]
 #[specta::specta]
 pub async fn start_duplicate_scan(app_handle: AppHandle) -> Result<String, AppError> {
-    let job_id = Uuid::new_v4().to_string();
+    if job_active("pack:") {
+        // the dup scan reads file bytes a pack job is busy deleting
+        return Err(AppError::InvalidInput(
+            "A pack job is running — scan for duplicates when it finishes".to_string(),
+        ));
+    }
+    let job_id = format!("dup:{}", Uuid::new_v4());
     let cancel = register_job(&job_id)?;
     let job_id_clone = job_id.clone();
 
@@ -255,18 +279,38 @@ pub async fn pack_models(
     app_handle: AppHandle,
     model_dirs: Vec<String>,
 ) -> Result<String, AppError> {
+    // Dedup while preserving order: a selection can name the same dir twice
+    // (drawer + bulk overlap), and packing one dir twice in a batch is at
+    // best wasted repair work
+    let mut seen_dirs = std::collections::HashSet::new();
+    let model_dirs: Vec<String> = model_dirs
+        .into_iter()
+        .filter(|d| seen_dirs.insert(d.clone()))
+        .collect();
     if model_dirs.is_empty() {
         return Err(AppError::InvalidInput("No models to pack".to_string()));
     }
-    // Zstd level from settings (async store read) before the blocking job
+    if job_active("scan:") {
+        return Err(AppError::InvalidInput(
+            "A catalog scan is running — pack when it finishes".to_string(),
+        ));
+    }
+    if job_active("pack:") {
+        return Err(AppError::InvalidInput(
+            "A pack job is already running".to_string(),
+        ));
+    }
+    // Zstd level from settings (async store read) before the blocking job.
+    // Clamped to zstd's actual range — the zip writer errors on anything
+    // outside it, and a hand-edited settings.json shouldn't brick packing.
     let level = crate::settings::get_settings(app_handle.clone())
         .await
         .ok()
         .and_then(|s| s.pack_level)
-        .map(i64::from);
+        .map(|l| i64::from(l).clamp(-7, 22));
     let app_version = app_handle.package_info().version.to_string();
 
-    let job_id = Uuid::new_v4().to_string();
+    let job_id = format!("pack:{}", Uuid::new_v4());
     let cancel = register_job(&job_id)?;
     let total_models = model_dirs.len() as u32;
     PackStatus::Started(PackStartedStatus {
@@ -326,7 +370,7 @@ pub async fn pack_models(
                         true
                     },
                 )?;
-                db::mark_packed(&mut conn, dir, &outcome.sidecar)?;
+                db::mark_packed(&mut conn, dir, &outcome.sidecar, &outcome.kept)?;
                 kept_files.extend(outcome.kept);
                 succeeded += 1;
             }
@@ -383,7 +427,7 @@ pub async fn ensure_model_files(
     app_handle: AppHandle,
     paths: Vec<String>,
 ) -> Result<EnsureOutcome, AppError> {
-    let job_id = Uuid::new_v4().to_string();
+    let job_id = format!("extract:{}", Uuid::new_v4());
     let cancel = register_job(&job_id)?;
     let job_id_clone = job_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<EnsureOutcome, AppError> {
@@ -539,7 +583,17 @@ pub async fn unpack_models(
     if model_dirs.is_empty() {
         return Err(AppError::InvalidInput("No models to unpack".to_string()));
     }
-    let job_id = Uuid::new_v4().to_string();
+    if job_active("scan:") {
+        return Err(AppError::InvalidInput(
+            "A catalog scan is running — unpack when it finishes".to_string(),
+        ));
+    }
+    if job_active("pack:") {
+        return Err(AppError::InvalidInput(
+            "A pack job is already running".to_string(),
+        ));
+    }
+    let job_id = format!("pack:{}", Uuid::new_v4());
     let cancel = register_job(&job_id)?;
     let total_models = model_dirs.len() as u32;
     PackStatus::Started(PackStartedStatus {
@@ -554,6 +608,7 @@ pub async fn unpack_models(
     tauri::async_runtime::spawn_blocking(move || {
         let started = Instant::now();
         let mut succeeded = 0u32;
+        let mut preserved_files: Vec<String> = Vec::new();
         let result: Result<(), AppError> = (|| {
             let mut conn = open_db(&app_handle)?;
             for (index, dir) in model_dirs.iter().enumerate() {
@@ -575,26 +630,34 @@ pub async fn unpack_models(
                 .emit(&app_handle)
                 .ok();
 
-                let entries = pack::unpack_model(Path::new(dir))?;
+                let outcome = pack::unpack_model(Path::new(dir))?;
+                preserved_files.extend(outcome.preserved.iter().cloned());
                 // Fresh stats for the index: extraction stamps new mtimes,
                 // and recording them alongside the kept content_hash is what
-                // keeps the next rescan from dropping the hash as "changed"
-                let fresh: Vec<(String, i64, i64)> = entries
+                // keeps the next rescan from dropping the hash as "changed".
+                // A transiently unstatable file (NAS hiccup) falls back to
+                // the sidecar's stats — its row MUST still flip to loose,
+                // because the archive it pointed at is already gone.
+                let fresh: Vec<(String, i64, i64)> = outcome
+                    .files
                     .iter()
-                    .filter_map(|entry| {
+                    .map(|entry| {
                         let path = pack::entry_disk_path(Path::new(dir), &entry.name);
-                        let metadata = std::fs::metadata(&path).ok()?;
-                        let modified_at = metadata
-                            .modified()
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0);
-                        Some((
-                            path.to_string_lossy().into_owned(),
-                            metadata.len() as i64,
-                            modified_at,
-                        ))
+                        let (size_bytes, modified_at) = match std::fs::metadata(&path) {
+                            Ok(metadata) => (
+                                metadata.len() as i64,
+                                metadata
+                                    .modified()
+                                    .ok()
+                                    .and_then(|t| {
+                                        t.duration_since(std::time::UNIX_EPOCH).ok()
+                                    })
+                                    .map(|d| d.as_secs() as i64)
+                                    .unwrap_or(0),
+                            ),
+                            Err(_) => (entry.size_bytes as i64, entry.modified_at),
+                        };
+                        (path.to_string_lossy().into_owned(), size_bytes, modified_at)
                     })
                     .collect();
                 db::mark_unpacked(&mut conn, dir, &fresh)?;
@@ -611,7 +674,9 @@ pub async fn unpack_models(
                     action: "unpack".to_string(),
                     succeeded,
                     total_models,
-                    kept_files: Vec::new(),
+                    // diverged loose files moved aside as "(edited)" — the
+                    // user must hear about these
+                    kept_files: preserved_files,
                     elapsed_seconds: started.elapsed().as_secs_f64(),
                 })
                 .emit(&app_handle)

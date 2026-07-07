@@ -114,6 +114,7 @@ pub fn scan(
     let mut dirs: BTreeMap<String, DirInfo> = BTreeMap::new();
     let mut releases: BTreeMap<String, ReleaseInfo> = BTreeMap::new();
     let mut packs: BTreeMap<String, pack::PackSidecar> = BTreeMap::new();
+    let mut archive_dirs: Vec<String> = Vec::new();
     let mut seen: u32 = 0;
 
     for entry in WalkDir::new(root)
@@ -196,6 +197,11 @@ pub fn scan(
                     packs.insert(dir_path, parsed);
                 }
             }
+        } else if file_name == pack::PACK_ARCHIVE_NAME {
+            // Remembered so a lost/corrupt sidecar can be rebuilt after the
+            // walk — without one the archive's model would silently vanish
+            // from the catalog
+            archive_dirs.push(dir_path);
         } else if file_name == "release.json" {
             if let Ok(parsed) = read_json::<Release>(path) {
                 releases.insert(
@@ -209,6 +215,28 @@ pub fn scan(
         }
     }
     on_progress(seen, "");
+
+    // Self-heal: an archive whose sidecar is missing or unreadable would
+    // silently drop its model from the catalog. Rebuild the sidecar from the
+    // archive itself (decompress + rehash — the slow path, but it only runs
+    // for damaged dirs and permanently fixes them). ONLY when the dir has no
+    // loose model files: with them present this is a crash-mid-pack orphan,
+    // and pack_model's discard-and-repack path is the correct converger — a
+    // rebuilt sidecar would freeze that dir in a half-packed limbo.
+    for dir_path in archive_dirs {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(AppError::UserCancelled("Scan cancelled".to_string()));
+        }
+        if packs.contains_key(&dir_path)
+            || dirs.get(&dir_path).is_some_and(|info| info.model_files > 0)
+        {
+            continue;
+        }
+        on_progress(seen, &dir_path);
+        if let Ok(sidecar) = pack::rebuild_sidecar(Path::new(&dir_path)) {
+            packs.insert(dir_path, sidecar);
+        }
+    }
 
     // Materialize packed models into the same rows loose ones produce: each
     // pack.json entry becomes a FileRow at the path the file would occupy,
@@ -262,7 +290,9 @@ pub fn scan(
                     size_bytes,
                     modified_at: entry.modified_at,
                     archive_path: Some(archive_path.clone()),
-                    content_hash: Some(entry.checksum.clone()),
+                    // bare hex: the dup scanner's content_hash format —
+                    // prefixed hashes would never group with loose twins
+                    content_hash: Some(pack::bare_hash(&entry.checksum).to_string()),
                 });
 
                 let info = dirs.entry(dir_path).or_default();
