@@ -14,6 +14,11 @@ export function usePackStatus() {
   /** Bumped on ANY terminal state — even a cancelled or failed batch has
    *  already packed/unpacked some folders, so views must refresh. */
   const packFinishedCount = ref(0);
+  /** The action ("pack" | "unpack" | "extract") of the most recent job,
+   *  surviving through Progress and terminal events — Failed/Cancelled
+   *  payloads don't carry it, and views must tell a failed extraction
+   *  apart from a failed pack. */
+  const lastAction = ref<string | null>(null);
 
   let unlisten: UnlistenFn | null = null;
 
@@ -24,6 +29,7 @@ export function usePackStatus() {
       // Started event is where cancellation learns the id
       if ("Started" in event.payload) {
         packJobId.value = event.payload.Started.job_id;
+        lastAction.value = event.payload.Started.action;
       }
       if (
         "Completed" in event.payload ||
@@ -105,6 +111,7 @@ export function usePackStatus() {
     packSummary,
     packCancelled,
     packAction,
+    lastAction,
     packFinishedCount,
     startPack,
     startUnpack,

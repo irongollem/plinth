@@ -134,7 +134,7 @@
     <div v-if="isPacking" class="text-xs opacity-70 flex items-center gap-2">
       <span class="loading loading-spinner loading-xs"></span>
       <span>
-        {{ packAction === "unpack" ? "Unpacking" : "Packing" }}…
+        {{ packJobLabel }}…
         <template v-if="packProgress">
           {{ packProgress.model_index }}/{{ packProgress.total_models }} ·
           {{ packProgress.phase }} · {{ packProgress.percent }}%
@@ -532,7 +532,7 @@
           >
             <span class="loading loading-spinner loading-xs shrink-0"></span>
             <span class="flex-1 truncate">
-              {{ packAction === "unpack" ? "Unpacking" : "Packing" }}
+              {{ packJobLabel }}
               <template v-if="packProgress">
                 · {{ packProgress.model_index }}/{{
                   packProgress.total_models
@@ -1145,8 +1145,15 @@
             {{ group.paths.length }}× {{ formatFileSize(group.size_bytes) }}
           </span>
           <span class="flex-1"></span>
+          <span
+            v-if="!actionableOthers(group).length"
+            class="text-base-content/40"
+            title="Every extra copy lives inside a pack archive — unpack the model to merge or delete"
+          >
+            📦 packed — unpack to act
+          </span>
           <button
-            v-if="linkSupport !== false"
+            v-if="linkSupport !== false && actionableOthers(group).length"
             type="button"
             class="btn btn-xs btn-primary"
             :disabled="reclaimBusy || linkSupport === null"
@@ -1156,6 +1163,7 @@
             merge — free {{ formatFileSize(reclaimableBytes(group)) }}
           </button>
           <button
+            v-if="actionableOthers(group).length"
             type="button"
             class="btn btn-xs btn-outline btn-error"
             :disabled="reclaimBusy"
@@ -1171,17 +1179,35 @@
             :key="path"
             class="flex items-center justify-between gap-2"
           >
-            <label class="flex items-center gap-1.5 truncate cursor-pointer">
+            <label
+              class="flex items-center gap-1.5 truncate"
+              :class="
+                packedIn(group).includes(path) ? 'opacity-60' : 'cursor-pointer'
+              "
+            >
               <input
                 type="radio"
                 class="radio radio-xs"
                 :name="`keep-${group.hash}`"
                 :checked="keepFor(group) === path"
+                :disabled="packedIn(group).includes(path)"
                 @change="keepChoice[group.hash] = path"
               />
               <span class="truncate" :title="path">{{ path }}</span>
+              <span
+                v-if="packedIn(group).includes(path)"
+                class="shrink-0"
+                title="Inside a pack archive — unpack the model to merge or delete this copy"
+              >
+                📦
+              </span>
             </label>
-            <button type="button" class="link shrink-0" @click="reveal(path)">
+            <!-- a packed path has no file to reveal; show its folder -->
+            <button
+              type="button"
+              class="link shrink-0"
+              @click="revealDupPath(group, path)"
+            >
               reveal
             </button>
           </li>
@@ -1569,12 +1595,20 @@ const {
   packError,
   packSummary,
   packCancelled,
-  packAction,
+  lastAction,
   packFinishedCount,
   startPack,
   startUnpack,
   cancelPack,
 } = usePackStatus();
+
+// One label for banners/progress: extraction rides the same event stream
+// as pack/unpack jobs and must not read as "Packing…" during a print
+const packJobLabel = computed(() => {
+  if (lastAction.value === "unpack") return "Unpacking";
+  if (lastAction.value === "extract") return "Extracting";
+  return "Packing";
+});
 
 const catalogRoot = ref("");
 const query = ref("");
@@ -1698,9 +1732,13 @@ const stlPaths = computed(() =>
 );
 
 // Merged (hardlinked) copies cost the disk nothing, so reclaimable space
-// counts distinct physical copies — a fully shared group contributes 0
-const reclaimableBytes = (g: DuplicateGroup) =>
-  g.size_bytes * (g.distinct_copies - 1);
+// counts distinct physical copies — a fully shared group contributes 0.
+// Packed copies aren't loose bytes either (they occupy compressed archive
+// space and can't be merged/deleted), so they don't count as reclaimable.
+const reclaimableBytes = (g: DuplicateGroup) => {
+  const looseCopies = g.distinct_copies - (g.packed_paths?.length ?? 0);
+  return g.size_bytes * Math.max(0, looseCopies - 1);
+};
 
 const wastedBytes = computed(() =>
   dupGroups.value.reduce((sum, g) => sum + reclaimableBytes(g), 0),
@@ -1865,10 +1903,18 @@ const toggle3d = async () => {
     return;
   }
   if (selected.value?.packed) {
+    // extraction takes real time on a big model — if the user has moved to
+    // another member meanwhile, opening the viewer would show the NEW
+    // selection with the OLD selection's files attributed to it
+    const key = memberKey(selected.value);
     viewer3dBusy.value = true;
     const extracted = await ensureLoose(stlPaths.value);
     viewer3dBusy.value = false;
     if (extracted === null) return;
+    if (!selected.value || memberKey(selected.value) !== key) {
+      if (extracted.length) cleanupEphemeralSafe(extracted);
+      return;
+    }
     viewerExtracted.value = extracted;
   }
   show3d.value = true;
@@ -1879,7 +1925,7 @@ const close3d = () => {
   show3dModal.value = false;
   if (viewerExtracted.value.length && packCleanupAfter.value) {
     // the viewport holds the geometry in memory; the files can go
-    commands.cleanupEphemeralFiles(viewerExtracted.value);
+    cleanupEphemeralSafe(viewerExtracted.value);
   }
   viewerExtracted.value = [];
 };
@@ -2326,17 +2372,31 @@ const persistCleanupAfter = async () => {
   });
 };
 
+// Paths a handed-off render still depends on: Blender reads them from disk
+// in the Render tab for minutes, so print/3D cleanups of the same member
+// must not touch them. Held until app exit (the exit sweep owns them) —
+// there is no render-finished signal in this tab.
+const renderHeldPaths = ref<Set<string>>(new Set());
+
+// Every cleanup in this view goes through here so render-held paths are
+// exempt in ONE place instead of at each call site
+const cleanupEphemeralSafe = async (paths: string[]) => {
+  const safe = paths.filter((p) => !renderHeldPaths.value.has(p));
+  if (!safe.length) return;
+  const result = await commands.cleanupEphemeralFiles(safe);
+  if (result.status === "ok") {
+    for (const kept of result.data.errors) toastStore.addToast(kept, "info");
+  }
+};
+
 // Deleting the copies right after openWithDefaultApp returns would race the
 // slicer's own read. The delay covers a normal open; a file the slicer still
 // holds (Windows) refuses deletion and stays registered for the exit sweep,
 // and the size+mtime guard keeps anything the slicer saved over.
 const SLICER_CLEANUP_DELAY_MS = 15_000;
 const scheduleSlicerCleanup = (paths: string[]) => {
-  setTimeout(async () => {
-    const result = await commands.cleanupEphemeralFiles(paths);
-    if (result.status === "ok") {
-      for (const kept of result.data.errors) toastStore.addToast(kept, "info");
-    }
+  setTimeout(() => {
+    cleanupEphemeralSafe(paths);
   }, SLICER_CLEANUP_DELAY_MS);
 };
 
@@ -2415,6 +2475,10 @@ const unpackSelectedGroup = async () => {
 // Any terminal state changed disk state for the folders that DID finish —
 // refresh files, members and stats regardless of how the job ended
 watch(packFinishedCount, async () => {
+  // extractions ride the same event stream but change nothing the index
+  // knows about, and their outcome is handled where ensureLoose was awaited
+  // — refreshing here would blank the drawer mid-print
+  if (lastAction.value === "extract") return;
   if (packSummary.value) {
     const { action, succeeded, kept_files } = packSummary.value;
     toastStore.addToast(
@@ -2449,10 +2513,12 @@ const renderSelected = async () => {
   if (selected.value.packed) {
     // Blender reads the STLs from disk in the Render tab, so they must
     // exist before the handoff. No active cleanup here: the render needs
-    // them until it finishes elsewhere — the exit sweep (or the next
-    // manual cleanup) takes them back.
+    // them until it finishes elsewhere — the exit sweep takes them back,
+    // and marking them held stops a 3D-close or print cleanup of the same
+    // member from deleting them mid-render.
     const extracted = await ensureLoose(stlPaths.value);
     if (extracted === null) return;
+    for (const path of extracted) renderHeldPaths.value.add(path);
   }
   releasesStore.requestRender(
     stlPaths.value,
@@ -2508,9 +2574,12 @@ const printModel = async () => {
     "open-in-slicer";
   // Reveal-folder users keep the direct flow: reveal takes no file list,
   // so a picker would be a pointless extra click for them. Same fallback
-  // when there's nothing a slicer could open.
+  // when there's nothing a slicer could open. A packed file's path has no
+  // bytes on disk to reveal — fall through to a loose file or the folder.
   if (action === "reveal-folder" || !printCandidates.value.length) {
-    await reveal(files.value[0]?.path ?? selected.value.dir_path);
+    await reveal(
+      files.value.find((f) => !f.packed)?.path ?? selected.value.dir_path,
+    );
     return;
   }
   printSelection.value = printablePaths.value;
@@ -2519,16 +2588,25 @@ const printModel = async () => {
 
 const sendToSlicer = async () => {
   if (!printSelection.value.length) return;
+  // Snapshot: extraction takes real time, and the modal's checkboxes stay
+  // live — what opens must be exactly what was extracted
+  const selection = [...printSelection.value];
   printBusy.value = true;
   try {
     // Packed files materialize just-in-time — only the ticked entries are
     // pulled from the archive, "print straight from the bundle"
-    const extracted = await ensureLoose(printSelection.value);
+    const extracted = await ensureLoose(selection);
     if (extracted === null) return;
+    if (!showPrintModal.value) {
+      // the user cancelled the modal mid-extraction — don't surprise them
+      // with a slicer window; just take the copies back
+      if (extracted.length) cleanupEphemeralSafe(extracted);
+      return;
+    }
     // Our own command, not the opener plugin: its open_path is
     // fire-and-forget and reports success even when the OS has no app
     // for the file type — a print button that silently does nothing
-    const result = await commands.openWithDefaultApp(printSelection.value);
+    const result = await commands.openWithDefaultApp(selection);
     if (result.status === "ok") {
       showPrintModal.value = false;
       if (extracted.length && packCleanupAfter.value) {
@@ -2551,8 +2629,14 @@ const sendToSlicer = async () => {
 };
 
 const revealFromPrintModal = async () => {
+  // packed selections point at paths with no bytes on disk — reveal a
+  // loose file when there is one, else the model folder itself
   const target =
-    printSelection.value[0] ?? files.value[0]?.path ?? selected.value?.dir_path;
+    printSelection.value.find(
+      (path) => !files.value.some((f) => f.path === path && f.packed),
+    ) ??
+    files.value.find((f) => !f.packed)?.path ??
+    selected.value?.dir_path;
   showPrintModal.value = false;
   if (target) await reveal(target);
 };
@@ -2754,8 +2838,35 @@ const applyNormalizePlan = async () => {
   }
 };
 
-const keepFor = (group: DuplicateGroup) =>
-  keepChoice.value[group.hash] ?? group.paths[0];
+// packed_paths is additive in the bindings (older payloads omit it)
+const packedIn = (group: DuplicateGroup) => group.packed_paths ?? [];
+
+// The keeper must be a loose path: a packed keeper can't donate a hardlink
+// (merge refuses it) and 'delete copies' would remove every loose copy. A
+// stored choice that has since been packed is ignored, not honored.
+const keepFor = (group: DuplicateGroup) => {
+  const stored = keepChoice.value[group.hash];
+  if (stored && !packedIn(group).includes(stored)) return stored;
+  return (
+    group.paths.find((path) => !packedIn(group).includes(path)) ??
+    group.paths[0]
+  );
+};
+
+// What merge/delete can actually touch: everything except the keeper and
+// the packed copies (those have no loose bytes on disk)
+const actionableOthers = (group: DuplicateGroup) =>
+  group.paths.filter(
+    (path) => path !== keepFor(group) && !packedIn(group).includes(path),
+  );
+
+// A packed path has no file on disk to reveal — show its folder instead
+const revealDupPath = (group: DuplicateGroup, path: string) =>
+  reveal(
+    packedIn(group).includes(path)
+      ? (path.replace(/[\\/][^\\/]*$/, "") ?? path)
+      : path,
+  );
 
 // Probed with a real hardlink attempt next to the first duplicate (NAS and
 // exFAT support can't be guessed from names) — gates the merge buttons so
@@ -2770,7 +2881,8 @@ watch(showDups, async (open) => {
 
 const runMerge = async (group: DuplicateGroup) => {
   const keep = keepFor(group);
-  const others = group.paths.filter((path) => path !== keep);
+  const others = actionableOthers(group);
+  if (!others.length) return 0;
   const result = await commands.mergeDuplicateFiles(keep, others);
   if (result.status !== "ok") {
     toastStore.reportError("Failed to merge duplicates", result.error);
@@ -2829,7 +2941,8 @@ const mergeAllGroups = async () => {
 
 const reclaimGroup = async (group: DuplicateGroup) => {
   const keep = keepFor(group);
-  const doomed = group.paths.filter((path) => path !== keep);
+  const doomed = actionableOthers(group);
+  if (!doomed.length) return;
   const confirmed = await confirm(
     `Delete ${doomed.length} duplicate file${doomed.length === 1 ? "" : "s"} and keep:\n${keep}`,
     { title: "Reclaim duplicates", kind: "warning" },
