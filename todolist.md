@@ -6,11 +6,11 @@
 
 ### Render engine (Blender promo renders)
 
-- [ ] Bundle or download-on-first-run a portable Blender (GPL allows shipping it as a separate CLI process; include license + source link). Detector already checks exe-relative `Resources/blender/`.
-- [ ] Batch render mode: manifest of many minis in ONE Blender launch (see raw/HANDOVER.md, biggest speed win for terabyte-scale cataloging)
-- [ ] Store chosen rotation in model metadata (`model.json`) so catalog re-renders don't need repositioning
-- [ ] Scale reference figure / true-scale rendering (handover roadmap; current look normalizes size)
-- [ ] Measured geometry into model.json (NOT a separate sidecar): dimensions mm, part count, chosen rotation — computed at render/parse time, stored in the same model.json the 3pk manifest and scanner already round-trip, so it becomes searchable catalog metadata for free
+- [x] Bundle or download-on-first-run a portable Blender (2026-07-07): version gate + managed install under app_data (download → sha256 verify → extract → atomic rename), first-launch scan/offer, detection ranks the managed install above ambient ones, license notice included
+- [x] Batch render mode (2026-07-07): `--batch manifest.json` renders many minis in ONE Blender launch (startup cost paid once — the contact sheet's clear()-loop generalized). Machine-readable stdout protocol (BATCH_START/MODEL/MEASURED/DONE, flushed), per-entry failure isolation, backend job with incremental persistence (cancel keeps finished previews), "Render previews…" in the toolbar/selection bar scoped like Pack…, missing-previews default + re-render checkbox, packed members skipped with a hint, scan/pack/batch-render mutual exclusion
+- [x] Store chosen rotation in model metadata (2026-07-07): studio renders aimed at the catalog auto-save the orientation (`model_user_meta.rotation` + model.json round-trip via write_leaf_json, leaf-scoped); batch re-renders reuse it, default 90,0,0 otherwise
+- [ ] Scale reference figure / true-scale rendering — the "banana for scale" asset is still to be chosen; the pipeline slot is ready (BatchEntry is a struct: one optional manifest key + a script flag importing a reference STL excluded from the 2.0-unit normalization; measured mm dims already captured)
+- [x] Measured geometry into model.json (2026-07-07): `dims_mm` ("60.2x35.1x88.7", true printed mm captured in normalize() before the stage-scale discards size) + `part_count`, measured during every render, stored in the index + merged into EXISTING model.json sidecars (never created — sidecar authority stays the normalizer's), shown in the drawer ("60.2 × 35.1 × 88.7 mm · 3 parts")
 - [x] Promo overlay compositing: branding (logo image + title/credit text) now bakes into the output PNG after Blender finishes — the webview composites on a canvas (same font engine as the preview = guaranteed WYSIWYG; no bundled fonts, no Rust glyph layout), Rust writes it back atomically with PNG-magic + exists guards. Ink color auto-picks dark/light by sampling the pixels under the text.
 - [ ] render_mini.py uses `use_nodes` (deprecated, removal in Blender 6.0) — needs a tweak when 6.x lands
 - [ ] Parse STLs in a Web Worker: mergeVertices on million-triangle minis still freezes the main thread during load (the overlay paints now, but a worker would keep the UI fully responsive)
