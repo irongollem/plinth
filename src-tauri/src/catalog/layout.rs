@@ -6,6 +6,9 @@
 //! {root}/{Designer}/{YYYY-MM Release}/{Model}/{Supported|Unsupported}/[{variant}/]files
 //! ```
 //!
+//! The Designer tier is skipped when the catalog folder itself is named
+//! for the designer (the add-one-designer-folder-at-a-time workflow).
+//!
 //! Poses are deliberately NOT folders: a pose is metadata (file_variants /
 //! model.json file_poses) and shows up in file NAMES, so a whole pose set
 //! prints in one multi-select without folder-diving. Everything here is
@@ -118,7 +121,18 @@ pub fn model_dir(
     release_date: Option<&str>,
     model_name: &str,
 ) -> PathBuf {
-    let mut dir = root.join(sanitize_segment(designer));
+    // A catalog folder that IS the designer's folder ("…/dm_stash" added
+    // as a root) already spells the designer — adding the segment again
+    // would nest DM Stash/DM Stash. Matched with the same fuzzy key as
+    // designer inference, so spelling/punctuation differences don't fool it.
+    let root_names_designer = root.file_name().is_some_and(|name| {
+        super::scanner::alnum_key(&name.to_string_lossy()) == super::scanner::alnum_key(designer)
+    });
+    let mut dir = if root_names_designer {
+        root.to_path_buf()
+    } else {
+        root.join(sanitize_segment(designer))
+    };
     if let Some(release) = release_name.filter(|r| !r.trim().is_empty()) {
         dir = dir.join(release_segment(release, release_date));
     }
@@ -240,6 +254,32 @@ mod tests {
         );
         // unknown support -> model root, variant tier does not apply
         assert_eq!(member_dir(model, None, Some("sword")), model);
+    }
+
+    #[test]
+    fn designer_named_root_skips_the_designer_segment() {
+        // The multi-root workflow adds "…/dm_stash" itself as a catalog
+        // folder — its models must not nest under a second DM Stash level.
+        assert_eq!(
+            model_dir(
+                Path::new("/nas/dm_stash"),
+                "DM Stash",
+                Some("Dungeon"),
+                Some("2026-01"),
+                "Mimic",
+            ),
+            Path::new("/nas/dm_stash/2026-01 Dungeon/Mimic")
+        );
+        // an unrelated designer inside that folder still gets its segment
+        assert_eq!(
+            model_dir(Path::new("/nas/dm_stash"), "Loot Studios", None, None, "Mimic"),
+            Path::new("/nas/dm_stash/Loot Studios/Mimic")
+        );
+        // a generic root keeps the canonical Designer tier
+        assert_eq!(
+            model_dir(Path::new("/nas/library"), "DM Stash", None, None, "Mimic"),
+            Path::new("/nas/library/DM Stash/Mimic")
+        );
     }
 
     #[test]

@@ -691,7 +691,7 @@ pub const DEFAULT_DESIGNERS: &[&str] = &[
 
 /// Lowercased alphanumerics only, so punctuation/spacing/underscores don't
 /// block a lexicon match.
-fn alnum_key(text: &str) -> String {
+pub(crate) fn alnum_key(text: &str) -> String {
     text.chars()
         .filter(|c| c.is_alphanumeric())
         .flat_map(|c| c.to_lowercase())
