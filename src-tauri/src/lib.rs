@@ -28,6 +28,7 @@ use render::commands::{
     cancel_render, detect_blender, read_image_base64, read_look_json, start_render,
     write_look_json, write_png_base64,
 };
+use render::provision::check_blender;
 use std::env;
 use std::sync::Mutex;
 use tauri::{Emitter, Listener, Manager};
@@ -64,6 +65,7 @@ fn create_specta_builder() -> Builder {
             settings::get_settings,
             settings::set_settings,
             detect_blender,
+            check_blender,
             start_render,
             cancel_render,
             read_image_base64,

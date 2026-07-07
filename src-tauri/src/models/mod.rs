@@ -54,6 +54,29 @@ pub struct BlenderInfo {
     pub version: String,
 }
 
+/// How a detected Blender measures against the render gate
+/// (provision::MIN_VERSION / RECOMMENDED_VERSION). Only Missing and TooOld
+/// disable rendering; Outdated is a suggestion the user may dismiss.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub enum BlenderVerdict {
+    Missing,
+    TooOld,
+    Outdated,
+    Ok,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct BlenderCheck {
+    pub verdict: BlenderVerdict,
+    /// None only when Missing
+    pub info: Option<BlenderInfo>,
+    /// The pinned version the download pipeline would install — dialog copy
+    /// and the first-run acknowledgement key
+    pub managed_version: String,
+    /// Whether the detected binary is one we downloaded ourselves
+    pub is_managed: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
 pub struct RenderOptions {
     /// Euler XYZ rotation in degrees, matching render_mini.py --rotate
