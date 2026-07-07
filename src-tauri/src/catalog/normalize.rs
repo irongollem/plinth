@@ -435,11 +435,14 @@ fn place_file(
 
 pub fn plan(
     conn: &Connection,
-    root: &Path,
+    roots: &[PathBuf],
     designer_filter: Option<&str>,
     group_filter: Option<&str>,
 ) -> Result<NormalizePlan, AppError> {
-    let root_str = root.to_string_lossy().into_owned();
+    let root_strs: Vec<String> = roots
+        .iter()
+        .map(|r| r.to_string_lossy().into_owned())
+        .collect();
     let rows = member_rows(conn, None)?;
     let all_dirs: HashSet<&str> = rows.iter().map(|r| r.dir.as_str()).collect();
     // Packed models can't be reorganized: their files exist only inside the
@@ -482,6 +485,33 @@ pub fn plan(
         };
         let release = first_some(members, |r| r.release.as_ref());
         let date = first_some(members, |r| r.date.as_ref());
+
+        let group_dirs: HashSet<&str> = members.iter().map(|r| r.dir.as_str()).collect();
+        let dirs: Vec<&str> = members.iter().map(|r| r.dir.as_str()).collect();
+
+        // The group's home is whichever catalog folder holds EVERY member —
+        // that folder anchors the target layout. A group with members in
+        // two folders has no single home, and moving files across folders
+        // is a curation decision, not a cleanup.
+        let owner = roots
+            .iter()
+            .zip(&root_strs)
+            .find(|(_, rs)| dirs.iter().all(|d| is_under(d, rs)));
+        let Some((root, root_str)) = owner else {
+            let outside = dirs
+                .iter()
+                .find(|d| !root_strs.iter().any(|rs| is_under(d, rs)));
+            skipped.push(NormalizeSkip {
+                group_name: display,
+                reason: match outside {
+                    Some(dir) => format!("{} is outside every catalog folder", dir),
+                    None => "members sit in different catalog folders — move them under one folder first"
+                        .to_string(),
+                },
+            });
+            continue;
+        };
+
         let model_dir = adopt_disk_casing(
             root,
             &layout::model_dir(
@@ -493,18 +523,6 @@ pub fn plan(
             ),
         );
         let model_dir_str = model_dir.to_string_lossy().into_owned();
-
-        let group_dirs: HashSet<&str> = members.iter().map(|r| r.dir.as_str()).collect();
-        let dirs: Vec<&str> = members.iter().map(|r| r.dir.as_str()).collect();
-
-        // members must live inside the catalog root to be movable at all
-        if let Some(outside) = dirs.iter().find(|d| !is_under(d, &root_str)) {
-            skipped.push(NormalizeSkip {
-                group_name: display,
-                reason: format!("{} is outside the catalog root", outside),
-            });
-            continue;
-        }
 
         if dirs
             .iter()
@@ -527,8 +545,8 @@ pub fn plan(
         // the base is shared with other models (e.g. a release folder).
         let base = common_ancestor(&dirs).map(|b| b.to_string_lossy().into_owned());
         let wholesale = base.as_deref().filter(|b| {
-            *b != root_str
-                && is_under(b, &root_str)
+            *b != root_str.as_str()
+                && is_under(b, root_str)
                 && !is_under(b, &model_dir_str)      // already at/inside the target
                 && !is_under(&model_dir_str, b)      // can't rename a dir into itself
                 // a model dir that ALREADY exists (earlier cleanup, second
@@ -602,8 +620,8 @@ pub fn plan(
                 let mut current = Path::new(d).parent();
                 while let Some(dir) = current {
                     let dir_str = dir.to_string_lossy().into_owned();
-                    if dir_str == root_str
-                        || !is_under(&dir_str, &root_str)
+                    if &dir_str == root_str
+                        || !is_under(&dir_str, root_str)
                         || is_under(&dir_str, &model_dir_str)
                         || group_dirs.contains(dir_str.as_str())
                     {
@@ -1086,11 +1104,15 @@ fn record_pose(conn: &Connection, path: &str, pose: Option<&str>) -> Result<(), 
 /// the search index. Returns human-readable warnings.
 pub fn finalize(
     conn: &Connection,
-    root: &Path,
+    roots: &[PathBuf],
     group_names: &[String],
     old_dirs: &[String],
 ) -> Result<Vec<String>, AppError> {
     let mut warnings: Vec<String> = Vec::new();
+    let root_strs: Vec<String> = roots
+        .iter()
+        .map(|r| r.to_string_lossy().into_owned())
+        .collect();
 
     for group in group_names {
         let members = member_rows(conn, Some(group))?;
@@ -1098,6 +1120,19 @@ pub fn finalize(
             warnings.push(format!("{}: no members found after the move", group));
             continue;
         }
+        // Same home-folder resolution as the planner: sidecars and the
+        // image walk anchor to the folder that holds every member.
+        let owner = roots
+            .iter()
+            .zip(&root_strs)
+            .find(|(_, rs)| members.iter().all(|m| is_under(&m.dir, rs)));
+        let Some((root, _)) = owner else {
+            warnings.push(format!(
+                "{}: members are not all inside one catalog folder — sidecars not written",
+                group
+            ));
+            continue;
+        };
         let refs: Vec<&MemberRow> = members.iter().collect();
         let designer = first_some(&refs, |r| r.designer.as_ref()).unwrap_or_default();
         let release = first_some(&refs, |r| r.release.as_ref());
@@ -1252,8 +1287,16 @@ pub fn finalize(
 
     // sweep: source dirs that only hold our own sidecars/OS litter go away,
     // then empty parents up to (never including) the root
+    // Each emptied dir sweeps up toward ITS OWN folder's rim — a dir from
+    // one catalog folder must never let the sweep climb into another.
     for dir in old_dirs {
-        sweep_upward(Path::new(dir), root);
+        if let Some(owner) = roots
+            .iter()
+            .zip(&root_strs)
+            .find(|(_, rs)| is_under(dir, rs))
+        {
+            sweep_upward(Path::new(dir), owner.0);
+        }
     }
 
     super::db::rebuild_search_index(conn)?;
@@ -1514,6 +1557,74 @@ mod tests {
     }
 
     #[test]
+    fn multi_root_plans_anchor_to_the_owning_folder() {
+        let base = std::env::temp_dir().join(format!("plinth_norm_multi_{}", std::process::id()));
+        fs::remove_dir_all(&base).ok();
+        let root_a = base.join("folder_a");
+        let root_b = base.join("folder_b");
+        // a messy model wholly inside folder B…
+        let messy = root_b.join("bog hag");
+        touch(&messy.join("bog.stl"));
+        // …and one group with a member in EACH folder
+        let split_a = root_a.join("wisp");
+        let split_b = root_b.join("wisp");
+        touch(&split_a.join("wisp_a.stl"));
+        touch(&split_b.join("wisp_b.stl"));
+
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::test_init(&conn);
+        let files = vec![
+            file_row(&messy.join("bog.stl"), &messy),
+            file_row(&split_a.join("wisp_a.stl"), &split_a),
+            file_row(&split_b.join("wisp_b.stl"), &split_b),
+        ];
+        let rows = vec![
+            model_row(&messy, "bog hag", "Bog Hag"),
+            model_row(&split_a, "wisp", "Wisp"),
+            model_row(&split_b, "wisp b", "Wisp"),
+        ];
+        db::replace_catalog(
+            &mut conn,
+            &base.to_string_lossy(),
+            &files,
+            &rows,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let roots = vec![root_a.clone(), root_b.clone()];
+        let plan = plan(&conn, &roots, None, None).unwrap();
+
+        // the whole-in-B group anchors its canonical layout under B, never A
+        let bog = plan
+            .groups
+            .iter()
+            .find(|g| g.group_name == "Bog Hag")
+            .expect("bog hag planned");
+        assert!(
+            bog.target_dir.starts_with(&*root_b.to_string_lossy()),
+            "{}",
+            bog.target_dir
+        );
+
+        // the split group has no single home — skipped, not half-moved
+        let skip = plan
+            .skipped
+            .iter()
+            .find(|s| s.group_name.eq_ignore_ascii_case("wisp"))
+            .expect("wisp skipped");
+        assert!(
+            skip.reason.contains("different catalog folders"),
+            "{}",
+            skip.reason
+        );
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
     fn wholesale_move_reshapes_and_round_trips() {
         let root = std::env::temp_dir().join(format!("plinth_norm_{}", std::process::id()));
         fs::remove_dir_all(&root).ok();
@@ -1538,7 +1649,7 @@ mod tests {
         ];
         db::replace_catalog(&mut conn, &root.to_string_lossy(), &files, &[sup_row, unsup_row], &[], &[], &[]).unwrap();
 
-        let plan = plan(&conn, &root, None, None).unwrap();
+        let plan = plan(&conn, std::slice::from_ref(&root), None, None).unwrap();
         assert_eq!(plan.groups.len(), 1);
         let group = &plan.groups[0];
         let target = root.join("Bestiarum/2026-07 Dread Swamp/Bog Hag");
@@ -1566,7 +1677,7 @@ mod tests {
 
         let warnings = finalize(
             &conn,
-            &root,
+            std::slice::from_ref(&root),
             &["Bog Hag".to_string()],
             &group.old_dirs,
         )
@@ -1585,7 +1696,7 @@ mod tests {
         assert!(!root.join("bestiarum-07-2026").exists());
 
         // idempotence: a second plan finds nothing to do
-        let again = super::plan(&conn, &root, None, None).unwrap();
+        let again = super::plan(&conn, std::slice::from_ref(&root), None, None).unwrap();
         assert_eq!(again.groups.len(), 0, "{:?}", again.groups);
         assert_eq!(again.clean_groups, 1);
 
@@ -1617,7 +1728,7 @@ mod tests {
         ];
         db::replace_catalog(&mut conn, &root.to_string_lossy(), &files, &[row_a, row_b], &[], &[], &[]).unwrap();
 
-        let plan = plan(&conn, &root, None, None).unwrap();
+        let plan = plan(&conn, std::slice::from_ref(&root), None, None).unwrap();
         let group = &plan.groups[0];
         let target = root.join("Bestiarum/2026-07 Dread Swamp/galeb duhr");
 
@@ -1652,7 +1763,7 @@ mod tests {
 
         let warnings = finalize(
             &conn,
-            &root,
+            std::slice::from_ref(&root),
             &["galeb duhr".to_string()],
             &group.old_dirs,
         )
@@ -1698,7 +1809,7 @@ mod tests {
         ];
         db::replace_catalog(&mut conn, &root.to_string_lossy(), &files, &[row_1, row_2], &[], &[], &[]).unwrap();
 
-        let plan = plan(&conn, &root, None, None).unwrap();
+        let plan = plan(&conn, std::slice::from_ref(&root), None, None).unwrap();
         let group = &plan.groups[0];
         assert!(
             group.ops.iter().any(|op| op.kind == "drop"),
@@ -1731,7 +1842,7 @@ mod tests {
 
         let warnings = finalize(
             &conn,
-            &root,
+            std::slice::from_ref(&root),
             &["Unicorn Bases".to_string()],
             &group.old_dirs,
         )
@@ -1776,7 +1887,7 @@ mod tests {
         ];
         db::replace_catalog(&mut conn, &root.to_string_lossy(), &files, &[row_a], &[], &[], &[]).unwrap();
 
-        let plan = plan(&conn, &root, None, None).unwrap();
+        let plan = plan(&conn, std::slice::from_ref(&root), None, None).unwrap();
         let group = &plan.groups[0];
         // NOTHING may dir-rename onto the occupied leaf
         assert!(
@@ -1798,7 +1909,7 @@ mod tests {
 
         let warnings = finalize(
             &conn,
-            &root,
+            std::slice::from_ref(&root),
             &["Centaurs".to_string()],
             &group.old_dirs,
         )
@@ -1847,7 +1958,7 @@ mod tests {
         ];
         db::replace_catalog(&mut conn, &root.to_string_lossy(), &files, &[sup_row, unsup_row], &[], &[], &[]).unwrap();
 
-        let plan = plan(&conn, &root, None, None).unwrap();
+        let plan = plan(&conn, std::slice::from_ref(&root), None, None).unwrap();
         let group = &plan.groups[0];
         let outcome = apply_ops(&mut conn, &group.ops).unwrap();
         assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
@@ -1860,7 +1971,7 @@ mod tests {
 
         let warnings = finalize(
             &conn,
-            &root,
+            std::slice::from_ref(&root),
             &["Collector of Names".to_string()],
             &group.old_dirs,
         )
@@ -1907,7 +2018,7 @@ mod tests {
         let files = vec![file_row(&sup.join("centaur.lys"), &sup)];
         db::replace_catalog(&mut conn, &root.to_string_lossy(), &files, &[row], &[], &[], &[]).unwrap();
 
-        let plan = plan(&conn, &root, None, None).unwrap();
+        let plan = plan(&conn, std::slice::from_ref(&root), None, None).unwrap();
         assert_eq!(
             plan.groups.len(),
             0,
@@ -1976,7 +2087,7 @@ mod tests {
         )
         .unwrap();
 
-        let plan = plan(&conn, &root, None, None).unwrap();
+        let plan = plan(&conn, std::slice::from_ref(&root), None, None).unwrap();
         let group = &plan.groups[0];
         // exactly ONE dir op: the wholesale base move. Supported/ and
         // Great Swords/ travel along — nothing may rename onto them
@@ -1994,7 +2105,7 @@ mod tests {
 
         let warnings = finalize(
             &conn,
-            &root,
+            std::slice::from_ref(&root),
             &["Dark Wardens".to_string()],
             &group.old_dirs,
         )
@@ -2081,7 +2192,7 @@ mod tests {
         )
         .unwrap();
 
-        let plan = plan(&conn, &root, None, None).unwrap();
+        let plan = plan(&conn, std::slice::from_ref(&root), None, None).unwrap();
         let group = &plan.groups[0];
         let target = root.join("Bestiarum/2026-07 Dread Swamp/Unicorn Cavalry");
 
@@ -2096,7 +2207,7 @@ mod tests {
 
         let warnings = finalize(
             &conn,
-            &root,
+            std::slice::from_ref(&root),
             &["Unicorn Cavalry".to_string()],
             &group.old_dirs,
         )
@@ -2140,7 +2251,7 @@ mod tests {
         // idempotence — THE bug that kept the badge stuck on 'fix folder
         // structure': re-recording already-recorded poses made the plan
         // permanently non-empty
-        let again = super::plan(&conn, &root, None, None).unwrap();
+        let again = super::plan(&conn, std::slice::from_ref(&root), None, None).unwrap();
         assert_eq!(again.groups.len(), 0, "ghost ops: {:?}", again.groups);
         assert_eq!(again.clean_groups, 1);
 
@@ -2194,12 +2305,12 @@ mod tests {
         .unwrap();
 
         // the shape is already canonical — nothing to move
-        let plan = plan(&conn, &root, None, None).unwrap();
+        let plan = plan(&conn, std::slice::from_ref(&root), None, None).unwrap();
         assert_eq!(plan.groups.len(), 0, "{:?}", plan.groups);
         assert_eq!(plan.clean_groups, 1);
 
         // metadata refresh must not poison the mixed leaf
-        let warnings = finalize(&conn, &root, &["Maiden".to_string()], &[]).unwrap();
+        let warnings = finalize(&conn, std::slice::from_ref(&root), &["Maiden".to_string()], &[]).unwrap();
         assert!(warnings.is_empty(), "{:?}", warnings);
 
         let unsup_meta: serde_json::Value =
@@ -2253,7 +2364,7 @@ mod tests {
         ];
         db::replace_catalog(&mut conn, &root.to_string_lossy(), &files, &[knight, peryton], &[], &[], &[]).unwrap();
 
-        let plan = plan(&conn, &root, None, Some("Little Knights")).unwrap();
+        let plan = plan(&conn, std::slice::from_ref(&root), None, Some("Little Knights")).unwrap();
         let group = &plan.groups[0];
         let target = root.join("Bestiarum/2026-07 Dread Swamp/Little Knights");
         assert!(
@@ -2274,7 +2385,7 @@ mod tests {
 
         let warnings = finalize(
             &conn,
-            &root,
+            std::slice::from_ref(&root),
             &["Little Knights".to_string()],
             &group.old_dirs,
         )

@@ -93,6 +93,18 @@ fn normalized_roots(settings: &crate::models::Settings) -> Vec<String> {
         .collect()
 }
 
+/// The configured roots as paths, for callers that resolve dirs against
+/// the whole list (the normalizer) rather than scanning one root.
+async fn configured_roots(app_handle: &AppHandle) -> Result<Vec<PathBuf>, AppError> {
+    let settings = crate::settings::get_settings(app_handle.clone())
+        .await
+        .map_err(AppError::ConfigError)?;
+    Ok(normalized_roots(&settings)
+        .into_iter()
+        .map(PathBuf::from)
+        .collect())
+}
+
 /// Persist a changed roots list. catalog_root mirrors the first entry so a
 /// pre-multi-root build (or not-yet-migrated UI code) reading the same
 /// store stays coherent instead of resurrecting a removed folder.
@@ -1498,13 +1510,15 @@ pub async fn supports_file_links(path: String) -> Result<bool, AppError> {
 #[specta::specta]
 pub async fn plan_normalize(
     app_handle: AppHandle,
-    root: String,
     designer: Option<String>,
     group: Option<String>,
 ) -> Result<NormalizePlan, AppError> {
+    // The UI no longer nominates a root: each group's home folder is
+    // resolved from its members against the configured list.
+    let roots = configured_roots(&app_handle).await?;
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
-        normalize::plan(&conn, Path::new(&root), designer.as_deref(), group.as_deref())
+        normalize::plan(&conn, &roots, designer.as_deref(), group.as_deref())
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Normalize plan task failed: {}", e)))?
@@ -1532,13 +1546,13 @@ pub async fn apply_normalize(
 #[specta::specta]
 pub async fn finalize_normalize(
     app_handle: AppHandle,
-    root: String,
     group_names: Vec<String>,
     old_dirs: Vec<String>,
 ) -> Result<Vec<String>, AppError> {
+    let roots = configured_roots(&app_handle).await?;
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
-        normalize::finalize(&conn, Path::new(&root), &group_names, &old_dirs)
+        normalize::finalize(&conn, &roots, &group_names, &old_dirs)
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Normalize finalize task failed: {}", e)))?

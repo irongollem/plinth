@@ -2658,11 +2658,7 @@ const structureClean = ref<boolean | null>(null);
 const checkStructure = async (groupName: string) => {
   structureClean.value = null;
   if (!catalogRoot.value) return;
-  const result = await commands.planNormalize(
-    catalogRoot.value,
-    null,
-    groupName,
-  );
+  const result = await commands.planNormalize(null, groupName);
   // the user may have clicked to a different model while this was in
   // flight — a stale answer must never paint over the new selection
   if (selectedGroup.value?.group_name !== groupName) return;
@@ -2685,11 +2681,7 @@ const refreshSidecars = async (groupNames: string[]) => {
   if (!names.length || !catalogRoot.value || refreshingSidecars.value) return;
   refreshingSidecars.value = true;
   try {
-    const result = await commands.finalizeNormalize(
-      catalogRoot.value,
-      names,
-      [],
-    );
+    const result = await commands.finalizeNormalize(names, []);
     if (result.status !== "ok") {
       toastStore.reportError("Failed to refresh metadata", result.error);
       return;
@@ -2737,7 +2729,6 @@ const openNormalize = async (group?: string) => {
   // only — a model cleanup must not be excluded by an unrelated filter),
   // so a NAS cleanup can proceed one designer at a time
   const result = await commands.planNormalize(
-    catalogRoot.value,
     group ? null : designerFilter.value || null,
     group ?? null,
   );
@@ -2812,7 +2803,6 @@ const applyNormalizePlan = async () => {
       normalizeDone.value = Math.min(ops.length, i + CHUNK);
     }
     const finalize = await commands.finalizeNormalize(
-      catalogRoot.value,
       chosen.map((g) => g.group_name),
       chosen.flatMap((g) => g.old_dirs),
     );
