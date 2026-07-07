@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { commands } from "../bindings";
 import { useOS } from "../composables/useOS";
 import { useReleasesStore } from "../stores/releasesStore";
@@ -15,16 +15,26 @@ const { osType } = useOS();
 // in our top-left corner — drop the logo below them there.
 const isMac = osType.value === "macos";
 
-const catalogRoot = ref("");
+const catalogRoots = ref<string[]>([]);
 const libraryLine = ref("");
+// One folder shows its path; several collapse to a count (full list in
+// the tooltip) — the sidebar column can't fit a NAS path per designer.
+const rootsLine = computed(() =>
+  catalogRoots.value.length === 1
+    ? catalogRoots.value[0]
+    : `${catalogRoots.value.length} catalog folders`,
+);
 
 onMounted(async () => {
   const [settings, stats] = await Promise.all([
     commands.getSettings(),
     commands.getCatalogStats(),
   ]);
-  if (settings.status === "ok")
-    catalogRoot.value = settings.data.catalog_root ?? "";
+  if (settings.status === "ok") {
+    catalogRoots.value =
+      settings.data.catalog_roots ??
+      (settings.data.catalog_root ? [settings.data.catalog_root] : []);
+  }
   if (stats.status === "ok") {
     libraryLine.value = `${stats.data.total_models.toLocaleString()} models · ${formatFileSize(stats.data.total_size_bytes)}`;
   }
@@ -191,11 +201,11 @@ const stepState = (step: ReleaseStep) => {
     <span class="flex-1"></span>
 
     <div
-      v-if="catalogRoot"
+      v-if="catalogRoots.length"
       class="px-4.5 pb-2.5 font-mono text-[10.5px] text-base-content/40 leading-[1.7] truncate"
-      :title="catalogRoot"
+      :title="catalogRoots.join('\n')"
     >
-      {{ catalogRoot }}<br />
+      {{ rootsLine }}<br />
       {{ libraryLine }}
     </div>
 

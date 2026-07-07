@@ -70,22 +70,82 @@
         </button>
       </div>
       <div class="join">
-        <input
-          type="text"
-          readonly
-          class="input input-sm join-item w-56 font-mono"
-          :value="catalogRoot"
-          placeholder="Choose a folder to index..."
-        />
-        <button type="button" class="btn btn-sm join-item" @click="chooseRoot">
-          Folder
+        <div class="dropdown">
+          <button
+            type="button"
+            tabindex="0"
+            class="btn btn-sm join-item w-56 justify-start font-mono font-normal"
+            :title="roots.map((r) => r.root).join('\n')"
+          >
+            <span class="truncate">{{
+              rootsLabel || "Add a folder to index…"
+            }}</span>
+          </button>
+          <div
+            tabindex="0"
+            class="dropdown-content menu z-30 mt-1 w-110 rounded-box bg-base-200 p-2 shadow-lg"
+          >
+            <div
+              v-if="!roots.length"
+              class="px-2 py-1.5 text-[11px] text-base-content/50"
+            >
+              No catalog folders yet — add one designer folder at a time; each
+              scans on its own.
+            </div>
+            <div
+              v-for="r in roots"
+              :key="r.root"
+              class="flex items-center gap-2 px-2 py-1.5"
+            >
+              <div class="min-w-0 flex-1">
+                <div class="truncate font-mono text-[11px]" :title="r.root">
+                  {{ r.root }}
+                </div>
+                <div class="text-[10px] text-base-content/40">
+                  {{ r.model_count }} models ·
+                  {{ formatFileSize(r.total_size_bytes) }} ·
+                  {{
+                    r.last_scan_epoch
+                      ? `scanned ${new Date(r.last_scan_epoch * 1000).toLocaleDateString()}`
+                      : "never scanned"
+                  }}
+                </div>
+              </div>
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs"
+                :disabled="isScanning"
+                @click="scanRoot(r.root)"
+              >
+                Scan
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs text-error"
+                :disabled="isScanning"
+                title="Remove from the catalog — files on disk are untouched"
+                @click="removeRoot(r.root)"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        </div>
+        <button
+          type="button"
+          class="btn btn-sm join-item"
+          :disabled="isScanning"
+          @click="addFolder"
+        >
+          Add folder
         </button>
         <button
           v-if="!isScanning"
           type="button"
           class="btn btn-sm btn-primary join-item"
-          :disabled="!catalogRoot"
-          @click="scan"
+          :disabled="!hasRoots"
+          title="Rescan every catalog folder, one at a time"
+          @click="scanAll"
         >
           Scan
         </button>
@@ -93,7 +153,7 @@
           v-else
           type="button"
           class="btn btn-sm btn-error join-item"
-          @click="cancelScan"
+          @click="cancelAllScans"
         >
           Cancel
         </button>
@@ -101,7 +161,7 @@
       <button
         type="button"
         class="btn btn-sm"
-        :disabled="!catalogRoot || isScanning"
+        :disabled="!hasRoots || isScanning"
         title="Restructure folders on disk to match the curated catalog — you review every move first"
         @click="openNormalize()"
       >
@@ -110,7 +170,7 @@
       <button
         type="button"
         class="btn btn-sm"
-        :disabled="!catalogRoot || isScanning || isPacking"
+        :disabled="!hasRoots || isScanning || isPacking"
         title="Compress models into pack archives to save disk space — scoped to the designer filter when one is set. Safe to cancel; re-running resumes."
         @click="bulkPack()"
       >
@@ -1541,6 +1601,7 @@ import {
   type CatalogEntry,
   type CatalogFile,
   type CatalogGroup,
+  type CatalogRootSummary,
   type CatalogStats,
   type DesignerCount,
   type DuplicateGroup,
@@ -1610,7 +1671,28 @@ const packJobLabel = computed(() => {
   return "Packing";
 });
 
-const catalogRoot = ref("");
+/* Catalog folders: the index is fed one folder at a time (huge collections
+   scan incrementally), so the toolbar manages a LIST — each entry with its
+   own footprint, staleness, and scan button. */
+const roots = ref<CatalogRootSummary[]>([]);
+const hasRoots = computed(() => roots.value.length > 0);
+const refreshRoots = async () => {
+  const result = await commands.listCatalogRoots();
+  if (result.status === "ok") roots.value = result.data;
+};
+const rootsLabel = computed(() => {
+  if (!roots.value.length) return "";
+  const first = roots.value[0].root;
+  const segments = first.split(/[/\\]/).filter(Boolean);
+  const name = segments[segments.length - 1] ?? first;
+  return roots.value.length === 1
+    ? first
+    : `${name} +${roots.value.length - 1} more`;
+});
+/* Roots queued behind the currently running scan — folders scan strictly
+   one at a time so the NAS isn't hit with parallel walks. */
+const scanQueue = ref<string[]>([]);
+
 const query = ref("");
 const viewMode = ref<"list" | "grid">("grid");
 const selectedTags = ref<string[]>([]);
@@ -2657,7 +2739,7 @@ const structureClean = ref<boolean | null>(null);
 /** Dry-run the plan for one model to decide the drawer's badge/button. */
 const checkStructure = async (groupName: string) => {
   structureClean.value = null;
-  if (!catalogRoot.value) return;
+  if (!hasRoots.value) return;
   const result = await commands.planNormalize(null, groupName);
   // the user may have clicked to a different model while this was in
   // flight — a stale answer must never paint over the new selection
@@ -2678,7 +2760,7 @@ const checkStructure = async (groupName: string) => {
 const refreshingSidecars = ref(false);
 const refreshSidecars = async (groupNames: string[]) => {
   const names = groupNames.filter(Boolean);
-  if (!names.length || !catalogRoot.value || refreshingSidecars.value) return;
+  if (!names.length || !hasRoots.value || refreshingSidecars.value) return;
   refreshingSidecars.value = true;
   try {
     const result = await commands.finalizeNormalize(names, []);
@@ -2692,7 +2774,7 @@ const refreshSidecars = async (groupNames: string[]) => {
       "success",
     );
     // the sidecars changed on disk — only a rescan makes the catalog see it
-    await scan();
+    await scanAll();
   } finally {
     refreshingSidecars.value = false;
   }
@@ -2714,7 +2796,7 @@ const expandedPlanGroup = ref<string | null>(null);
 const normalizeScope = ref<string | null>(null);
 
 const openNormalize = async (group?: string) => {
-  if (!catalogRoot.value) {
+  if (!hasRoots.value) {
     toastStore.addToast("Choose a catalog folder first", "info");
     return;
   }
@@ -2817,7 +2899,7 @@ const applyNormalizePlan = async () => {
     );
     // the rescan re-reads the fresh model.json sidecars — completion also
     // refreshes search/stats via the existing scanCompletedCount watcher
-    await scan();
+    await scanAll();
     if (!normalizeIssues.value.length) {
       showNormalize.value = false;
     } else {
@@ -3236,9 +3318,14 @@ const pickPreviewImage = async () => {
 const displayPath = computed(() => {
   const entry = selected.value;
   if (!entry) return "";
-  const root = catalogRoot.value;
-  return root && entry.dir_path.startsWith(root)
-    ? entry.dir_path.slice(root.length).replace(/^[/\\]/, "")
+  const owner = roots.value.find(
+    (r) =>
+      entry.dir_path === r.root ||
+      entry.dir_path.startsWith(`${r.root}/`) ||
+      entry.dir_path.startsWith(`${r.root}\\`),
+  );
+  return owner
+    ? entry.dir_path.slice(owner.root.length).replace(/^[/\\]/, "")
     : entry.dir_path;
 });
 
@@ -3330,27 +3417,80 @@ const addToDraftRelease = async () => {
   }
 };
 
-const chooseRoot = async () => {
-  const dir = await selectDirectory({ title: "Choose catalog folder" });
-  if (!dir) return;
-  catalogRoot.value = dir;
-  const current = await commands.getSettings();
-  if (current.status === "ok") {
-    await commands.setSettings({ ...current.data, catalog_root: dir });
-  }
-};
-
-const scan = async () => {
-  if (!catalogRoot.value) return;
-  const result = await startScan(catalogRoot.value);
+/** Queue-preserving worker — the completed-watcher chains through this. */
+const startRootScan = async (root: string) => {
+  const result = await startScan(root);
   if (result.status === "error") {
+    scanQueue.value = [];
     toastStore.reportError("Failed to start scan", result.error);
   }
 };
 
+/** Single-folder scan from the dropdown. Drops any leftover batch queue
+    first — a stale queue would chain unrelated folders after this one. */
+const scanRoot = async (root: string) => {
+  scanQueue.value = [];
+  await startRootScan(root);
+};
+
+/** Rescan every folder, strictly one at a time — the queue drains in the
+    scan-completed watcher so the NAS never sees two walks at once. */
+const scanAll = async () => {
+  if (!roots.value.length) return;
+  scanQueue.value = roots.value.slice(1).map((r) => r.root);
+  await startRootScan(roots.value[0].root);
+};
+
+/** Pick-and-scan: adding a folder immediately indexes it. */
+const addFolder = async () => {
+  const dir = await selectDirectory({ title: "Add catalog folder" });
+  if (!dir) return;
+  const added = await commands.addCatalogRoot(dir);
+  if (added.status !== "ok") {
+    toastStore.reportError("Couldn't add folder", added.error);
+    return;
+  }
+  await refreshRoots();
+  await scanRoot(dir);
+};
+
+const removeRoot = async (root: string) => {
+  const confirmed = await confirm(
+    `Remove this folder from the catalog?\n\n${root}\n\nFiles on disk are untouched; its models leave the catalog until you add the folder back and rescan.`,
+    { title: "Remove catalog folder", kind: "warning" },
+  );
+  if (!confirmed) return;
+  const result = await commands.removeCatalogRoot(root);
+  if (result.status !== "ok") {
+    toastStore.reportError("Couldn't remove folder", result.error);
+    return;
+  }
+  await Promise.all([refreshRoots(), runSearch(), refreshMeta()]);
+};
+
+const cancelAllScans = async () => {
+  // drop the queue FIRST or the completed-watcher starts the next folder
+  scanQueue.value = [];
+  await cancelScan();
+};
+
+// a failed scan ends the batch — silently continuing would report
+// "scan complete" over a folder that never got indexed
+watch(scanError, (error) => {
+  if (error) scanQueue.value = [];
+});
+
 watch(scanCompletedCount, async () => {
+  // a queued folder keeps the pipeline going; the summary refresh waits
+  // until the whole batch is done
+  const next = scanQueue.value.shift();
+  if (next) {
+    await refreshRoots();
+    await startRootScan(next);
+    return;
+  }
   toastStore.addToast("Catalog scan complete", "success");
-  await Promise.all([runSearch(), refreshMeta()]);
+  await Promise.all([refreshRoots(), runSearch(), refreshMeta()]);
   // The open drawer shows pre-scan members otherwise — a rescan that
   // regroups models (or removes dirs) must be visible immediately, not
   // after a reopen
@@ -3388,11 +3528,7 @@ watch(dupCompletedCount, async () => {
 });
 
 onMounted(async () => {
-  const settings = await commands.getSettings();
-  if (settings.status === "ok" && settings.data.catalog_root) {
-    catalogRoot.value = settings.data.catalog_root;
-  }
-  await Promise.all([runSearch(), refreshMeta()]);
+  await Promise.all([refreshRoots(), runSearch(), refreshMeta()]);
 });
 
 // The tab is kept alive (KeepAlive in App.vue), so onMounted only fires

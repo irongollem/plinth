@@ -23,11 +23,18 @@ export function use3DPackageHandler() {
       );
       if (!confirmed) return;
 
-      // Default destination: the catalog root, so the release is scanned
-      // like everything else; ask only when none is configured
+      // Default destination: the first catalog folder, so the release is
+      // scanned like everything else; ask only when none is configured
       const settings = await commands.getSettings();
+      const catalogRoots =
+        (settings.status === "ok" &&
+          (settings.data.catalog_roots ??
+            (settings.data.catalog_root
+              ? [settings.data.catalog_root]
+              : []))) ||
+        [];
       const library =
-        (settings.status === "ok" && settings.data.catalog_root) ||
+        catalogRoots[0] ||
         (await selectDirectory({ title: "Import into which folder?" }));
       if (!library) return;
 
@@ -43,14 +50,17 @@ export function use3DPackageHandler() {
         "success",
       );
 
-      // Index it right away when it landed inside the catalog root; the
-      // scan also restores the packed curation from the model.json sidecars
-      if (
-        settings.status === "ok" &&
-        settings.data.catalog_root &&
-        library === settings.data.catalog_root
-      ) {
-        await commands.startCatalogScan(settings.data.catalog_root);
+      // Index it right away when it landed inside a catalog folder; the
+      // scan also restores the packed curation from the model.json
+      // sidecars. Only the OWNING folder rescans — not the whole catalog.
+      const owner = catalogRoots.find(
+        (root) =>
+          library === root ||
+          library.startsWith(`${root}/`) ||
+          library.startsWith(`${root}\\`),
+      );
+      if (owner) {
+        await commands.startCatalogScan(owner);
       }
     } catch (error) {
       toastStore.reportError("Failed to import 3D package", error);

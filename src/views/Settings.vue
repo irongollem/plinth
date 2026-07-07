@@ -4,13 +4,30 @@
       <div class="font-bold text-[17px]">Settings</div>
 
       <div class="flex flex-col gap-1.5">
-        <FileSelect
-          id="catalog_root"
-          label="Catalog root — scanned for models"
-          dir-mode
-          v-model="settings.catalog_root"
-          tooltip="The folder scanned to build your catalog."
-        />
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          >CATALOG FOLDERS</span
+        >
+        <div
+          class="flex flex-col gap-1 bg-base-200 border border-base-content/10 rounded-lg px-2.5 py-1.5"
+        >
+          <span
+            v-for="root in catalogRoots"
+            :key="root"
+            class="font-mono text-[12px] text-base-content/60 truncate"
+            :title="root"
+            >{{ root }}</span
+          >
+          <span
+            v-if="!catalogRoots.length"
+            class="font-mono text-[12px] text-base-content/40"
+            >No folders yet</span
+          >
+        </div>
+        <span class="text-[10.5px] text-base-content/40"
+          >Add, scan, and remove folders from the Catalog tab — one designer
+          folder at a time works best for huge collections.</span
+        >
       </div>
 
       <div class="flex flex-col gap-1.5">
@@ -289,12 +306,21 @@ const settings = ref<Settings>({
   max_compression_threads: null,
   blender_path: null,
   catalog_root: null,
+  catalog_roots: null,
   known_designers: null,
   print_action: null,
   release_field_defaults: null,
   pack_level: null,
   pack_cleanup_after: null,
 });
+
+// Display only — the Catalog tab manages the list. Falls back to the
+// legacy single root for a store that predates multi-root.
+const catalogRoots = computed(
+  () =>
+    settings.value.catalog_roots ??
+    (settings.value.catalog_root ? [settings.value.catalog_root] : []),
+);
 
 // Unset means the default behavior: hand files straight to the slicer
 const printAction = computed(
@@ -397,7 +423,19 @@ onMounted(async () => {
 
 const saveSettings = async () => {
   try {
-    const result = await commands.setSettings(settings.value);
+    // The Catalog tab owns the roots list and this tab may have loaded
+    // before folders were added there — saving the stale copy would drop
+    // them. Re-read the authoritative values right before writing.
+    const fresh = await commands.getSettings();
+    const payload =
+      fresh.status === "ok"
+        ? {
+            ...settings.value,
+            catalog_root: fresh.data.catalog_root,
+            catalog_roots: fresh.data.catalog_roots,
+          }
+        : settings.value;
+    const result = await commands.setSettings(payload);
     if (result.status === "ok") {
       toastStore.addToast("Settings saved successfully", "success", 3000);
     }
