@@ -1281,6 +1281,31 @@ mod tests {
     }
 
     #[test]
+    fn root_folder_itself_can_name_the_designer() {
+        // The multi-root workflow adds a designer's folder AS a root, so the
+        // designer signal is the root's own basename — the upward walk must
+        // check it before stopping, and the model name must not absorb it.
+        let base = std::env::temp_dir().join(format!("stlpack_rootdes_{}", std::process::id()));
+        let root = base.join("dm_stash");
+        let dir = root.join("2026-01 dungeon").join("mimic");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("mimic.stl"), b"solid").unwrap();
+
+        let designers: Vec<String> = DEFAULT_DESIGNERS.iter().map(|s| s.to_string()).collect();
+        let cancel = AtomicBool::new(false);
+        let outcome = scan(&root, &cancel, &designers, |_, _| {}).unwrap();
+
+        let mimic = outcome
+            .models
+            .iter()
+            .find(|m| m.name.to_lowercase().contains("mimic"))
+            .expect("mimic model");
+        assert_eq!(mimic.designer.as_deref(), Some("DM Stash"));
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
     fn date_from_segment_handles_both_orders_and_junk() {
         assert_eq!(
             date_from_segment("dungeon_classics-05-2026").as_deref(),
