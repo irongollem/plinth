@@ -328,7 +328,9 @@ def add_scale_reference(cfg, obj, dims_mm):
     return ref
 
 def resin_material(obj, color, look="flat"):
-    m = bpy.data.materials.new("Resin"); m.use_nodes = True
+    # use_nodes is deprecated (always True, no-op) since Blender 5.0 — new
+    # materials already carry the default Principled BSDF + Output nodes
+    m = bpy.data.materials.new("Resin")
     b = m.node_tree.nodes.get("Principled BSDF")
     b.inputs["Base Color"].default_value = tuple(color)+(1.0,)
     b.inputs["Metallic"].default_value = 0.0
@@ -389,7 +391,8 @@ def lights(look="flat"):
     mk(LOOK["key"],"Key",key_scale,key_size); mk(LOOK["fill"],"Fill",fill_scale); mk(LOOK["rim"],"Rim")
 
 def black_world(look="flat"):
-    w = bpy.data.worlds.new("World"); bpy.context.scene.world = w; w.use_nodes = True
+    # same deprecated-use_nodes story as resin_material() above
+    w = bpy.data.worlds.new("World"); bpy.context.scene.world = w
     nt = w.node_tree
     bg = nt.nodes.get("Background")
     bg.inputs["Color"].default_value = (0,0,0,1); bg.inputs["Strength"].default_value = 0.0
