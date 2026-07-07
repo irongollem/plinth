@@ -283,9 +283,206 @@ pub fn parse_sample_progress(line: &str) -> Option<(u32, u32)> {
     Some((current, total))
 }
 
+// ----------------------------- batch mode ---------------------------------
+
+/// One model in a batch manifest — the script renders these sequentially in
+/// a single Blender launch (startup cost paid once for the whole sweep).
+/// Deliberately a struct, not positional args: a future scale-reference
+/// figure ("banana for scale") is one more optional field here plus a script
+/// flag, no pipeline redesign.
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct BatchEntry {
+    pub parts: Vec<String>,
+    pub out: String,
+    pub rotate: (f64, f64, f64),
+}
+
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct BatchManifest {
+    pub entries: Vec<BatchEntry>,
+}
+
+/// Assemble the headless batch invocation: `--batch <manifest>` and NO
+/// positional parts — in single-model mode positionals all join into one
+/// mini, which is exactly wrong for a batch.
+pub fn build_batch_render_command(
+    blender: &BlenderInfo,
+    script: &Path,
+    manifest_path: &Path,
+) -> Command {
+    let mut cmd = new_command(Path::new(&blender.path));
+    cmd.args(progress_args(&blender.version));
+    cmd.arg("-b").arg("-P").arg(script).arg("--");
+    cmd.arg("--batch").arg(manifest_path);
+    cmd.arg("--look").arg("flat");
+    cmd
+}
+
+/// Machine-readable lines run_batch prints between Cycles' own output.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BatchLine {
+    Start { total: u32 },
+    Model { index: u32 },
+    Measured { index: u32, dims_mm: [f64; 3], parts: u32 },
+    Done { index: u32, ok: bool, error: Option<String> },
+}
+
+/// Parse one stdout line into a BatchLine (None for everything else,
+/// including Cycles' Sample lines — parse_sample_progress handles those).
+pub fn parse_batch_line(line: &str) -> Option<BatchLine> {
+    #[derive(serde::Deserialize)]
+    struct Start {
+        total: u32,
+    }
+    #[derive(serde::Deserialize)]
+    struct Model {
+        index: u32,
+    }
+    #[derive(serde::Deserialize)]
+    struct Measured {
+        index: u32,
+        dims_mm: [f64; 3],
+        parts: u32,
+    }
+    #[derive(serde::Deserialize)]
+    struct Done {
+        index: u32,
+        ok: bool,
+        #[serde(default)]
+        error: Option<String>,
+    }
+    let line = line.trim();
+    if let Some(json) = line.strip_prefix("BATCH_START ") {
+        let s: Start = serde_json::from_str(json).ok()?;
+        return Some(BatchLine::Start { total: s.total });
+    }
+    if let Some(json) = line.strip_prefix("BATCH_MODEL ") {
+        let m: Model = serde_json::from_str(json).ok()?;
+        return Some(BatchLine::Model { index: m.index });
+    }
+    if let Some(json) = line.strip_prefix("MEASURED ") {
+        let m: Measured = serde_json::from_str(json).ok()?;
+        return Some(BatchLine::Measured {
+            index: m.index,
+            dims_mm: m.dims_mm,
+            parts: m.parts,
+        });
+    }
+    if let Some(json) = line.strip_prefix("BATCH_DONE ") {
+        let d: Done = serde_json::from_str(json).ok()?;
+        return Some(BatchLine::Done {
+            index: d.index,
+            ok: d.ok,
+            error: d.error,
+        });
+    }
+    None
+}
+
+/// Write the manifest where the batch job's Blender can read it. Scratch
+/// space per job id; the job deletes the dir when it ends.
+pub fn batch_scratch_dir(app_handle: &AppHandle, job_id: &str) -> Result<PathBuf, AppError> {
+    let dir = app_handle
+        .path()
+        .app_cache_dir()
+        .or_else(|_| app_handle.path().app_data_dir())
+        .map_err(|e| AppError::ConfigError(format!("No writable app dir: {}", e)))?
+        .join("batch_renders")
+        .join(job_id);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| AppError::IoError(format!("Failed to create batch dir: {}", e)))?;
+    Ok(dir)
+}
+
+pub fn write_batch_manifest(dir: &Path, manifest: &BatchManifest) -> Result<PathBuf, AppError> {
+    let path = dir.join("manifest.json");
+    let json = serde_json::to_string_pretty(manifest)
+        .map_err(|e| AppError::ConfigError(format!("Failed to encode batch manifest: {}", e)))?;
+    std::fs::write(&path, json)
+        .map_err(|e| AppError::IoError(format!("Failed to write batch manifest: {}", e)))?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_batch_lines() {
+        assert_eq!(
+            parse_batch_line(r#"BATCH_START {"total": 3}"#),
+            Some(BatchLine::Start { total: 3 })
+        );
+        assert_eq!(
+            parse_batch_line(r#"BATCH_MODEL {"index": 1, "out": "/tmp/1.png"}"#),
+            Some(BatchLine::Model { index: 1 })
+        );
+        assert_eq!(
+            parse_batch_line(r#"MEASURED {"index": 0, "dims_mm": [60.2, 35.1, 88.7], "parts": 3}"#),
+            Some(BatchLine::Measured {
+                index: 0,
+                dims_mm: [60.2, 35.1, 88.7],
+                parts: 3
+            })
+        );
+        assert_eq!(
+            parse_batch_line(r#"BATCH_DONE {"index": 2, "ok": false, "error": "File not found: x.stl"}"#),
+            Some(BatchLine::Done {
+                index: 2,
+                ok: false,
+                error: Some("File not found: x.stl".to_string())
+            })
+        );
+        assert_eq!(
+            parse_batch_line(r#"BATCH_DONE {"index": 0, "ok": true}"#),
+            Some(BatchLine::Done {
+                index: 0,
+                ok: true,
+                error: None
+            })
+        );
+        // Cycles' own lines and noise are not batch lines
+        assert_eq!(parse_batch_line("Fra:1 | Sample 32/96"), None);
+        assert_eq!(parse_batch_line("BATCH_START not-json"), None);
+        assert_eq!(parse_batch_line("[render_mini] done."), None);
+    }
+
+    #[test]
+    fn batch_command_has_manifest_and_no_positionals() {
+        let blender = BlenderInfo {
+            path: "/usr/bin/blender".into(),
+            version: "Blender 5.1.2".into(),
+        };
+        let cmd = build_batch_render_command(
+            &blender,
+            Path::new("/tmp/render_mini.py"),
+            Path::new("/tmp/manifest.json"),
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|w| w[0] == "--batch" && w[1] == "/tmp/manifest.json"));
+        assert!(!args.iter().any(|a| a.ends_with(".stl")), "no positional parts");
+        assert!(args.iter().any(|a| a == "--log-level"), "5.x progress args present");
+    }
+
+    #[test]
+    fn batch_manifest_serializes_the_script_contract() {
+        let manifest = BatchManifest {
+            entries: vec![BatchEntry {
+                parts: vec!["/lib/a.stl".into()],
+                out: "/tmp/0.png".into(),
+                rotate: (90.0, 0.0, 0.0),
+            }],
+        };
+        let json = serde_json::to_string(&manifest).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["entries"][0]["parts"][0], "/lib/a.stl");
+        assert_eq!(value["entries"][0]["out"], "/tmp/0.png");
+        assert_eq!(value["entries"][0]["rotate"][0], 90.0);
+    }
 
     #[test]
     fn parses_cycles_sample_lines() {

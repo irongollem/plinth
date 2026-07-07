@@ -24,6 +24,16 @@ LOOK OVERRIDES (--config, for people who know their way around a light rig):
   resin.fill_color/rim_color (its key follows key.color); rich uses rich.*.
   The contact sheet inherits the config too (the merge happens before parse).
 
+BATCH MODE (many minis, one Blender launch — startup cost paid once):
+    blender -b -P render_mini.py -- --batch manifest.json
+  manifest.json = {"entries":[{"parts":["a.stl","base.stl"],"out":"a.png",
+  "rotate":[90,0,0], ...optional per-entry overrides (color/look/res/samples/
+  azimuth/elev/zoom/align/config)}]}. Progress is machine-readable on stdout:
+    BATCH_START {"total":N} / BATCH_MODEL {"index":i,"out":...} /
+    MEASURED {"index":i,"dims_mm":[x,y,z],"parts":n} /
+    BATCH_DONE {"index":i,"ok":true|false[,"error":...]}
+  A failed entry (missing/corrupt STL) reports ok:false and the batch moves on.
+
 ORIENTATION PICKER (contact sheet of candidate rotations):
     blender -b -P render_mini.py -- MODEL.stl --contact-sheet
     blender -b -P render_mini.py -- MODEL.stl --contact-sheet --sheet-cols 3 --out sheet.png
@@ -157,7 +167,7 @@ def parse():
     cfg = dict(paths=[], out=None, rotate=(90,0,0), color=LOOK["base_color"],
                azimuth=-15.0, elev=0.22, zoom=1.15, res=LOOK["res"], samples=LOOK["samples"],
                look="flat", contact=False, sheet_cols=3, sheet_res=420, sheet_samples=24,
-               align=False)
+               align=False, batch=None)
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -175,9 +185,10 @@ def parse():
         elif a == "--align-parts":   cfg["align"]=True
         elif a == "--sheet-cols":    i+=1; cfg["sheet_cols"]=int(argv[i])
         elif a == "--sheet-res":     i+=1; cfg["sheet_res"]=int(argv[i])
+        elif a == "--batch":         i+=1; cfg["batch"]=argv[i]
         else:                        cfg["paths"].append(a)
         i += 1
-    if not cfg["paths"]:
+    if not cfg["paths"] and not cfg["batch"]:
         raise SystemExit("No STL path given. Usage: blender -b -P render_mini.py -- model.stl")
     return cfg
 
@@ -248,11 +259,16 @@ def normalize(obj, rotate):
     bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
     bpy.ops.object.origin_set(type="ORIGIN_CENTER_OF_VOLUME")
     bpy.context.view_layer.update()
+    # STL is authored in mm; these are the model's true printed dimensions,
+    # captured on the ONE line where they still exist — the next statement
+    # scales everything to a 2.0-unit stage and discards absolute size.
+    dims_mm = tuple(obj.dimensions)
     s = 2.0 / (max(obj.dimensions) or 1.0); obj.scale = (s,s,s)
     bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
     obj.location = (0,0,0); bpy.context.view_layer.update()
     zmin = min((obj.matrix_world @ v.co).z for v in obj.data.vertices)
     obj.location.z -= zmin; bpy.context.view_layer.update()
+    return dims_mm
 
 def resin_material(obj, color, look="flat"):
     m = bpy.data.materials.new("Resin"); m.use_nodes = True
@@ -400,11 +416,19 @@ def setup_render(res, samples, look="flat"):
     sc.render.image_settings.color_mode = "RGBA"
     sc.render.film_transparent = False
 
-def build_and_render(cfg, rotate, out, res, samples):
+def build_and_render(cfg, rotate, out, res, samples, index=0, measure=False):
     """Full pipeline for one image at a given rotation."""
     clear()
     obj = import_join(cfg["paths"], cfg["align"])
-    normalize(obj, rotate)
+    dims_mm = normalize(obj, rotate)
+    if measure:
+        # Machine-readable, like CONTACT_SHEET below. flush matters: Python
+        # stdout is block-buffered when piped, and the Rust side attributes
+        # progress to models by these lines arriving in order.
+        print("MEASURED " + json.dumps(
+            {"index": index,
+             "dims_mm": [round(d, 1) for d in dims_mm],
+             "parts": len(cfg["paths"])}), flush=True)
     resin_material(obj, cfg["color"], cfg["look"])
     lights(cfg["look"]); black_world(cfg["look"])
     camera(obj, cfg["azimuth"], cfg["elev"], cfg["zoom"])
@@ -444,9 +468,56 @@ def make_contact_sheet(cfg, out):
         {"cols": cols, "rows": rows, "tile": tile,
          "rotations": [list(r) for r in cands]}))
 
+# ----------------------------- batch mode ---------------------------------
+def run_batch(cfg, manifest_path):
+    """Render many minis in ONE Blender launch (--batch manifest.json).
+
+    Each `blender -b` costs seconds of startup before the first sample — for
+    a library-wide preview sweep that's the dominant cost. The manifest is
+    {"entries":[{"parts":[...],"out":...,"rotate":[x,y,z], ...overrides}]};
+    entries render sequentially, clear() resetting the scene between them
+    (the same loop the contact sheet has always used). One bad STL must not
+    kill the batch: import_join raises SystemExit, so that is caught per
+    entry and reported as a machine-readable BATCH_DONE ok:false.
+
+    A future scale-reference figure ("banana for scale") slots in here: one
+    more manifest key naming a reference STL imported next to the model and
+    excluded from the 2.0-unit normalization.
+    """
+    import copy
+    with open(manifest_path, encoding="utf-8") as fh:
+        entries = json.load(fh)["entries"]
+    base_look = copy.deepcopy(LOOK)
+    print("BATCH_START " + json.dumps({"total": len(entries)}), flush=True)
+    for i, e in enumerate(entries):
+        print("BATCH_MODEL " + json.dumps({"index": i, "out": e["out"]}), flush=True)
+        try:
+            # per-entry LOOK overrides must not leak into the next entry
+            LOOK.clear(); LOOK.update(copy.deepcopy(base_look))
+            if e.get("config"): merge_config(LOOK, e["config"])
+            ecfg = dict(cfg)
+            ecfg["paths"] = e["parts"]
+            ecfg["align"] = bool(e.get("align", cfg["align"]))
+            for k in ("look", "res", "samples", "azimuth", "elev", "zoom"):
+                if k in e: ecfg[k] = e[k]
+            if "color" in e: ecfg["color"] = tuple(e["color"])
+            rotate = tuple(e.get("rotate", (90, 0, 0)))
+            build_and_render(ecfg, rotate, e["out"], ecfg["res"], ecfg["samples"],
+                             index=i, measure=True)
+            print("BATCH_DONE " + json.dumps({"index": i, "ok": True}), flush=True)
+        except (SystemExit, Exception) as ex:
+            print("BATCH_DONE " + json.dumps(
+                {"index": i, "ok": False, "error": str(ex) or type(ex).__name__}),
+                flush=True)
+
 # ----------------------------- main ---------------------------------------
 def main():
     cfg = parse()
+    if cfg["batch"]:
+        print(f"[render_mini] batch -> {cfg['batch']}")
+        run_batch(cfg, cfg["batch"])
+        print("[render_mini] done.")
+        return
     first = os.path.normpath(cfg["paths"][0])
     if cfg["contact"]:
         out = cfg["out"] or (os.path.splitext(first)[0] + "_sheet.png")
@@ -455,7 +526,8 @@ def main():
     else:
         out = cfg["out"] or (os.path.splitext(first)[0] + ".png")
         print(f"[render_mini] rendering -> {out}")
-        build_and_render(cfg, cfg["rotate"], out, cfg["res"], cfg["samples"])
+        build_and_render(cfg, cfg["rotate"], out, cfg["res"], cfg["samples"],
+                         measure=True)
     print("[render_mini] done.")
 
 if __name__ == "__main__":
