@@ -8,14 +8,15 @@ mod render;
 mod settings;
 
 use catalog::commands::{
-    add_catalog_tag, add_group_tag, apply_normalize, assign_files_to_pose, batch_move_models,
-    cancel_catalog_job, cleanup_ephemeral_files, clear_file_pose, combine_catalog_groups,
-    delete_duplicate_files, detach_catalog_group_source, ensure_model_files, finalize_normalize,
-    get_catalog_designers, get_catalog_group_members, get_catalog_group_sources,
-    get_catalog_model_files, get_catalog_releases, get_catalog_stats, get_catalog_tags,
-    get_duplicate_groups, get_file_variants, get_pack_candidates, merge_duplicate_files,
-    pack_models, plan_normalize, remove_catalog_tag, remove_group_tag, rename_catalog_group,
-    search_catalog, search_catalog_groups, set_group_cover, set_model_preview, start_catalog_scan,
+    add_catalog_root, add_catalog_tag, add_group_tag, apply_normalize, assign_files_to_pose,
+    batch_move_models, cancel_catalog_job, cleanup_ephemeral_files, clear_file_pose,
+    combine_catalog_groups, delete_duplicate_files, detach_catalog_group_source,
+    ensure_model_files, finalize_normalize, get_catalog_designers, get_catalog_group_members,
+    get_catalog_group_sources, get_catalog_model_files, get_catalog_releases, get_catalog_stats,
+    get_catalog_tags, get_duplicate_groups, get_file_variants, get_pack_candidates,
+    list_catalog_roots, merge_duplicate_files, pack_models, plan_normalize, remove_catalog_root,
+    remove_catalog_tag, remove_group_tag, rename_catalog_group, search_catalog,
+    search_catalog_groups, set_group_cover, set_model_preview, start_catalog_scan,
     start_duplicate_scan, supports_file_links, unpack_models, update_model_metadata,
 };
 use file::commands::{
@@ -71,6 +72,9 @@ fn create_specta_builder() -> Builder {
             write_look_json,
             get_pending_3dpak,
             start_catalog_scan,
+            list_catalog_roots,
+            add_catalog_root,
+            remove_catalog_root,
             start_duplicate_scan,
             cancel_catalog_job,
             search_catalog,

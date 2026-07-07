@@ -14,6 +14,7 @@ pub(crate) static SETTINGS_CACHE: Lazy<Mutex<Settings>> = Lazy::new(|| {
         max_compression_threads: None,
         blender_path: None,
         catalog_root: None,
+        catalog_roots: None,
         known_designers: None,
         print_action: None,
         release_field_defaults: None,
@@ -93,6 +94,21 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         .get("catalog_root")
         .and_then(|v| v.as_str().map(String::from));
 
+    // Migration happens on read: a store from a single-root build has no
+    // catalog_roots key, so the old folder seeds a one-entry list. Nothing
+    // is written back until the user saves — the old build keeps working
+    // off catalog_root if they downgrade before touching settings.
+    let catalog_roots = store
+        .get("catalog_roots")
+        .and_then(|v| v.as_array().cloned())
+        .map(|arr| {
+            arr.into_iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        })
+        .filter(|list| !list.is_empty())
+        .or_else(|| catalog_root.clone().map(|root| vec![root]));
+
     let print_action = store
         .get("print_action")
         .and_then(|v| v.as_str().map(String::from));
@@ -129,6 +145,7 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         max_compression_threads,
         blender_path,
         catalog_root,
+        catalog_roots,
         known_designers: Some(known_designers),
         print_action,
         release_field_defaults,
@@ -197,6 +214,15 @@ pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(
         &store,
         "catalog_root",
         settings.catalog_root.as_deref().map(|v| json!(v)),
+    );
+    set_or_delete(
+        &store,
+        "catalog_roots",
+        settings
+            .catalog_roots
+            .as_ref()
+            .filter(|list| !list.is_empty())
+            .map(|v| json!(v)),
     );
     set_or_delete(
         &store,

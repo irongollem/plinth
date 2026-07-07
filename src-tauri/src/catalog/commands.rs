@@ -70,6 +70,60 @@ fn job_active(prefix: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Trailing-separator-insensitive form of a root path — must agree with the
+/// scoping in db::replace_catalog or the same folder scans as two roots.
+fn normalized_root(path: &str) -> String {
+    let trimmed = path.trim_end_matches(std::path::MAIN_SEPARATOR);
+    if trimmed.is_empty() {
+        path.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// The configured roots list, normalized. Settings migration (single
+/// catalog_root seeding the list) already happened inside get_settings.
+fn normalized_roots(settings: &crate::models::Settings) -> Vec<String> {
+    settings
+        .catalog_roots
+        .clone()
+        .unwrap_or_default()
+        .iter()
+        .map(|r| normalized_root(r))
+        .collect()
+}
+
+/// Persist a changed roots list. catalog_root mirrors the first entry so a
+/// pre-multi-root build (or not-yet-migrated UI code) reading the same
+/// store stays coherent instead of resurrecting a removed folder.
+async fn save_roots(
+    app_handle: &AppHandle,
+    mut settings: crate::models::Settings,
+    roots: Vec<String>,
+) -> Result<(), AppError> {
+    settings.catalog_root = roots.first().cloned();
+    settings.catalog_roots = if roots.is_empty() { None } else { Some(roots) };
+    crate::settings::set_settings(app_handle.clone(), settings)
+        .await
+        .map_err(AppError::ConfigError)
+}
+
+/// Reject a root that nests inside (or swallows) a configured one — two
+/// overlapping roots would index the same dirs twice and their scoped
+/// scans would fight over the shared rows.
+fn overlap_error(roots: &[String], root: &str) -> Result<(), AppError> {
+    if let Some(overlap) = roots
+        .iter()
+        .find(|r| normalize::is_under(root, r) || normalize::is_under(r, root))
+    {
+        return Err(AppError::ConfigError(format!(
+            "'{}' overlaps the configured catalog folder '{}' — the same models would be indexed twice",
+            root, overlap
+        )));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<String, AppError> {
@@ -86,14 +140,27 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
         ));
     }
 
-    // Resolve the designer lexicon up front (async store read) so the
-    // blocking scan can borrow it; fall back to the built-in defaults.
-    let designers = crate::settings::get_settings(app_handle.clone())
+    // Settings are read up front (async store) so the blocking scan can
+    // borrow the designer lexicon — and so the root joins the configured
+    // list before any rows land under it.
+    let settings = crate::settings::get_settings(app_handle.clone())
         .await
-        .ok()
-        .and_then(|s| s.known_designers)
+        .map_err(AppError::ConfigError)?;
+    let designers = settings
+        .known_designers
+        .clone()
         .filter(|list| !list.is_empty())
         .unwrap_or_else(crate::settings::default_designers);
+
+    // Scanning a folder registers it: the "add one designer folder at a
+    // time" flow is pick-and-scan, not a separate management step.
+    let root = normalized_root(&root);
+    let mut roots = normalized_roots(&settings);
+    if !roots.contains(&root) {
+        overlap_error(&roots, &root)?;
+        roots.push(root.clone());
+        save_roots(&app_handle, settings, roots).await?;
+    }
 
     let job_id = format!("scan:{}", Uuid::new_v4());
     let cancel = register_job(&job_id)?;
@@ -174,6 +241,84 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
     });
 
     Ok(job_id)
+}
+
+/// The configured catalog folders with their indexed footprint. Folders the
+/// user added but never scanned report zero counts and no last_scan.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_catalog_roots(
+    app_handle: AppHandle,
+) -> Result<Vec<super::CatalogRootSummary>, AppError> {
+    let settings = crate::settings::get_settings(app_handle.clone())
+        .await
+        .map_err(AppError::ConfigError)?;
+    let roots = normalized_roots(&settings);
+    let conn = open_db(&app_handle)?;
+    let scan_times: HashMap<String, i64> = db::root_scan_times(&conn)?.into_iter().collect();
+    let mut out = Vec::with_capacity(roots.len());
+    for root in roots {
+        let (model_count, file_count, total_bytes) = db::root_summary(&conn, &root)?;
+        out.push(super::CatalogRootSummary {
+            last_scan_epoch: scan_times.get(&root).map(|t| *t as f64),
+            root,
+            model_count,
+            file_count,
+            total_size_bytes: total_bytes as f64,
+        });
+    }
+    Ok(out)
+}
+
+/// Register a catalog folder without scanning it yet. Returns the updated
+/// list. Adding is idempotent; a folder nested in (or swallowing) a
+/// configured one is rejected — overlapping roots would double-index.
+#[tauri::command]
+#[specta::specta]
+pub async fn add_catalog_root(
+    app_handle: AppHandle,
+    path: String,
+) -> Result<Vec<String>, AppError> {
+    if !Path::new(&path).is_dir() {
+        return Err(AppError::NotFoundError(format!(
+            "Catalog root '{}' is not a directory",
+            path
+        )));
+    }
+    let root = normalized_root(&path);
+    let settings = crate::settings::get_settings(app_handle.clone())
+        .await
+        .map_err(AppError::ConfigError)?;
+    let mut roots = normalized_roots(&settings);
+    if roots.contains(&root) {
+        return Ok(roots);
+    }
+    overlap_error(&roots, &root)?;
+    roots.push(root);
+    save_roots(&app_handle, settings, roots.clone()).await?;
+    Ok(roots)
+}
+
+/// Drop a catalog folder and purge its slice of the index. The disk is
+/// never touched; user tags/metadata for the purged models go with them
+/// (their durable home is the model.json sidecars), so re-adding the
+/// folder later just means a rescan.
+#[tauri::command]
+#[specta::specta]
+pub async fn remove_catalog_root(
+    app_handle: AppHandle,
+    path: String,
+) -> Result<Vec<String>, AppError> {
+    let root = normalized_root(&path);
+    let settings = crate::settings::get_settings(app_handle.clone())
+        .await
+        .map_err(AppError::ConfigError)?;
+    let mut roots = normalized_roots(&settings);
+    roots.retain(|r| r != &root);
+    save_roots(&app_handle, settings, roots.clone()).await?;
+    let mut conn = open_db(&app_handle)?;
+    db::purge_root(&mut conn, &root)?;
+    Ok(roots)
 }
 
 #[tauri::command]

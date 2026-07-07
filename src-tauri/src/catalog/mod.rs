@@ -163,6 +163,18 @@ pub struct CatalogGroupResult {
     pub total: u32,
 }
 
+/// One configured catalog folder and its indexed footprint — a row in the
+/// roots management UI. Zero counts with no last_scan mean "added but never
+/// scanned"; a stale last_scan is the cue to offer a rescan.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct CatalogRootSummary {
+    pub root: String,
+    pub model_count: u32,
+    pub file_count: u32,
+    pub total_size_bytes: f64,
+    pub last_scan_epoch: Option<f64>,
+}
+
 /// One designer and how many logical models (groups) carry that name —
 /// feeds the catalog's designer filter dropdown.
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

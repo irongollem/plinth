@@ -113,8 +113,9 @@ fn member_rows(conn: &Connection, group: Option<&str>) -> Result<Vec<MemberRow>,
 }
 
 /// `child` is `base` itself or lies beneath it (path-segment aware —
-/// "/lib/ab" is NOT under "/lib/a").
-fn is_under(child: &str, base: &str) -> bool {
+/// "/lib/ab" is NOT under "/lib/a"). Shared with the roots commands, whose
+/// nesting guard must agree with the planner about what "inside" means.
+pub(crate) fn is_under(child: &str, base: &str) -> bool {
     child == base
         || (child.len() > base.len()
             && child.starts_with(base)

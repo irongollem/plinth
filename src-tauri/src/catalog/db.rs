@@ -503,28 +503,7 @@ pub fn replace_catalog(
         }
         drop(insert_tag);
 
-        // Drop user tags and user metadata whose model no longer exists on
-        // disk — both tables are keyed by dir_path and survive rescans
-        tx.execute(
-            "DELETE FROM model_tags
-             WHERE dir_path NOT IN (SELECT dir_path FROM models)",
-            [],
-        )
-        .map_err(map_err)?;
-        tx.execute(
-            "DELETE FROM model_user_meta
-             WHERE dir_path NOT IN (SELECT dir_path FROM models)",
-            [],
-        )
-        .map_err(map_err)?;
-        // File-pose assignments are keyed by path; drop any whose file is
-        // gone from disk so a curated split doesn't outlive its files.
-        tx.execute(
-            "DELETE FROM file_variants
-             WHERE path NOT IN (SELECT path FROM files)",
-            [],
-        )
-        .map_err(map_err)?;
+        prune_orphans(&tx).map_err(map_err)?;
         // Seed file-pose splits carried in model.json (the 3pk read side).
         // OR IGNORE: a user's own assignment (same path PK) always wins, and
         // metadata rows survive the rescan above just like user ones.
@@ -542,14 +521,6 @@ pub fn replace_catalog(
                     .map_err(map_err)?;
             }
         }
-        tx.execute(
-            "DELETE FROM group_renames
-             WHERE lower(source_group) NOT IN
-                 (SELECT DISTINCT lower(COALESCE(group_name, name)) FROM models)",
-            [],
-        )
-        .map_err(map_err)?;
-
         rebuild_fts(&tx).map_err(map_err)?;
 
         // Global stamp feeds the stats footer; the per-root stamp lets the
@@ -569,6 +540,109 @@ pub fn replace_catalog(
     }
     tx.commit().map_err(map_err)?;
     Ok(())
+}
+
+/// Drop rows in the path-keyed side tables whose model or file is no longer
+/// indexed. Shared by rescan and root removal — anything that deletes from
+/// files/models must sweep these or user curation outlives its subject and
+/// silently reattaches if the same path is ever indexed again.
+fn prune_orphans(tx: &rusqlite::Transaction) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "DELETE FROM model_tags
+         WHERE dir_path NOT IN (SELECT dir_path FROM models)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM model_user_meta
+         WHERE dir_path NOT IN (SELECT dir_path FROM models)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM file_variants
+         WHERE path NOT IN (SELECT path FROM files)",
+        [],
+    )?;
+    tx.execute(
+        "DELETE FROM group_renames
+         WHERE lower(source_group) NOT IN
+             (SELECT DISTINCT lower(COALESCE(group_name, name)) FROM models)",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Remove one root's slice from the index — the "remove catalog folder"
+/// path. Scoped exactly like replace_catalog (including adoption of legacy
+/// NULL-root rows), so removing a folder that predates multi-root cleans up
+/// fully. User tags/metadata for the removed models are pruned with them;
+/// the durable copy of curation is the model.json sidecars on disk.
+pub fn purge_root(conn: &mut Connection, root: &str) -> Result<(), AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Catalog root removal failed: {}", e));
+    let trimmed = root.trim_end_matches(std::path::MAIN_SEPARATOR);
+    let root = if trimmed.is_empty() { root } else { trimmed };
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let tx = conn.transaction().map_err(map_err)?;
+    {
+        tx.execute(
+            "DELETE FROM files WHERE root = ?1
+               OR (root IS NULL AND (dir_path = ?1
+                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2))",
+            params![root, sep],
+        )
+        .map_err(map_err)?;
+        tx.execute(
+            "DELETE FROM models WHERE root = ?1
+               OR (root IS NULL AND (dir_path = ?1
+                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2))",
+            params![root, sep],
+        )
+        .map_err(map_err)?;
+        tx.execute(
+            "DELETE FROM packs WHERE model_dir = ?1
+               OR substr(model_dir, 1, length(?1) + length(?2)) = ?1 || ?2",
+            params![root, sep],
+        )
+        .map_err(map_err)?;
+        prune_orphans(&tx).map_err(map_err)?;
+        rebuild_fts(&tx).map_err(map_err)?;
+        tx.execute(
+            "DELETE FROM meta WHERE key = 'last_scan:' || ?1",
+            params![root],
+        )
+        .map_err(map_err)?;
+    }
+    tx.commit().map_err(map_err)?;
+    Ok(())
+}
+
+/// Indexed footprint of one root: (model_count, file_count, total_bytes).
+/// Uses the same containment rules as the scoped deletes, so legacy
+/// NULL-root rows under the folder are counted as its own.
+pub fn root_summary(conn: &Connection, root: &str) -> Result<(u32, u32, i64), AppError> {
+    let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Catalog read failed: {}", e));
+    let trimmed = root.trim_end_matches(std::path::MAIN_SEPARATOR);
+    let root = if trimmed.is_empty() { root } else { trimmed };
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let models: u32 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM models WHERE root = ?1
+               OR (root IS NULL AND (dir_path = ?1
+                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2))",
+            params![root, sep],
+            |r| r.get(0),
+        )
+        .map_err(map_err)?;
+    let (files, bytes): (u32, i64) = conn
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM files WHERE root = ?1
+               OR (root IS NULL AND (dir_path = ?1
+                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2))",
+            params![root, sep],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(map_err)?;
+    Ok((models, files, bytes))
 }
 
 /// Per-root last-scan times, as (root, epoch) pairs — one row per root that
@@ -2812,6 +2886,38 @@ mod tests {
         replace_catalog(&mut conn, "/lib/", &bug_files, &bug_models, &[], &[], &[]).unwrap();
         assert_eq!(search(&conn, "", &[], 10, 0).unwrap().total, 1);
         assert_eq!(search(&conn, "newt", &[], 10, 0).unwrap().total, 0);
+    }
+
+    #[test]
+    fn purge_root_removes_the_slice_and_its_curation() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+        add_tag(&conn, "/lib/newt", "painted").unwrap();
+
+        let other_files = vec![file_row("/other/wyvern/wyvern.stl", "/other/wyvern", 10)];
+        let other_models = vec![model_row("/other/wyvern", "Wyvern")];
+        replace_catalog(&mut conn, "/other", &other_files, &other_models, &[], &[], &[]).unwrap();
+
+        purge_root(&mut conn, "/lib").unwrap();
+
+        assert_eq!(search(&conn, "newt", &[], 10, 0).unwrap().total, 0);
+        assert_eq!(search(&conn, "wyvern", &[], 10, 0).unwrap().total, 1);
+        let orphaned_tags: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM model_tags WHERE dir_path = '/lib/newt'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphaned_tags, 0);
+        // the per-root stamp goes too, so a re-added folder starts fresh
+        let stamps = root_scan_times(&conn).unwrap();
+        assert_eq!(stamps.len(), 1);
+        assert_eq!(stamps[0].0, "/other");
+        // /other's footprint is untouched
+        let (m, f, _) = root_summary(&conn, "/other").unwrap();
+        assert_eq!((m, f), (1, 1));
     }
 
     #[test]

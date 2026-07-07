@@ -12,7 +12,16 @@ pub struct Settings {
     pub chunk_size: Option<u32>,
     pub max_compression_threads: Option<u32>,
     pub blender_path: Option<String>,
+    /// Legacy single catalog folder. Read-only compatibility: it seeds
+    /// catalog_roots on first load after the multi-root update and mirrors
+    /// roots[0] so an older build opening the same store still works.
     pub catalog_root: Option<String>,
+    /// The catalog folders. Scans and the roots UI operate on this list;
+    /// entries must not nest inside each other (enforced on add).
+    /// serde(default): a not-yet-updated frontend sends Settings without
+    /// this key, and its saves must not start failing.
+    #[serde(default)]
+    pub catalog_roots: Option<Vec<String>>,
     /// Studios the scanner recognizes in folder names to infer a designer.
     /// Seeded from scanner::DEFAULT_DESIGNERS on first load; user-editable.
     pub known_designers: Option<Vec<String>>,
