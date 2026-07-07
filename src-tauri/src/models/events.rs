@@ -1,3 +1,4 @@
+use crate::models::BlenderInfo;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri_specta::Event;
@@ -186,6 +187,57 @@ pub struct PackFailedStatus {
 pub struct PackCancelledStatus {
     pub job_id: String,
     pub succeeded: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
+pub enum BlenderProvisionStatus {
+    Started(ProvisionStartedStatus),
+    Progress(ProvisionProgressStatus),
+    /// Post-download work; Progress stops once the bytes are all here.
+    Extracting(ProvisionExtractingStatus),
+    Completed(ProvisionCompletedStatus),
+    Failed(ProvisionFailedStatus),
+    Cancelled(ProvisionCancelledStatus),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ProvisionStartedStatus {
+    pub job_id: String,
+    /// The pinned Blender being installed, e.g. "5.1.2".
+    pub version: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ProvisionProgressStatus {
+    pub job_id: String,
+    /// f64 like wasted_bytes above — u32 caps at 4 GB.
+    pub downloaded_bytes: f64,
+    pub total_bytes: f64,
+    pub percent: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ProvisionExtractingStatus {
+    pub job_id: String,
+    /// "verify" | "extract" | "install" — mirrors PackProgressStatus.phase.
+    pub phase: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ProvisionCompletedStatus {
+    pub job_id: String,
+    pub info: BlenderInfo,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ProvisionFailedStatus {
+    pub job_id: String,
+    pub error: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ProvisionCancelledStatus {
+    pub job_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]

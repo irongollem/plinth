@@ -7,12 +7,19 @@
 //! the managed download.
 
 use crate::error::AppError;
+use crate::models::events::{
+    BlenderProvisionStatus, ProvisionCancelledStatus, ProvisionCompletedStatus,
+    ProvisionExtractingStatus, ProvisionFailedStatus, ProvisionProgressStatus,
+    ProvisionStartedStatus,
+};
 use crate::models::{BlenderCheck, BlenderInfo, BlenderVerdict};
 use crate::render::engine;
-use once_cell::sync::OnceCell;
+use once_cell::sync::{Lazy, OnceCell};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
+use tauri_specta::Event;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Notify;
 
@@ -426,6 +433,111 @@ fn remove_old_versions(root: &Path, keep: &str) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
+}
+
+/// The one running download, if any. An Option, not a map like
+/// ACTIVE_RENDERS: two concurrent downloads of the same pinned Blender
+/// could only fight over the same final directory.
+static ACTIVE_PROVISION: Lazy<Mutex<Option<(String, Arc<Notify>)>>> =
+    Lazy::new(|| Mutex::new(None));
+
+/// Kick off the managed download; progress arrives as
+/// BlenderProvisionStatus events carrying the returned job_id.
+#[tauri::command]
+#[specta::specta]
+pub async fn download_blender(app_handle: AppHandle) -> Result<String, AppError> {
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let cancel_token = Arc::new(Notify::new());
+    {
+        let mut active = ACTIVE_PROVISION
+            .lock()
+            .map_err(|e| AppError::ConfigError(format!("Provision registry poisoned: {}", e)))?;
+        if active.is_some() {
+            return Err(AppError::InvalidInput(
+                "A Blender download is already running".to_string(),
+            ));
+        }
+        *active = Some((job_id.clone(), Arc::clone(&cancel_token)));
+    }
+
+    let job = job_id.clone();
+    tokio::spawn(async move {
+        run_provision_job(app_handle, job, cancel_token).await;
+        if let Ok(mut active) = ACTIVE_PROVISION.lock() {
+            *active = None;
+        }
+    });
+    Ok(job_id)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn cancel_blender_download(job_id: String) -> Result<(), AppError> {
+    if let Ok(active) = ACTIVE_PROVISION.lock() {
+        if let Some((id, token)) = active.as_ref() {
+            if *id == job_id {
+                token.notify_waiters();
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_provision_job(app_handle: AppHandle, job_id: String, cancel: Arc<Notify>) {
+    let _ = BlenderProvisionStatus::Started(ProvisionStartedStatus {
+        job_id: job_id.clone(),
+        version: MANAGED_VERSION.to_string(),
+    })
+    .emit(&app_handle);
+
+    // Chunks arrive every few KB; only whole-percent changes cross the IPC
+    let mut last_percent = u32::MAX;
+    let result = install_managed_blender(
+        &cancel,
+        |downloaded, total| {
+            let total = total.unwrap_or(0);
+            let percent = if total > 0 {
+                (downloaded * 100 / total) as u32
+            } else {
+                0
+            };
+            if percent != last_percent {
+                last_percent = percent;
+                let _ = BlenderProvisionStatus::Progress(ProvisionProgressStatus {
+                    job_id: job_id.clone(),
+                    downloaded_bytes: downloaded as f64,
+                    total_bytes: total as f64,
+                    percent,
+                })
+                .emit(&app_handle);
+            }
+        },
+        |phase| {
+            let _ = BlenderProvisionStatus::Extracting(ProvisionExtractingStatus {
+                job_id: job_id.clone(),
+                phase: phase.to_string(),
+            })
+            .emit(&app_handle);
+        },
+    )
+    .await;
+
+    let event = match result {
+        Ok(info) => BlenderProvisionStatus::Completed(ProvisionCompletedStatus {
+            job_id: job_id.clone(),
+            info,
+        }),
+        Err(AppError::UserCancelled(_)) => {
+            BlenderProvisionStatus::Cancelled(ProvisionCancelledStatus {
+                job_id: job_id.clone(),
+            })
+        }
+        Err(err) => BlenderProvisionStatus::Failed(ProvisionFailedStatus {
+            job_id: job_id.clone(),
+            error: err.to_string(),
+        }),
+    };
+    let _ = event.emit(&app_handle);
 }
 
 /// Detection plus the version verdict, in one call the first-run dialog,

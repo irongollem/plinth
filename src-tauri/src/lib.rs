@@ -23,12 +23,15 @@ use file::commands::{
     add_model, cancel_compression, create_release, finalize_release, import_release,
     open_with_default_app,
 };
-use models::events::{CompressionStatus, DuplicateStatus, PackStatus, RenderStatus, ScanStatus};
+use models::events::{
+    BlenderProvisionStatus, CompressionStatus, DuplicateStatus, PackStatus, RenderStatus,
+    ScanStatus,
+};
 use render::commands::{
     cancel_render, detect_blender, read_image_base64, read_look_json, start_render,
     write_look_json, write_png_base64,
 };
-use render::provision::check_blender;
+use render::provision::{cancel_blender_download, check_blender, download_blender};
 use std::env;
 use std::sync::Mutex;
 use tauri::{Emitter, Listener, Manager};
@@ -66,6 +69,8 @@ fn create_specta_builder() -> Builder {
             settings::set_settings,
             detect_blender,
             check_blender,
+            download_blender,
+            cancel_blender_download,
             start_render,
             cancel_render,
             read_image_base64,
@@ -122,6 +127,7 @@ fn create_specta_builder() -> Builder {
             ScanStatus,
             DuplicateStatus,
             PackStatus,
+            BlenderProvisionStatus,
         ])
 }
 
