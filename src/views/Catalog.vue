@@ -189,6 +189,15 @@
       >
         Pack…
       </button>
+      <button
+        type="button"
+        class="btn btn-sm"
+        :disabled="!hasRoots || isScanning || isPacking || isBatchRendering"
+        title="Render missing catalog previews in ONE Blender launch — scoped to the designer filter when one is set. Finished previews survive a cancel."
+        @click="openBatchRender()"
+      >
+        Render previews…
+      </button>
       <span class="flex-1"></span>
       <span class="font-mono text-[11px] text-base-content/40">
         {{ total.toLocaleString() }} result{{ total === 1 ? "" : "s" }}
@@ -215,6 +224,24 @@
         </template>
       </span>
       <button type="button" class="btn btn-xs btn-ghost" @click="cancelPack">
+        cancel
+      </button>
+    </div>
+    <!-- Batch render progress: one Blender process working the whole list -->
+    <div
+      v-if="isBatchRendering"
+      class="text-xs opacity-70 flex items-center gap-2"
+    >
+      <span class="loading loading-spinner loading-xs"></span>
+      <span>
+        Rendering previews…
+        <template v-if="batchProgress">
+          {{ batchProgress.model_index }}/{{ batchProgress.total_models }} ·
+          {{ batchProgress.percent }}%
+          <span class="opacity-50">{{ batchProgress.current_model }}</span>
+        </template>
+      </span>
+      <button type="button" class="btn btn-xs btn-ghost" @click="cancelBatch">
         cancel
       </button>
     </div>
@@ -275,6 +302,15 @@
           @click="bulkPack(checkedGroups)"
         >
           Pack…
+        </button>
+        <button
+          type="button"
+          class="btn btn-xs"
+          :disabled="isBatchRendering"
+          title="Render the selected models' missing previews in one Blender launch"
+          @click="openBatchRender(checkedGroups)"
+        >
+          Render previews…
         </button>
         <button
           type="button"
@@ -738,6 +774,14 @@
               >
                 {{ displayPath }}
               </button>
+              <!-- Machine facts from the render pipeline: true printed size -->
+              <p
+                v-if="measuredLabel"
+                class="font-mono text-[10px] text-base-content/40 mt-0.5"
+                title="Measured from the geometry when this model was rendered"
+              >
+                📐 {{ measuredLabel }}
+              </p>
             </div>
 
             <!-- Variant navigation: supported/unsupported tabs, poses within -->
@@ -1397,6 +1441,83 @@
       </div>
     </ModalView>
 
+    <!-- Batch render confirm: what one Blender launch is about to sweep -->
+    <ModalView :is-open="showBatchRender" @close="showBatchRender = false">
+      <div
+        class="w-120 max-w-[85vw] bg-base-100 rounded-box p-4 flex flex-col gap-3"
+      >
+        <div>
+          <div class="font-bold text-[15px]">Render previews</div>
+          <p class="text-[11px] text-base-content/50 mt-0.5">
+            One Blender launch renders every selected model in sequence —
+            finished previews stay even if you cancel midway. Stored rotations
+            are reused; everything else stands up at the default orientation.
+          </p>
+        </div>
+        <div
+          v-if="batchLoading"
+          class="h-16 flex items-center justify-center opacity-50"
+        >
+          <span class="loading loading-spinner loading-sm"></span>
+        </div>
+        <template v-else>
+          <div class="font-mono text-[11.5px] flex flex-col gap-1">
+            <span>
+              {{ batchMissing.length }} model{{
+                batchMissing.length === 1 ? "" : "s"
+              }}
+              without a preview (of {{ batchCandidates.length }} in scope)
+            </span>
+            <span v-if="batchPackedSkipped.length" class="text-base-content/50">
+              📦 {{ batchPackedSkipped.length }} skipped — packed (unpack first,
+              or render them individually from the drawer)
+            </span>
+            <label
+              v-if="batchExisting.length"
+              class="flex items-center gap-2 cursor-pointer"
+            >
+              <input
+                v-model="batchRerenderExisting"
+                type="checkbox"
+                class="checkbox checkbox-xs"
+              />
+              <span>
+                Re-render the {{ batchExisting.length }} existing preview{{
+                  batchExisting.length === 1 ? "" : "s"
+                }}
+                too
+              </span>
+            </label>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="flex-1"></span>
+            <button
+              type="button"
+              class="btn btn-sm"
+              @click="showBatchRender = false"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-primary"
+              :disabled="
+                !batchMissing.length &&
+                !(batchRerenderExisting && batchExisting.length)
+              "
+              @click="startBatchRender"
+            >
+              Render
+              {{
+                batchMissing.length +
+                (batchRerenderExisting ? batchExisting.length : 0)
+              }}
+            </button>
+          </div>
+        </template>
+      </div>
+    </ModalView>
+
     <!-- Normalizer: review-first cleanup of the on-disk structure -->
     <ModalView :is-open="showNormalize" @close="showNormalize = false">
       <div
@@ -1619,12 +1740,14 @@ import {
   type DesignerCount,
   type DuplicateGroup,
   type NormalizePlan,
+  type RenderCandidate,
   type TagCount,
   commands,
 } from "../bindings";
 import CatalogCard from "../components/CatalogCard.vue";
 import ModalView from "../components/ModalView.vue";
 import StlViewport from "../components/StlViewport.vue";
+import { useBatchRender } from "../composables/useBatchRender";
 import { useCatalogJobs } from "../composables/useCatalogJobs";
 import { useFileSelect } from "../composables/useFileSelect";
 import { usePackStatus } from "../composables/usePackStatus";
@@ -1683,6 +1806,19 @@ const packJobLabel = computed(() => {
   if (lastAction.value === "extract") return "Extracting";
   return "Packing";
 });
+
+const {
+  isBatchRendering,
+  batchProgress,
+  batchSummary,
+  batchError,
+  batchCancelled,
+  batchFinishedCount,
+  modelFinishedCount,
+  modelErrors,
+  startBatch,
+  cancelBatch,
+} = useBatchRender();
 
 /* Catalog folders: the index is fed one folder at a time (huge collections
    scan incrementally), so the toolbar manages a LIST — each entry with its
@@ -2533,6 +2669,104 @@ const bulkPack = async (groupNames: string[] = []) => {
     toastStore.reportError("Failed to start packing", result.error);
   }
 };
+
+// "60.2x35.1x88.7" → "60.2 × 35.1 × 88.7 mm · 3 parts" (machine facts the
+// render pipeline measured; absent until the model was rendered once)
+const measuredLabel = computed(() => {
+  const entry = selected.value;
+  if (!entry?.dims_mm) return null;
+  const dims = entry.dims_mm.split("x").join(" × ");
+  const parts = entry.part_count
+    ? ` · ${entry.part_count} part${entry.part_count === "1" ? "" : "s"}`
+    : "";
+  return `${dims} mm${parts}`;
+});
+
+/* ---- batch preview rendering: one Blender launch for the whole scope ---- */
+// Scope resolution mirrors bulkPack: explicit card selection > designer
+// facet > whole catalog. Candidates come back whole so the modal can do the
+// missing/existing/packed math without another round trip.
+const showBatchRender = ref(false);
+const batchCandidates = ref<RenderCandidate[]>([]);
+const batchRerenderExisting = ref(false);
+const batchLoading = ref(false);
+
+const batchMissing = computed(() =>
+  batchCandidates.value.filter((c) => !c.has_preview && !c.packed),
+);
+const batchExisting = computed(() =>
+  batchCandidates.value.filter((c) => c.has_preview && !c.packed),
+);
+const batchPackedSkipped = computed(() =>
+  batchCandidates.value.filter((c) => c.packed),
+);
+
+const openBatchRender = async (groupNames: string[] = []) => {
+  if (isBatchRendering.value) return;
+  batchLoading.value = true;
+  showBatchRender.value = true;
+  batchRerenderExisting.value = false;
+  batchCandidates.value = [];
+  const result = await commands.getRenderCandidates(
+    groupNames.length ? null : designerFilter.value || null,
+    groupNames,
+  );
+  batchLoading.value = false;
+  if (result.status !== "ok") {
+    showBatchRender.value = false;
+    toastStore.reportError("Failed to list render candidates", result.error);
+    return;
+  }
+  batchCandidates.value = result.data;
+};
+
+const startBatchRender = async () => {
+  const chosen = batchRerenderExisting.value
+    ? [...batchMissing.value, ...batchExisting.value]
+    : batchMissing.value;
+  if (!chosen.length) return;
+  const result = await startBatch(
+    chosen.map((c) => ({
+      dir_path: c.dir_path,
+      variant_key: c.variant_key,
+      name: c.name,
+      parts: c.parts,
+      rotation: c.rotation,
+    })),
+  );
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to start batch render", result.error);
+    return;
+  }
+  showBatchRender.value = false;
+};
+
+// Previews land incrementally — refresh the grid as they arrive so the
+// sweep is visible, not a single reveal at the end
+watch(modelFinishedCount, async () => {
+  await runSearch();
+});
+watch(batchFinishedCount, async () => {
+  if (batchSummary.value) {
+    const { succeeded, failed } = batchSummary.value;
+    toastStore.addToast(
+      `Rendered ${succeeded} preview${succeeded === 1 ? "" : "s"}${failed ? ` — ${failed} failed` : ""}`,
+      failed ? "info" : "success",
+    );
+  } else if (batchError.value) {
+    toastStore.reportError("Batch render failed", batchError.value);
+  } else if (batchCancelled.value) {
+    toastStore.addToast(
+      `Cancelled — ${batchCancelled.value.succeeded} preview${batchCancelled.value.succeeded === 1 ? "" : "s"} already rendered`,
+      "info",
+    );
+  }
+  for (const error of modelErrors.value.slice(0, 3)) {
+    toastStore.addToast(error, "error");
+  }
+  await Promise.all([runSearch(), refreshMeta()]);
+  if (selected.value) await selectEntry(selected.value);
+});
 
 /* ---- compressed at rest: pack/unpack the open model ---- */
 // Packing is per member FOLDER (nested variant folders pack themselves), so

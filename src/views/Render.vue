@@ -662,6 +662,10 @@ watch(
 );
 
 const rotation = ref<[number, number, number]>([90, 0, 0]);
+// The orientation the in-flight render was started with — what the
+// completion handler persists to the catalog (the render IS the chosen
+// orientation; batch re-renders reuse it).
+let renderedRotation: [number, number, number] = [90, 0, 0];
 const view = ref({ azimuth: -15, elevation: 0.22, zoom: 1.15 });
 const matchCamera = ref(true);
 // Re-seat parts exported around different origins (see StlViewport's
@@ -756,6 +760,18 @@ watch(resultPath, async (path) => {
       toastStore.addToast("Catalog preview updated", "success");
     } else {
       toastStore.reportError("Failed to set catalog preview", result.error);
+    }
+    // The render IS the chosen orientation — persist it so batch re-renders
+    // and future studio sessions start from it instead of the 90,0,0 guess.
+    // (Rotation used to be deliberately session-only; a render aimed at the
+    // catalog is the moment it becomes a fact about the model.)
+    const rotationResult = await commands.setModelRotation(
+      renderPreviewTarget.value,
+      renderedRotation,
+    );
+    if (rotationResult.status === "error") {
+      // non-fatal: the preview landed, only the orientation memo failed
+      toastStore.reportError("Failed to store rotation", rotationResult.error);
     }
     renderPreviewTarget.value = null;
     renderPreviewVariantKey.value = null;
@@ -1273,6 +1289,10 @@ const render = async () => {
     (c) => Math.round(c * 1000) / 1000,
   ) as [number, number, number];
   requestedOutputPath = outputPath.value || defaultOutputPath.value;
+  // Snapshot THIS job's orientation: the viewport stays live during the
+  // render, and the auto-save on completion must record what was rendered,
+  // not whatever the user is fiddling with by then
+  renderedRotation = [...rotation.value];
 
   const result = await start(partPaths.value, {
     rotate: rotation.value,
