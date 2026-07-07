@@ -228,6 +228,24 @@
         Align parts on base
       </label>
 
+      <label
+        class="label gap-2 text-sm"
+        :class="scaleRefConfigured ? 'cursor-pointer' : 'opacity-50'"
+        :title="
+          scaleRefConfigured
+            ? 'Renders your reference figure in grey beside the model, at true relative size'
+            : 'Pick a scale figure STL in Settings first'
+        "
+      >
+        <input
+          type="checkbox"
+          class="checkbox checkbox-sm"
+          :disabled="!scaleRefConfigured"
+          v-model="scaleReference"
+        />
+        Scale figure
+      </label>
+
       <div class="flex items-center gap-2">
         <label class="label cursor-pointer gap-2 text-sm flex-1">
           <input
@@ -600,7 +618,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { storeToRefs } from "pinia";
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
 import { commands } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
 import ProgressBar from "../components/ProgressBar.vue";
@@ -672,6 +690,17 @@ const matchCamera = ref(true);
 // stackOnBase). Off by default: on correctly-exported multi-part minis
 // the re-seat would WRONGLY collapse well-placed parts onto the base.
 const alignParts = ref(false);
+// Scale figure ("banana for scale"): the toggle only says "include it" —
+// which STL and how tall live in Settings, so the checkbox greys out until
+// a figure is configured there.
+const scaleReference = ref(false);
+const scaleRefConfigured = ref(false);
+const refreshScaleRefConfigured = async () => {
+  const result = await commands.getSettings();
+  scaleRefConfigured.value =
+    result.status === "ok" && !!result.data.scale_reference_path?.trim();
+  if (!scaleRefConfigured.value) scaleReference.value = false;
+};
 const resolution = ref(1600);
 const samples = ref(96);
 // "flat" (the handover's locked look) won the three-way comparison against
@@ -972,6 +1001,7 @@ const persistRenderSettings = () => {
       view: view.value,
       matchCamera: matchCamera.value,
       alignParts: alignParts.value,
+      scaleReference: scaleReference.value,
       resolution: resolution.value,
       samples: samples.value,
       look: look.value,
@@ -992,6 +1022,8 @@ const loadRenderSettings = () => {
       matchCamera.value = saved.matchCamera;
     if (typeof saved.alignParts === "boolean")
       alignParts.value = saved.alignParts;
+    if (typeof saved.scaleReference === "boolean")
+      scaleReference.value = saved.scaleReference;
     if (RESOLUTION_OPTIONS.has(saved.resolution))
       resolution.value = saved.resolution;
     if (SAMPLES_OPTIONS.has(saved.samples)) samples.value = saved.samples;
@@ -1179,6 +1211,7 @@ const resetRenderSettings = () => {
   viewport.value?.setView(VIEW_DEFAULTS);
   matchCamera.value = true;
   alignParts.value = false;
+  scaleReference.value = false;
   resolution.value = 1600;
   samples.value = 96;
   look.value = "flat";
@@ -1237,6 +1270,11 @@ const outdatedHintDismissed = ref(false);
 
 onMounted(() => {
   loadRenderSettings();
+  refreshScaleRefConfigured();
+});
+// keep-alive'd view: the user may configure a figure in Settings and come back
+onActivated(() => {
+  refreshScaleRefConfigured();
 });
 
 const colorLinear = computed<[number, number, number]>(() =>
@@ -1311,6 +1349,7 @@ const render = async () => {
     look_config: Object.keys(advanced.value).length
       ? JSON.stringify(overridesToNested(advanced.value))
       : null,
+    scale_reference: scaleReference.value,
   });
 
   if (result.status === "error") {

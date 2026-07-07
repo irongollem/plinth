@@ -265,8 +265,26 @@ pub fn build_render_command(
     {
         cmd.arg("--config").arg(config);
     }
+    if options.scale_reference {
+        if let Some((path, height)) = configured_scale_reference() {
+            cmd.arg("--scale-ref").arg(path);
+            cmd.arg("--scale-ref-height").arg(height.to_string());
+        }
+    }
     cmd.arg("--out").arg(output_path);
     cmd
+}
+
+/// The user's scale-reference figure, when one is configured. Read from the
+/// settings cache like the blender path: the toggle in RenderOptions only
+/// says "include it", the asset itself is a settings-level choice.
+fn configured_scale_reference() -> Option<(String, f64)> {
+    let cache = SETTINGS_CACHE.lock().ok()?;
+    let path = cache
+        .scale_reference_path
+        .clone()
+        .filter(|p| !p.trim().is_empty())?;
+    Some((path, cache.scale_reference_height_mm.unwrap_or(28.0)))
 }
 
 /// Extract "Sample 32/96" style progress from a Cycles stdout line.
@@ -540,6 +558,7 @@ mod tests {
             overwrite: true,
             align_parts: false,
             look_config: Some(r#"{"key":{"energy":1500}}"#.to_string()),
+            scale_reference: false,
         };
         let mut cmd = build_render_command(
             &blender,
@@ -613,6 +632,7 @@ mod tests {
             overwrite: false,
             align_parts: false,
             look_config: Some(json.to_string()),
+            scale_reference: false,
         };
         let cmd = build_render_command(
             &blender,

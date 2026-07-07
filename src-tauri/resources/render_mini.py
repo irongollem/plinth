@@ -24,6 +24,13 @@ LOOK OVERRIDES (--config, for people who know their way around a light rig):
   resin.fill_color/rim_color (its key follows key.color); rich uses rich.*.
   The contact sheet inherits the config too (the merge happens before parse).
 
+SCALE REFERENCE ("banana for scale" — true relative size next to the model):
+    blender -b -P render_mini.py -- MODEL.stl --scale-ref man.stl --scale-ref-height 28
+  The reference imports beside the model in neutral grey, scaled so it stands
+  --scale-ref-height mm tall in the model's own mm space (a 28mm scale guy
+  stays chest-height to a 90mm ogre). Included in framing, excluded from
+  MEASURED. Assumed sliced-ready (Z up). Missing file = warn and skip.
+
 BATCH MODE (many minis, one Blender launch — startup cost paid once):
     blender -b -P render_mini.py -- --batch manifest.json
   manifest.json = {"entries":[{"parts":["a.stl","base.stl"],"out":"a.png",
@@ -167,7 +174,7 @@ def parse():
     cfg = dict(paths=[], out=None, rotate=(90,0,0), color=LOOK["base_color"],
                azimuth=-15.0, elev=0.22, zoom=1.15, res=LOOK["res"], samples=LOOK["samples"],
                look="flat", contact=False, sheet_cols=3, sheet_res=420, sheet_samples=24,
-               align=False, batch=None)
+               align=False, batch=None, scale_ref=None, scale_ref_height=28.0)
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -186,6 +193,8 @@ def parse():
         elif a == "--sheet-cols":    i+=1; cfg["sheet_cols"]=int(argv[i])
         elif a == "--sheet-res":     i+=1; cfg["sheet_res"]=int(argv[i])
         elif a == "--batch":         i+=1; cfg["batch"]=argv[i]
+        elif a == "--scale-ref":     i+=1; cfg["scale_ref"]=argv[i]
+        elif a == "--scale-ref-height": i+=1; cfg["scale_ref_height"]=float(argv[i])
         else:                        cfg["paths"].append(a)
         i += 1
     if not cfg["paths"] and not cfg["batch"]:
@@ -270,6 +279,54 @@ def normalize(obj, rotate):
     obj.location.z -= zmin; bpy.context.view_layer.update()
     return dims_mm
 
+def add_scale_reference(cfg, obj, dims_mm):
+    """Import the reference figure ("banana for scale") beside the model.
+
+    True relative size, not equal framing: normalize() made the model's
+    longest side 2.0 stage units, so one stage unit = max(dims_mm)/2 mm.
+    The reference is scaled to stand scale_ref_height mm tall in that SAME
+    mm space — a 28 mm scale guy next to a 90 mm ogre stays chest-height.
+    The reference STL is assumed sliced-ready (Z up); it is deliberately
+    absent from MEASURED (it isn't part of the model) but included in the
+    camera framing so it never clips.
+    """
+    path = cfg.get("scale_ref")
+    if not path:
+        return None
+    path = os.path.normpath(path)
+    if not os.path.isfile(path):
+        print(f"[render_mini] scale reference not found, skipping: {path}")
+        return None
+    before = set(bpy.data.objects)
+    if hasattr(bpy.ops.wm, "stl_import"): bpy.ops.wm.stl_import(filepath=path)
+    else: bpy.ops.import_mesh.stl(filepath=path)
+    added = [o for o in bpy.data.objects if o not in before and o.type == "MESH"]
+    if not added:
+        print("[render_mini] scale reference import produced no mesh, skipping")
+        return None
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in added: o.select_set(True)
+    bpy.context.view_layer.objects.active = added[0]
+    if len(added) > 1: bpy.ops.object.join()
+    ref = bpy.context.view_layer.objects.active
+    ref.name = "ScaleRef"; bpy.ops.object.shade_smooth()
+    bpy.ops.object.origin_set(type="ORIGIN_CENTER_OF_VOLUME")
+    bpy.context.view_layer.update()
+
+    mm_per_unit = (max(dims_mm) or 1.0) / 2.0
+    native_h = ref.dimensions.z or 1.0
+    s = (cfg["scale_ref_height"] / mm_per_unit) / native_h
+    ref.scale = (s, s, s)
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    # seat on the floor and stand it just off the model's shadow-side edge
+    ref.location = (0, 0, 0); bpy.context.view_layer.update()
+    zmin = min((ref.matrix_world @ v.co).z for v in ref.data.vertices)
+    ref.location.z -= zmin
+    gap = 0.18
+    ref.location.x = -(obj.dimensions.x / 2 + ref.dimensions.x / 2 + gap)
+    bpy.context.view_layer.update()
+    return ref
+
 def resin_material(obj, color, look="flat"):
     m = bpy.data.materials.new("Resin"); m.use_nodes = True
     b = m.node_tree.nodes.get("Principled BSDF")
@@ -351,11 +408,12 @@ def black_world(look="flat"):
         nt.links.new(bg.outputs["Background"], mix.inputs[2])    # camera rays: black
         nt.links.new(mix.outputs["Shader"], out.inputs["Surface"])
 
-def camera(obj, azimuth, elev, zoom):
+def camera(objs, azimuth, elev, zoom):
     cd = bpy.data.cameras.new("Camera"); cd.lens = LOOK["cam_lens"]
     cam = bpy.data.objects.new("Camera", cd); bpy.context.collection.objects.link(cam)
     bpy.context.scene.camera = cam
-    coords = [obj.matrix_world @ v.co for v in obj.data.vertices]
+    # frame everything on stage (model + optional scale reference)
+    coords = [o.matrix_world @ v.co for o in objs for v in o.data.vertices]
     mn = Vector((min(c.x for c in coords),min(c.y for c in coords),min(c.z for c in coords)))
     mx = Vector((max(c.x for c in coords),max(c.y for c in coords),max(c.z for c in coords)))
     bbc = (mn+mx)*0.5
@@ -429,9 +487,14 @@ def build_and_render(cfg, rotate, out, res, samples, index=0, measure=False):
             {"index": index,
              "dims_mm": [round(d, 1) for d in dims_mm],
              "parts": len(cfg["paths"])}), flush=True)
+    ref = add_scale_reference(cfg, obj, dims_mm)
     resin_material(obj, cfg["color"], cfg["look"])
+    if ref is not None:
+        # neutral grey: the reference must read as a ruler, not a product
+        resin_material(ref, (0.52, 0.54, 0.58), cfg["look"])
     lights(cfg["look"]); black_world(cfg["look"])
-    camera(obj, cfg["azimuth"], cfg["elev"], cfg["zoom"])
+    camera([obj] + ([ref] if ref is not None else []),
+           cfg["azimuth"], cfg["elev"], cfg["zoom"])
     setup_render(res, samples, cfg["look"])
     bpy.context.scene.render.filepath = os.path.abspath(out).replace("\\","/")
     bpy.ops.render.render(write_still=True)
@@ -498,7 +561,8 @@ def run_batch(cfg, manifest_path):
             ecfg = dict(cfg)
             ecfg["paths"] = e["parts"]
             ecfg["align"] = bool(e.get("align", cfg["align"]))
-            for k in ("look", "res", "samples", "azimuth", "elev", "zoom"):
+            for k in ("look", "res", "samples", "azimuth", "elev", "zoom",
+                      "scale_ref", "scale_ref_height"):
                 if k in e: ecfg[k] = e[k]
             if "color" in e: ecfg["color"] = tuple(e["color"])
             rotate = tuple(e.get("rotate", (90, 0, 0)))

@@ -279,6 +279,55 @@
       <div class="flex flex-col gap-1.5">
         <span
           class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          >SCALE FIGURE</span
+        >
+        <div
+          class="flex items-center gap-2.5 bg-base-200 border border-base-content/10 rounded-lg px-2.5 py-1.5"
+        >
+          <span
+            class="font-mono text-[12px] text-base-content/60 flex-1 truncate"
+          >
+            {{ settings.scale_reference_path || "No figure chosen" }}
+          </span>
+          <button type="button" class="btn btn-xs" @click="browseScaleRef">
+            Browse…
+          </button>
+          <button
+            v-if="settings.scale_reference_path"
+            type="button"
+            class="btn btn-xs btn-ghost"
+            @click="settings.scale_reference_path = null"
+          >
+            clear
+          </button>
+        </div>
+        <label class="flex items-center gap-2 text-[11px]">
+          <span class="text-base-content/60">Stands</span>
+          <input
+            :value="settings.scale_reference_height_mm ?? 28"
+            type="number"
+            min="1"
+            max="500"
+            step="0.5"
+            class="input input-xs w-16 font-mono"
+            @change="
+              settings.scale_reference_height_mm =
+                Number.parseFloat(($event.target as HTMLInputElement).value) ||
+                null
+            "
+          />
+          <span class="text-base-content/40">mm tall next to the model</span>
+        </label>
+        <p class="text-[10.5px] text-base-content/40">
+          A reference figure rendered in grey beside your model at true relative
+          size — the "banana for scale". Any STL works (a 28&nbsp;mm standing
+          person reads best); toggle it per render in the studio.
+        </p>
+      </div>
+
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
           >APPEARANCE</span
         >
         <div
@@ -403,6 +452,17 @@ const browseBlender = async () => {
   if (files?.length) {
     settings.value.blender_path = files[0].path;
     await checkBlender();
+  }
+};
+
+const browseScaleRef = async () => {
+  const files = await selectFiles({
+    multiple: false,
+    title: "Select the scale figure STL",
+    accept: ".stl",
+  });
+  if (files?.length) {
+    settings.value.scale_reference_path = files[0].path;
   }
 };
 

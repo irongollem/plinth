@@ -51,6 +51,16 @@ pub struct Settings {
     /// bumping the pin re-offers the dialog exactly once.
     #[serde(default)]
     pub blender_setup_acknowledged: Option<String>,
+    /// The scale-reference figure ("banana for scale"): a user-supplied STL
+    /// rendered in grey beside the model when the studio toggle is on. Not
+    /// bundled with the app — the user picks any figure they like, so no
+    /// third-party license rides in our binary.
+    #[serde(default)]
+    pub scale_reference_path: Option<String>,
+    /// How tall the reference stands, in the model's own mm space
+    /// (None = 28 — a classic tabletop human).
+    #[serde(default)]
+    pub scale_reference_height_mm: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
@@ -109,6 +119,10 @@ pub struct RenderOptions {
     /// --config. Knob paths and defaults mirror src/utils/renderLookSchema.ts
     #[serde(default)]
     pub look_config: Option<String>,
+    /// Render the configured scale-reference figure beside the model
+    /// (settings supply the STL path + height; silently off when unset).
+    #[serde(default)]
+    pub scale_reference: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

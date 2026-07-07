@@ -365,7 +365,7 @@ async fn run_batch_child(
 }
 
 /// React to one machine-readable script line. Completion work (preview copy
-/// + DB writes) is synchronous file/SQLite IO measured in milliseconds
+/// and DB writes) is synchronous file/SQLite IO measured in milliseconds
 /// against renders measured in seconds — done inline, no task juggling.
 #[allow(clippy::too_many_arguments)]
 fn handle_batch_line(
