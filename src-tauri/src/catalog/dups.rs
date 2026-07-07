@@ -272,7 +272,7 @@ mod tests {
             group_name: None,
         }];
         db::test_init(&conn);
-        db::replace_catalog(&mut conn, &rows, &models, &[], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &dir.to_string_lossy(), &rows, &models, &[], &[], &[]).unwrap();
 
         let cancel = AtomicBool::new(false);
         let groups = find_duplicates(&conn, &cancel, |_, _| {}).unwrap();
@@ -314,7 +314,7 @@ mod tests {
             })
             .collect();
         db::test_init(&conn);
-        db::replace_catalog(&mut conn, &rows, &[], &[], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &dir.to_string_lossy(), &rows, &[], &[], &[], &[]).unwrap();
 
         let cancel = AtomicBool::new(false);
         let groups = find_duplicates(&conn, &cancel, |_, _| {}).unwrap();

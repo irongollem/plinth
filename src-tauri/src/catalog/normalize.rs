@@ -1535,7 +1535,7 @@ mod tests {
             file_row(&sup.join("bog.lys"), &sup),
             file_row(&unsup.join("bog.stl"), &unsup),
         ];
-        db::replace_catalog(&mut conn, &files, &[sup_row, unsup_row], &[], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &root.to_string_lossy(), &files, &[sup_row, unsup_row], &[], &[], &[]).unwrap();
 
         let plan = plan(&conn, &root, None, None).unwrap();
         assert_eq!(plan.groups.len(), 1);
@@ -1614,7 +1614,7 @@ mod tests {
             file_row(&old.join("A/galeb duhr.stl"), &old.join("A")),
             file_row(&old.join("B/galeb duhr.stl"), &old.join("B")),
         ];
-        db::replace_catalog(&mut conn, &files, &[row_a, row_b], &[], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &root.to_string_lossy(), &files, &[row_a, row_b], &[], &[], &[]).unwrap();
 
         let plan = plan(&conn, &root, None, None).unwrap();
         let group = &plan.groups[0];
@@ -1695,7 +1695,7 @@ mod tests {
             file_row(&pt2.join("oval.stl"), &pt2),
             file_row(&pt2.join("square.stl"), &pt2),
         ];
-        db::replace_catalog(&mut conn, &files, &[row_1, row_2], &[], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &root.to_string_lossy(), &files, &[row_1, row_2], &[], &[], &[]).unwrap();
 
         let plan = plan(&conn, &root, None, None).unwrap();
         let group = &plan.groups[0];
@@ -1773,7 +1773,7 @@ mod tests {
             file_row(&nested.join("centaur_A.lys"), &nested),
             file_row(&nested.join("shared_base.stl"), &nested),
         ];
-        db::replace_catalog(&mut conn, &files, &[row_a], &[], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &root.to_string_lossy(), &files, &[row_a], &[], &[], &[]).unwrap();
 
         let plan = plan(&conn, &root, None, None).unwrap();
         let group = &plan.groups[0];
@@ -1844,7 +1844,7 @@ mod tests {
             file_row(&sup.join("names.lys"), &sup),
             file_row(&unsup.join("names.stl"), &unsup),
         ];
-        db::replace_catalog(&mut conn, &files, &[sup_row, unsup_row], &[], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &root.to_string_lossy(), &files, &[sup_row, unsup_row], &[], &[], &[]).unwrap();
 
         let plan = plan(&conn, &root, None, None).unwrap();
         let group = &plan.groups[0];
@@ -1904,7 +1904,7 @@ mod tests {
         row.release_date = Some("2026-05".into());
         row.support_status = Some("supported".into());
         let files = vec![file_row(&sup.join("centaur.lys"), &sup)];
-        db::replace_catalog(&mut conn, &files, &[row], &[], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &root.to_string_lossy(), &files, &[row], &[], &[], &[]).unwrap();
 
         let plan = plan(&conn, &root, None, None).unwrap();
         assert_eq!(
@@ -1966,6 +1966,7 @@ mod tests {
         ];
         db::replace_catalog(
             &mut conn,
+            &root.to_string_lossy(),
             &files,
             &[base_row, row_a, row_b, unsup_row],
             &[],
@@ -2068,8 +2069,16 @@ mod tests {
                 support_status: None,
             },
         ];
-        db::replace_catalog(&mut conn, &files, &[sup_row, unsup_row], &[], &assignments, &[])
-            .unwrap();
+        db::replace_catalog(
+            &mut conn,
+            &root.to_string_lossy(),
+            &files,
+            &[sup_row, unsup_row],
+            &[],
+            &assignments,
+            &[],
+        )
+        .unwrap();
 
         let plan = plan(&conn, &root, None, None).unwrap();
         let group = &plan.groups[0];
@@ -2174,6 +2183,7 @@ mod tests {
         ];
         db::replace_catalog(
             &mut conn,
+            &root.to_string_lossy(),
             &files,
             &[sup_clone_row, unsup_clone_row, loose_row],
             &[],
@@ -2240,7 +2250,7 @@ mod tests {
             file_row(&sup.join("cmd.stl"), &sup),
             file_row(&foreign.join("peryton.stl"), &foreign),
         ];
-        db::replace_catalog(&mut conn, &files, &[knight, peryton], &[], &[], &[]).unwrap();
+        db::replace_catalog(&mut conn, &root.to_string_lossy(), &files, &[knight, peryton], &[], &[], &[]).unwrap();
 
         let plan = plan(&conn, &root, None, Some("Little Knights")).unwrap();
         let group = &plan.groups[0];

@@ -133,6 +133,7 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
             let mut conn = open_db(&app_handle)?;
             db::replace_catalog(
                 &mut conn,
+                &root,
                 &outcome.files,
                 &outcome.models,
                 &outcome.metadata_tags,
