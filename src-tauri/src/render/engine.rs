@@ -36,6 +36,14 @@ type CachedDetection = (Option<String>, BlenderInfo);
 /// far too expensive to repeat on every render.
 static DETECTION_CACHE: Lazy<Mutex<Option<CachedDetection>>> = Lazy::new(|| Mutex::new(None));
 
+/// Forget the cached detection — a managed install just landed and should
+/// win the next probe even though the blender_path setting didn't change.
+pub fn invalidate_detection_cache() {
+    if let Ok(mut cache) = DETECTION_CACHE.lock() {
+        *cache = None;
+    }
+}
+
 /// Resolve the Blender binary: explicit setting -> BLENDER_BIN env -> PATH -> platform defaults.
 /// Returns the first candidate that actually runs and reports a version.
 /// Always probes fresh (and refreshes the cache) — use detect_blender_cached
@@ -98,7 +106,14 @@ fn candidate_paths() -> Vec<PathBuf> {
         candidates.push(PathBuf::from(path));
     }
 
-    // A portable Blender shipped with (or downloaded next to) the app
+    // A Blender the app downloaded itself (app data dir). Ranks above the
+    // ambient installs below on purpose: the whole point of downloading one
+    // is to outvote an older Blender sitting on PATH or in /Applications.
+    if let Some(managed) = crate::render::provision::managed_binary() {
+        candidates.push(managed);
+    }
+
+    // A portable Blender shipped inside the app bundle
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             #[cfg(target_os = "macos")]

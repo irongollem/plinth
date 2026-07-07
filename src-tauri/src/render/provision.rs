@@ -7,8 +7,11 @@
 //! the managed download.
 
 use crate::error::AppError;
-use crate::models::{BlenderCheck, BlenderInfo, BlenderVerdict};
+use crate::models::{BlenderCheck, BlenderVerdict};
 use crate::render::engine;
+use once_cell::sync::OnceCell;
+use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Manager};
 
 /// The exact version the download pipeline installs. Bumping this is the
 /// whole release procedure: the mirror's .sha256 sidecar is fetched at
@@ -21,6 +24,74 @@ pub const MIN_VERSION: (u32, u32) = (4, 2);
 /// Below this the locked look renders differently; the UI suggests (but
 /// never forces) the managed download.
 pub const RECOMMENDED_VERSION: (u32, u32) = (5, 1);
+
+/// Where managed installs live. Seeded once at startup because the
+/// detector's candidate_paths() is synchronous and handle-less — the same
+/// reason SETTINGS_CACHE exists. NOT the exe-relative Resources dir the
+/// detector also probes: that one is for a Blender *bundled into* the app,
+/// and writing there at runtime would break macOS code signing.
+static APP_DATA_DIR: OnceCell<PathBuf> = OnceCell::new();
+
+/// Seed APP_DATA_DIR and sweep staging leftovers from crashed downloads.
+pub fn init_app_data_dir(app: &AppHandle) {
+    if let Ok(dir) = app.path().app_data_dir() {
+        let _ = APP_DATA_DIR.set(dir);
+    }
+    if let Some(root) = managed_root() {
+        sweep_stale_staging(&root);
+    }
+}
+
+/// `<app_data>/blender` — one version dir per managed install inside.
+pub fn managed_root() -> Option<PathBuf> {
+    APP_DATA_DIR.get().map(|dir| dir.join("blender"))
+}
+
+/// The platform binary inside a managed version dir, mirroring the layout
+/// each official archive extracts to.
+fn binary_in_version_dir(dir: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    return dir.join("Blender.app/Contents/MacOS/Blender");
+    #[cfg(target_os = "linux")]
+    return dir.join("blender");
+    #[cfg(target_os = "windows")]
+    return dir.join("blender.exe");
+}
+
+/// The binary of the highest-versioned managed install that actually has
+/// one — a half-written dir (no binary) never wins.
+pub fn managed_binary() -> Option<PathBuf> {
+    managed_binary_in(&managed_root()?)
+}
+
+fn managed_binary_in(root: &Path) -> Option<PathBuf> {
+    let mut versions: Vec<(u32, u32, u32, PathBuf)> = std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let (major, minor, patch) = parse_blender_version(&name.to_string_lossy())?;
+            let binary = binary_in_version_dir(&entry.path());
+            binary.is_file().then_some((major, minor, patch, binary))
+        })
+        .collect();
+    versions.sort();
+    versions.pop().map(|(_, _, _, binary)| binary)
+}
+
+/// Downloads assemble under dot-prefixed staging dirs and only get renamed
+/// into place whole; anything still staging-named at startup is debris from
+/// a crash mid-download.
+fn sweep_stale_staging(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(".staging-") {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
 
 /// Pull (major, minor, patch) out of a `--version` banner such as
 /// "Blender 4.2.1 LTS" or "Blender 5.1.2". Missing components default to 0;
@@ -57,8 +128,8 @@ pub async fn check_blender() -> Result<BlenderCheck, AppError> {
     match engine::detect_blender().await {
         Ok(info) => Ok(BlenderCheck {
             verdict: classify(&info.version),
-            // Managed installs don't exist until the download pipeline lands
-            is_managed: false,
+            is_managed: managed_root()
+                .is_some_and(|root| Path::new(&info.path).starts_with(&root)),
             info: Some(info),
             managed_version: MANAGED_VERSION.to_string(),
         }),
@@ -83,6 +154,27 @@ mod tests {
         assert_eq!(parse_blender_version("Blender 4.5"), Some((4, 5, 0)));
         assert_eq!(parse_blender_version("garbage"), None);
         assert_eq!(parse_blender_version("Blender Foundation"), None);
+    }
+
+    #[test]
+    fn highest_complete_managed_version_wins() {
+        let root = std::env::temp_dir().join(format!("stl-pack-managed-{}", uuid::Uuid::new_v4()));
+
+        // No root dir at all -> no managed install
+        assert_eq!(managed_binary_in(&root), None);
+
+        // 4.2.0 complete, 5.1.2 complete, 6.0.0 half-written (no binary)
+        for version in ["4.2.0", "5.1.2"] {
+            let binary = binary_in_version_dir(&root.join(version));
+            std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+            std::fs::write(&binary, "stub").unwrap();
+        }
+        std::fs::create_dir_all(root.join("6.0.0")).unwrap();
+
+        let winner = managed_binary_in(&root).expect("a managed binary");
+        assert!(winner.starts_with(root.join("5.1.2")));
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

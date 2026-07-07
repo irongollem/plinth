@@ -170,6 +170,11 @@ pub fn run() {
             builder.mount_events(app);
             let app_handle = app.handle().clone();
 
+            // Detection consults the managed-Blender dir synchronously, so
+            // its location is pinned once here (and crashed-download staging
+            // debris swept) before anything can render.
+            render::provision::init_app_data_dir(&app_handle);
+
             app.manage(PendingPackageOpen(Mutex::new(maybe_3dpak_path)));
 
             let drag_drop_handle = app_handle.clone();
