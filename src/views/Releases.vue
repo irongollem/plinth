@@ -3,7 +3,12 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { storeToRefs } from "pinia";
 import { computed, onMounted, ref, watch } from "vue";
-import { type Release, type ReleaseSummary, commands } from "../bindings.ts";
+import {
+  type Release,
+  type ReleaseDraftSummary,
+  type ReleaseSummary,
+  commands,
+} from "../bindings.ts";
 import CompressionStatus from "../components/CompressionStatus.vue";
 import FileSelect from "../components/FileSelect.vue";
 import Switch from "../components/Switch.vue";
@@ -29,7 +34,8 @@ const toastStore = useToastStore();
 const releasesStore = useReleasesStore();
 const { release, releaseDir, modelCount } = storeToRefs(releasesStore);
 const { fileExplorerName } = useOS();
-const { activeJobId, isCompressing, resetStatus } = useCompressionStatus();
+const { activeJobId, isCompressing, resetStatus, compressionStatus } =
+  useCompressionStatus();
 
 const stepDefs: { step: ReleaseStep; label: string }[] = [
   { step: 1, label: "Models" },
@@ -49,6 +55,50 @@ onMounted(async () => {
   const result = await commands.getCatalogReleases();
   if (result.status === "ok") pastReleases.value = result.data;
 });
+
+/* ---------------- left rail: unfinished drafts sitting in the scratch dir ---------------
+   A release directory only exists after step 2 (createRelease), so anything
+   here got that far but never finished packing — crash, quit, or a
+   localStorage snapshot that didn't survive. Reading it back needs the
+   backend: release.json only carries {id, path} per model, the actual
+   curation lives in each model's own model.json sidecar. */
+const releaseDrafts = ref<ReleaseDraftSummary[]>([]);
+const loadDrafts = async () => {
+  const result = await commands.listReleaseDrafts();
+  if (result.status === "ok") releaseDrafts.value = result.data;
+};
+onMounted(loadDrafts);
+
+// A successful pack deletes the scratch folder (compression_jobs) — drop it
+// from the resume list without waiting for the next full remount
+watch(compressionStatus, (status) => {
+  if (status && "Completed" in status) loadDrafts();
+});
+
+// The active draft's own folder (if it made it past step 2) shouldn't also
+// show up as a separate "resume" option
+const resumableDrafts = computed(() =>
+  releaseDrafts.value.filter((d) => d.release_dir !== releaseDir.value),
+);
+
+const isResumingDraft = ref(false);
+const resumeDraft = async (draft: ReleaseDraftSummary) => {
+  isResumingDraft.value = true;
+  try {
+    const result = await commands.loadReleaseDraft(draft.release_dir);
+    if (result.status !== "ok") throw result.error;
+    const [loadedRelease, loadedModels] = result.data;
+    releasesStore.loadDraft(loadedRelease, loadedModels, draft.release_dir);
+    toastStore.addToast(
+      `Resumed "${draft.name}" (${loadedModels.length} of ${draft.model_count} models restored)`,
+      loadedModels.length < draft.model_count ? "warning" : "info",
+    );
+  } catch (error) {
+    toastStore.reportError("Failed to resume draft", error);
+  } finally {
+    isResumingDraft.value = false;
+  }
+};
 
 /* ---------------------------- step 1: release info ---------------------------- */
 /** MonthYearInput format ("M/YYYY") — new releases default to this month. */
@@ -371,6 +421,29 @@ const cancelCompression = async () => {
         class="text-center text-xs text-base-content/40 border border-dashed border-base-content/15 rounded-box px-3 py-6"
       >
         No models yet — choose some from the catalog or add them here.
+      </div>
+
+      <div v-if="resumableDrafts.length" class="mt-2 flex flex-col gap-2">
+        <span
+          class="font-mono text-[9px] tracking-[0.12em] text-base-content/40 px-1"
+          >UNFINISHED — NEVER PACKED</span
+        >
+        <button
+          v-for="d in resumableDrafts"
+          :key="d.release_dir"
+          type="button"
+          class="text-left bg-base-200 border border-base-content/10 rounded-box px-3 py-2.5 cursor-pointer hover:border-primary/50 disabled:opacity-50 disabled:cursor-not-allowed"
+          :disabled="isResumingDraft"
+          @click="resumeDraft(d)"
+        >
+          <div class="font-semibold text-[13px]">
+            {{ d.name || "Untitled release" }}
+          </div>
+          <div class="font-mono text-[10.5px] text-base-content/60 mt-0.5">
+            {{ d.designer || "unknown designer" }} · {{ d.model_count }}
+            models
+          </div>
+        </button>
       </div>
 
       <div v-if="pastReleases.length" class="mt-2 flex flex-col gap-2">

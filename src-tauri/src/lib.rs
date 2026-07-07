@@ -22,7 +22,7 @@ use catalog::commands::{
 };
 use file::commands::{
     add_model, cancel_compression, create_release, finalize_release, import_release,
-    open_with_default_app,
+    list_release_drafts, load_release_draft, open_with_default_app,
 };
 use models::events::{
     BatchRenderStatus, BlenderProvisionStatus, CompressionStatus, DuplicateStatus, PackStatus,
@@ -67,6 +67,8 @@ fn create_specta_builder() -> Builder {
             cancel_compression,
             open_with_default_app,
             import_release,
+            list_release_drafts,
+            load_release_draft,
             settings::get_settings,
             settings::set_settings,
             detect_blender,

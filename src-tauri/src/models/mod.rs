@@ -158,6 +158,18 @@ pub struct ModelReference {
     pub location: ModelLocation,
 }
 
+/// A WIP release sitting in the scratch dir, not yet packed — surfaced so
+/// the builder can resume it without depending on the localStorage draft
+/// snapshot surviving. Successful finalize deletes the scratch folder, so
+/// anything found here is by definition unfinished.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct ReleaseDraftSummary {
+    pub release_dir: String,
+    pub name: String,
+    pub designer: String,
+    pub model_count: u32,
+}
+
 /// A model as the release builder stages it and `model.json` records it.
 /// The rich fields mirror the scanner's ModelJson reader — this is the WRITE
 /// side of metadata portability (docs/3PK.md): whatever curation the catalog

@@ -7,7 +7,7 @@ use crate::models::events::CancelledStatus;
 use crate::models::events::CompletedStatus;
 use crate::models::events::CompressionStatus;
 use crate::models::events::FailedStatus;
-use crate::models::{Release, StlModel};
+use crate::models::{ModelLocation, Release, ReleaseDraftSummary, StlModel};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::fs;
@@ -71,6 +71,81 @@ pub async fn add_model(
         model_with_relative_paths,
         model_json_path.to_string_lossy().into_owned(),
     ))
+}
+
+/// WIP releases that never got packed — a successful finalize removes the
+/// scratch folder (compression_jobs::perform_compression), so any directory
+/// still holding a release.json here is by definition unfinished.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_release_drafts(
+    app_handle: AppHandle,
+) -> Result<Vec<ReleaseDraftSummary>, AppError> {
+    let scratch_root = storage::get_scratch_path(&app_handle)?;
+    let entries = match fs::read_dir(&scratch_root) {
+        Ok(entries) => entries,
+        // Nothing has ever been staged there yet — not an error
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let mut drafts: Vec<ReleaseDraftSummary> = entries
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let release_json = fs::read_to_string(entry.path().join("release.json")).ok()?;
+            let release: Release = serde_json::from_str(&release_json).ok()?;
+            Some(ReleaseDraftSummary {
+                release_dir: entry.path().to_string_lossy().into_owned(),
+                name: release.name,
+                designer: release.designer,
+                model_count: release.model_references.len() as u32,
+            })
+        })
+        .collect();
+    drafts.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(drafts)
+}
+
+/// Rehydrate a WIP release for the builder UI: release.json only carries
+/// {id, path} per model (ModelReference), so the rich curation the UI needs
+/// (designer/pose/variant/tags/file_poses…) is read back from each model's
+/// own model.json sidecar — the same file add_model wrote it to.
+#[tauri::command]
+#[specta::specta]
+pub async fn load_release_draft(release_dir: String) -> Result<(Release, Vec<StlModel>), AppError> {
+    let release_path = PathBuf::from(&release_dir);
+    let release_json = fs::read_to_string(release_path.join("release.json")).map_err(|e| {
+        AppError::NotFoundError(format!(
+            "No release.json in '{}': {}",
+            release_path.display(),
+            e
+        ))
+    })?;
+    let release: Release = serde_json::from_str(&release_json)?;
+
+    let mut models = Vec::with_capacity(release.model_references.len());
+    for reference in &release.model_references {
+        let ModelLocation::Local(relative_path) = &reference.location else {
+            // Nothing on this disk to read back for an external reference
+            continue;
+        };
+        let model_json_path = release_path.join(relative_path);
+        let read = fs::read_to_string(&model_json_path)
+            .map_err(|e| e.to_string())
+            .and_then(|json| serde_json::from_str::<StlModel>(&json).map_err(|e| e.to_string()));
+        match read {
+            Ok(model) => models.push(model),
+            // One missing/corrupt sidecar (deleted by hand, interrupted
+            // write) must not block resuming everything else in the draft
+            Err(e) => eprintln!(
+                "[load_release_draft] skipping '{}': {}",
+                model_json_path.display(),
+                e
+            ),
+        }
+    }
+
+    Ok((release, models))
 }
 
 #[tauri::command]
@@ -322,5 +397,112 @@ pub async fn cancel_compression(job_id: String) -> Result<(), AppError> {
             "No active compression job with ID: {}",
             job_id
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::ModelReference;
+
+    fn bare_model(name: &str) -> StlModel {
+        StlModel {
+            id: Some(Uuid::new_v4()),
+            name: name.to_string(),
+            description: None,
+            tags: vec![],
+            images: vec![],
+            model_files: vec![],
+            group: None,
+            variant: None,
+            pose: Some("standing".to_string()),
+            scale: None,
+            support_status: None,
+            release_date: None,
+            designer: None,
+            sculptor: None,
+            release_name: None,
+            base_round_mm: None,
+            base_square_mm: None,
+            file_poses: vec![],
+        }
+    }
+
+    /// A WIP release folder as `create_release` + `add_model` actually leave
+    /// it: release.json referencing per-model sidecars by relative path.
+    /// load_release_draft must rebuild the full StlModels from those
+    /// sidecars, and skip (not fail on) one that went missing.
+    #[tokio::test]
+    async fn load_release_draft_rehydrates_models_and_skips_missing_sidecar() {
+        let dir = std::env::temp_dir().join(format!(
+            "stlpack_load_draft_{}_{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(dir.join("knight")).unwrap();
+
+        let present = bare_model("knight");
+        fs::write(
+            dir.join("knight/model.json"),
+            serde_json::to_string(&present).unwrap(),
+        )
+        .unwrap();
+
+        let missing_id = Uuid::new_v4();
+        let release = Release {
+            name: "Test Release".to_string(),
+            designer: "Some Designer".to_string(),
+            description: String::new(),
+            date: "01-2026".to_string(),
+            version: "1.0.0".to_string(),
+            model_references: vec![
+                ModelReference {
+                    id: present.id.unwrap(),
+                    location: ModelLocation::Local("knight/model.json".to_string()),
+                },
+                ModelReference {
+                    id: missing_id,
+                    location: ModelLocation::Local("ghost/model.json".to_string()),
+                },
+            ],
+            groups: vec![],
+            release_dir: dir.to_string_lossy().into_owned(),
+            images: vec![],
+            other_files: vec![],
+        };
+        fs::write(
+            dir.join("release.json"),
+            serde_json::to_string(&release).unwrap(),
+        )
+        .unwrap();
+
+        let (loaded_release, models) =
+            load_release_draft(dir.to_string_lossy().into_owned())
+                .await
+                .unwrap();
+
+        assert_eq!(loaded_release.name, "Test Release");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "knight");
+        assert_eq!(models[0].pose.as_deref(), Some("standing"));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn load_release_draft_errors_when_release_json_is_absent() {
+        let dir = std::env::temp_dir().join(format!(
+            "stlpack_load_draft_missing_{}_{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).unwrap();
+
+        let result = load_release_draft(dir.to_string_lossy().into_owned()).await;
+        assert!(result.is_err());
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

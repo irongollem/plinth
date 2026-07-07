@@ -160,6 +160,26 @@ export const useReleasesStore = defineStore("releases", () => {
     releaseDir.value = dir;
   };
 
+  /** Rehydrate a WIP release loaded from disk (release.json + model.json
+   * sidecars via commands.loadReleaseDraft) — the disk-based fallback for
+   * when the localStorage snapshot never happened or didn't survive. A
+   * release directory only exists once step 2 has run, so resuming always
+   * lands on step 3 (Pack). */
+  const loadDraft = (
+    loadedRelease: Release,
+    loadedModels: StlModel[],
+    dir: string,
+  ) => {
+    release.value = {
+      ...loadedRelease,
+      model_references: [...loadedRelease.model_references],
+    };
+    models.value = loadedModels;
+    releaseDir.value = dir;
+    releaseStep.value = 3;
+    activeTab.value = "releases";
+  };
+
   const clearRelease = () => {
     clearModels();
     release.value = undefined;
@@ -231,6 +251,7 @@ export const useReleasesStore = defineStore("releases", () => {
     releaseExists,
     clearRelease,
     setReleaseDir,
+    loadDraft,
     updateRelease,
     models,
     modelCount,
