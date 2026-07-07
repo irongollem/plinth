@@ -82,13 +82,34 @@
           <button type="button" class="btn btn-xs" @click="checkBlender">
             Detect
           </button>
+          <button
+            v-if="verdict && verdict !== 'Ok' && !isDownloading"
+            type="button"
+            class="btn btn-xs btn-primary"
+            @click="startDownload"
+          >
+            Download {{ managedVersion }}
+          </button>
+        </div>
+        <div v-if="isDownloading" class="flex items-center gap-2">
+          <progress
+            class="progress progress-primary flex-1"
+            :value="downloadPercent"
+            max="100"
+          ></progress>
+          <span class="font-mono text-[10px] text-base-content/50">{{
+            downloadPhase ? `${downloadPhase}…` : `${downloadPercent}%`
+          }}</span>
         </div>
         <p
-          v-if="blenderStatus"
+          v-if="blenderStatusText"
           class="text-[10.5px] font-mono"
-          :class="blenderFound ? 'text-success' : 'text-error'"
+          :class="blenderStatusClass"
         >
-          {{ blenderStatus }}
+          {{ blenderStatusText }}
+        </p>
+        <p v-if="downloadError" class="text-[10.5px] font-mono text-error">
+          {{ downloadError }}
         </p>
       </div>
 
@@ -297,6 +318,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { type Settings, commands } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
+import { useBlenderProvision } from "../composables/useBlenderProvision";
 import { useFileSelect } from "../composables/useFileSelect";
 import { useThemeStore } from "../stores/themeStore";
 import { useToastStore } from "../stores/toastStore";
@@ -357,8 +379,21 @@ const removeDesigner = (name: string) => {
   ).filter((d) => d !== name);
 };
 
-const blenderStatus = ref("");
-const blenderFound = ref(false);
+// Shared with the first-run dialog and the Render tab — one verdict, three
+// surfaces. The status line derives from it, so a download finishing (even
+// one started elsewhere) updates this tab without a manual re-detect.
+const {
+  check: blenderCheck,
+  checking: blenderChecking,
+  verdict,
+  managedVersion,
+  runCheck,
+  isDownloading,
+  percent: downloadPercent,
+  phase: downloadPhase,
+  errorMessage: downloadError,
+  startDownload,
+} = useBlenderProvision();
 
 const browseBlender = async () => {
   const files = await selectFiles({
@@ -372,17 +407,36 @@ const browseBlender = async () => {
 };
 
 const checkBlender = async () => {
-  blenderStatus.value = "Checking...";
-  const result = await commands.detectBlender();
-  if (result.status === "ok") {
-    blenderFound.value = true;
-    blenderStatus.value = `✓ Found ${result.data.version} at ${result.data.path}`;
-  } else {
-    blenderFound.value = false;
-    blenderStatus.value =
-      "Blender not found. Install Blender 4.x+ or point to its location.";
-  }
+  await runCheck();
 };
+
+const blenderStatusText = computed(() => {
+  if (blenderChecking.value) return "Checking...";
+  const check = blenderCheck.value;
+  if (!check) return "";
+  const managed = check.is_managed ? " (managed by stl-pack)" : "";
+  if (!check.info)
+    return "Blender not found. Download it here or point to an install.";
+  switch (check.verdict) {
+    case "Outdated":
+      return `△ ${check.info.version} works, but previews are tuned for Blender ${check.managed_version}`;
+    case "TooOld":
+      return `✗ ${check.info.version} is below the 4.2 minimum — rendering is disabled`;
+    default:
+      return `✓ Found ${check.info.version} at ${check.info.path}${managed}`;
+  }
+});
+
+const blenderStatusClass = computed(() => {
+  switch (verdict.value) {
+    case "Ok":
+      return "text-success";
+    case "Outdated":
+      return "text-warning";
+    default:
+      return "text-error";
+  }
+});
 
 const availableCores = ref(navigator.hardwareConcurrency || 4);
 const defaultThreadCount = computed(() =>

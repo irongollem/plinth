@@ -1,5 +1,5 @@
 <template>
-  <main class="flex h-full min-w-0">
+  <main class="relative flex h-full min-w-0">
     <!-- Controls -->
     <section
       class="w-82.5 shrink-0 border-r border-base-content/10 overflow-y-auto p-4 flex flex-col gap-3.5"
@@ -9,12 +9,16 @@
         <span
           class="font-mono text-[10px]"
           :class="
-            blenderStatus === 'found' ? 'text-success' : 'text-base-content/40'
+            renderBlocked
+              ? 'text-error'
+              : blenderInfo
+                ? 'text-success'
+                : 'text-base-content/40'
           "
           >{{
-            blenderStatus === "found"
-              ? `${blenderInfo?.version} ✓`
-              : blenderStatus === "missing"
+            blenderInfo
+              ? `${blenderInfo.version} ${renderBlocked ? "✗" : "✓"}`
+              : verdict === "Missing"
                 ? "not found"
                 : ""
           }}</span
@@ -22,18 +26,19 @@
       </div>
 
       <div
-        v-if="blenderStatus === 'missing'"
-        class="alert alert-warning text-sm"
+        v-if="verdict === 'Outdated' && !outdatedHintDismissed"
+        class="alert alert-info text-sm"
       >
         <span
-          >Blender was not found. Install Blender 4.x+ or set its location in
-          settings.</span
+          >Previews are tuned for Blender {{ managedVersion }} — yours renders a
+          slightly different look.</span
         >
+        <button class="btn btn-xs" @click="openDialog">Download</button>
         <button
-          class="btn btn-xs"
-          @click="releasesStore.setActiveTab('settings')"
+          class="btn btn-xs btn-ghost"
+          @click="outdatedHintDismissed = true"
         >
-          Open Settings
+          ✕
         </button>
       </div>
 
@@ -396,9 +401,7 @@
       <div class="flex items-center gap-3">
         <button
           class="btn btn-primary grow"
-          :disabled="
-            !parts.length || isRendering || blenderStatus === 'missing'
-          "
+          :disabled="!parts.length || isRendering || renderBlocked"
           @click="render"
         >
           <template v-if="isRendering">
@@ -543,6 +546,52 @@
         />
       </div>
     </aside>
+
+    <!-- Milk-glass: without a usable Blender nothing in this studio can
+         run, so the whole tab frosts over and says why instead of
+         scattering disabled controls that look broken -->
+    <div
+      v-if="renderBlocked"
+      class="absolute inset-0 z-40 bg-base-100/50 backdrop-blur-md flex items-center justify-center"
+    >
+      <div
+        class="bg-base-100 border border-base-content/10 rounded-xl shadow-xl w-105 max-w-[90vw] p-5 flex flex-col gap-3"
+      >
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          >RENDER ENGINE</span
+        >
+        <span class="font-bold text-[15px]">{{
+          verdict === "TooOld"
+            ? "Your Blender is too old to render"
+            : "Rendering needs Blender"
+        }}</span>
+        <p class="text-[12.5px] text-base-content/70 leading-relaxed">
+          <template v-if="verdict === 'TooOld'">
+            Promo renders drive Blender headlessly, and
+            {{ blenderInfo?.version ?? "your install" }} predates the 4.2
+            minimum. stl-pack can download its own Blender
+            {{ managedVersion }} without touching yours.
+          </template>
+          <template v-else>
+            Promo renders drive Blender headlessly — no Blender, no image.
+            stl-pack can download its own copy (~350&nbsp;MB), or you can point
+            it at an existing install in Settings.
+          </template>
+        </p>
+        <div class="flex justify-end gap-2">
+          <button
+            class="btn btn-sm"
+            @click="releasesStore.setActiveTab('settings')"
+          >
+            Open Settings
+          </button>
+          <button class="btn btn-sm btn-primary" @click="openDialog">
+            Download Blender {{ managedVersion }}
+          </button>
+        </div>
+      </div>
+    </div>
   </main>
 </template>
 
@@ -552,13 +601,14 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { storeToRefs } from "pinia";
 import { computed, onMounted, reactive, ref, watch } from "vue";
-import { type BlenderInfo, commands } from "../bindings.ts";
+import { commands } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
 import ProgressBar from "../components/ProgressBar.vue";
 import RenderAdvanced from "../components/RenderAdvanced.vue";
 // NOT `import type`: the component is used in the template, which
 // biome's useImportType can't see (rule disabled for .vue in biome.json)
 import StlViewport from "../components/StlViewport.vue";
+import { useBlenderProvision } from "../composables/useBlenderProvision";
 import { filesFromPaths, useFileSelect } from "../composables/useFileSelect";
 import type { SelectedFile } from "../composables/useFileSelect";
 import { useRenderStatus } from "../composables/useRenderStatus";
@@ -1161,18 +1211,16 @@ const fontCss = computed(
     "'Archivo', sans-serif",
 );
 
-const blenderInfo = ref<BlenderInfo | null>(null);
-const blenderStatus = ref<"unknown" | "found" | "missing">("unknown");
+// Shared with the setup dialog and Settings — the app probes once per
+// launch, and an install landing mid-session flips this badge live even
+// though KeepAlive never remounts this view.
+const { blenderInfo, verdict, renderBlocked, managedVersion, openDialog } =
+  useBlenderProvision();
+// Session-only: an Outdated Blender still renders, the hint shouldn't nag
+const outdatedHintDismissed = ref(false);
 
-onMounted(async () => {
+onMounted(() => {
   loadRenderSettings();
-  const result = await commands.detectBlender();
-  if (result.status === "ok") {
-    blenderInfo.value = result.data;
-    blenderStatus.value = "found";
-  } else {
-    blenderStatus.value = "missing";
-  }
 });
 
 const colorLinear = computed<[number, number, number]>(() =>
