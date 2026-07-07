@@ -45,6 +45,16 @@ struct ModelJson {
     base_round_mm: Option<String>,
     #[serde(default)]
     base_square_mm: Option<String>,
+    /// Chosen render orientation "x,y,z" (Blender euler degrees) — written
+    /// by the render pipeline so re-renders skip repositioning. Additive.
+    #[serde(default)]
+    rotation: Option<String>,
+    /// Measured printed size "WxDxH" in mm + part count, from the render
+    /// pipeline's geometry pass. Additive.
+    #[serde(default)]
+    dims_mm: Option<String>,
+    #[serde(default)]
+    part_count: Option<u32>,
     /// Per-file variant/pose split, restored into file_variants on scan.
     #[serde(default)]
     file_poses: Vec<FilePoseJson>,
@@ -436,6 +446,9 @@ pub fn scan(
             base_round_mm: meta_field(|m| m.base_round_mm.clone()),
             base_square_mm: meta_field(|m| m.base_square_mm.clone()),
             group_name: Some(group_name),
+            rotation: meta_field(|m| m.rotation.clone()),
+            dims_mm: meta_field(|m| m.dims_mm.clone()),
+            part_count: meta.and_then(|m| m.part_count).map(|n| n.to_string()),
         });
 
         // Restore per-file poses: resolve each file_poses entry to a scanned

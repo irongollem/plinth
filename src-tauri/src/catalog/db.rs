@@ -251,6 +251,12 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
     )?;
     add_text_columns("file_variants", &["variant"])?;
     add_text_columns("files", &["file_identity", "root"])?;
+    // Render pipeline metadata: the chosen orientation (user curation, so it
+    // ALSO gets a model_user_meta overlay) and machine-measured geometry
+    // (models only — dims "60.2x35.1x88.7" in mm + part count, TEXT for the
+    // same affinity reasons as base_round above).
+    add_text_columns("models", &["rotation", "dims_mm", "part_count"])?;
+    add_text_columns("model_user_meta", &["rotation"])?;
     // Set when the file's bytes live inside a pack archive; the row's path
     // is where the file would land when extracted.
     add_text_columns("files", &["archive_path"])?;
@@ -457,9 +463,9 @@ pub fn replace_catalog(
                  (dir_path, name, description, designer, release_name, preview_path,
                   source, uuid, file_count, total_size_bytes, pose, scale, support_status,
                   release_date, group_name, sculptor, variant, base_round,
-                  base_square, root, indexed_at)
+                  base_square, root, rotation, dims_mm, part_count, indexed_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-                  ?16, ?17, ?18, ?19, ?20, strftime('%s','now'))",
+                  ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, strftime('%s','now'))",
             )
             .map_err(map_err)?;
         for m in models {
@@ -484,7 +490,10 @@ pub fn replace_catalog(
                     m.variant,
                     m.base_round_mm,
                     m.base_square_mm,
-                    root
+                    root,
+                    m.rotation,
+                    m.dims_mm,
+                    m.part_count
                 ])
                 .map_err(map_err)?;
         }
@@ -798,7 +807,9 @@ fn entry_select_sql(where_sql: &str, tail_sql: &str) -> String {
                 COALESCE(m.group_name, m.name),
                 NULLIF(COALESCE(u.base_round, m.base_round), ''),
                 NULLIF(COALESCE(u.base_square, m.base_square), ''),
-                {packed}
+                {packed},
+                NULLIF(COALESCE(u.rotation, m.rotation), ''),
+                m.dims_mm, m.part_count
          FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path {} {}",
         where_sql,
         tail_sql,
@@ -840,6 +851,9 @@ fn map_entry_row(row: &rusqlite::Row) -> rusqlite::Result<CatalogEntry> {
         base_round_mm: row.get(17)?,
         base_square_mm: row.get(18)?,
         packed: row.get(19)?,
+        rotation: row.get(20)?,
+        dims_mm: row.get(21)?,
+        part_count: row.get(22)?,
         // Whole-folder member; expand_file_variants stamps a key on any
         // synthetic pose members it derives from this row.
         variant_key: None,
@@ -2180,6 +2194,83 @@ pub fn set_model_preview(
     Ok(())
 }
 
+/// Store the chosen render orientation ("x,y,z" Blender euler degrees) —
+/// user curation like preview_path, so it lives in model_user_meta and
+/// survives rescans. Batch renders read it back so re-renders never need
+/// repositioning.
+pub fn set_rotation(conn: &Connection, dir_path: &str, rotation: &str) -> Result<(), AppError> {
+    require_model(conn, dir_path)?;
+    conn.execute(
+        "INSERT INTO model_user_meta (dir_path, rotation) VALUES (?1, ?2)
+         ON CONFLICT(dir_path) DO UPDATE SET rotation = excluded.rotation",
+        params![dir_path, rotation],
+    )
+    .map_err(|e| AppError::ConfigError(format!("Failed to set rotation: {}", e)))?;
+    Ok(())
+}
+
+/// Record machine-measured geometry (true printed dimensions in mm +
+/// part count) on the scanner row. Machine-derived, so it goes to `models`
+/// directly — rescan survival comes from the model.json round-trip, not
+/// from user meta. A vanished row (mid-rescan) is a silent no-op.
+pub fn set_measured(
+    conn: &Connection,
+    dir_path: &str,
+    dims_mm: &str,
+    part_count: u32,
+) -> Result<(), AppError> {
+    conn.execute(
+        "UPDATE models SET dims_mm = ?2, part_count = ?3 WHERE dir_path = ?1",
+        params![dir_path, dims_mm, part_count.to_string()],
+    )
+    .map_err(|e| AppError::ConfigError(format!("Failed to set measured geometry: {}", e)))?;
+    Ok(())
+}
+
+/// Display-group names under a render scope — same designer/selection
+/// filters as pack_candidate_dirs, but returning the GROUP names because
+/// render candidates are enumerated through group_members (which resolves
+/// per-variant previews; a raw preview_path IS NULL over models would miss
+/// fanned members).
+pub fn render_scope_groups(
+    conn: &Connection,
+    designer: Option<&str>,
+    groups: &[String],
+) -> Result<Vec<String>, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Render scope query failed: {}", e));
+    let mut sql = String::from(
+        "SELECT DISTINCT COALESCE(r.display_name, m.group_name, m.name) AS gname
+         FROM models m
+         LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
+         LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)
+         WHERE 1=1",
+    );
+    let mut bound: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    if let Some(name) = designer.map(str::trim).filter(|d| !d.is_empty()) {
+        sql.push_str(" AND lower(COALESCE(u.designer, m.designer, '')) = lower(?)");
+        bound.push(Box::new(name.to_string()));
+    }
+    if !groups.is_empty() {
+        let placeholders = vec!["lower(?)"; groups.len()].join(", ");
+        sql.push_str(&format!(
+            " AND lower(COALESCE(r.display_name, m.group_name, m.name)) IN ({})",
+            placeholders
+        ));
+        for group in groups {
+            bound.push(Box::new(group.clone()));
+        }
+    }
+    sql.push_str(" ORDER BY gname COLLATE NOCASE");
+    let params_ref: Vec<&dyn rusqlite::types::ToSql> = bound.iter().map(|b| b.as_ref()).collect();
+    let mut stmt = conn.prepare(&sql).map_err(map_err)?;
+    let rows = stmt
+        .query_map(params_ref.as_slice(), |row| row.get(0))
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
 /// Point a single fanned-out member (one pose/variant of a dump folder) at a
 /// preview, keyed by its full variant_key so sibling poses in the same folder
 /// keep their own pictures. dir_path (the owning folder) rides along so a
@@ -2666,6 +2757,7 @@ mod tests {
                 base_round_mm: None,
                 base_square_mm: None,
                 group_name: Some("Giant Newt".into()),
+                ..Default::default()
             },
             ModelRow {
                 dir_path: "/lib/bugbear".into(),
@@ -2687,6 +2779,7 @@ mod tests {
                 base_round_mm: None,
                 base_square_mm: None,
                 group_name: Some("Bugbear".into()),
+                ..Default::default()
             },
         ];
         let tags = vec![("/lib/newt".to_string(), "amphibian".to_string())];
@@ -2790,6 +2883,7 @@ mod tests {
             base_round_mm: None,
             base_square_mm: None,
             group_name: Some(name.into()),
+            ..Default::default()
         }
     }
 
@@ -3265,6 +3359,7 @@ mod tests {
             base_round_mm: None,
             base_square_mm: None,
             group_name: Some("mob".into()),
+            ..Default::default()
         }];
         replace_catalog(&mut conn, "/lib", &files, &models, &[], &[], &[]).unwrap();
 
@@ -3364,6 +3459,7 @@ mod tests {
             base_round_mm: None,
             base_square_mm: None,
             group_name: Some(group.into()),
+            ..Default::default()
         };
         let models = vec![
             member("/lib/LK/Supported", "Little Knights"),
@@ -3463,6 +3559,7 @@ mod tests {
             base_round_mm: None,
             base_square_mm: None,
             group_name: Some("Dark Wardens".into()),
+            ..Default::default()
         }];
         replace_catalog(&mut conn, "/lib", &files, &models, &[], &[], &[]).unwrap();
         set_file_variants(
@@ -3534,6 +3631,7 @@ mod tests {
             base_round_mm: None,
             base_square_mm: None,
             group_name: Some("mob".into()),
+            ..Default::default()
         }];
         replace_catalog(&mut conn, "/lib", &files, &models, &[], &[], &[]).unwrap();
         set_file_variants(
@@ -3838,6 +3936,7 @@ mod tests {
             base_round_mm: None,
             base_square_mm: None,
             group_name: Some("galeb duhr".into()),
+            ..Default::default()
         };
         let models = vec![
             variant("unsupported", "B"),
@@ -3903,6 +4002,7 @@ mod tests {
             base_round_mm: None,
             base_square_mm: None,
             group_name: None,
+            ..Default::default()
         };
         let models = vec![
             model("stray", None, None, None),
@@ -4114,6 +4214,7 @@ mod tests {
             base_round_mm: None,
             base_square_mm: None,
             group_name: Some(group.into()),
+            ..Default::default()
         };
         let models = vec![
             mk("/lib/knight/Supported/A", "knight", "supported"),
@@ -4307,6 +4408,64 @@ mod tests {
         assert_eq!(
             groups[0].packed_paths,
             vec!["/lib/newt/GiantNewt_v02.stl".to_string()]
+        );
+    }
+
+    #[test]
+    fn rotation_and_measured_round_trip_through_the_entry_read() {
+        let mut conn = test_conn();
+        let (files, mut models, tags) = sample_rows();
+        // scanner-provided values (from a model.json) on the newt
+        models[0].rotation = Some("0,0,90".into());
+        models[0].dims_mm = Some("60.2x35.1x88.7".into());
+        models[0].part_count = Some("3".into());
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+
+        let newt = group_members(&conn, "Giant Newt").unwrap();
+        assert_eq!(newt[0].rotation.as_deref(), Some("0,0,90"));
+        assert_eq!(newt[0].dims_mm.as_deref(), Some("60.2x35.1x88.7"));
+        assert_eq!(newt[0].part_count.as_deref(), Some("3"));
+        // packed flag kept its positional index — the new columns appended after
+        assert!(!newt[0].packed);
+
+        // the studio-saved rotation (user meta) overlays the scanner value
+        set_rotation(&conn, "/lib/newt", "90,0,0").unwrap();
+        let newt = group_members(&conn, "Giant Newt").unwrap();
+        assert_eq!(newt[0].rotation.as_deref(), Some("90,0,0"));
+
+        // measured geometry lands in place (the batch job path)
+        set_measured(&conn, "/lib/bugbear", "25.0x25.0x40.5", 1).unwrap();
+        let bugbear = group_members(&conn, "Bugbear").unwrap();
+        assert_eq!(bugbear[0].dims_mm.as_deref(), Some("25.0x25.0x40.5"));
+        assert_eq!(bugbear[0].part_count.as_deref(), Some("1"));
+
+        // a rescan rebuilds models wholesale — the user-meta rotation survives
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+        let newt = group_members(&conn, "Giant Newt").unwrap();
+        assert_eq!(
+            newt[0].rotation.as_deref(),
+            Some("90,0,0"),
+            "user-meta rotation survives the rescan"
+        );
+    }
+
+    #[test]
+    fn render_scope_groups_narrows_by_designer_and_selection() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+
+        let all = render_scope_groups(&conn, None, &[]).unwrap();
+        assert_eq!(all.len(), 2, "whole catalog when unscoped");
+
+        let dtl = render_scope_groups(&conn, Some("DTL"), &[]).unwrap();
+        assert_eq!(dtl, vec!["Giant Newt".to_string()]);
+
+        let picked = render_scope_groups(&conn, None, &["bugbear".to_string()]).unwrap();
+        assert_eq!(
+            picked,
+            vec!["Bugbear".to_string()],
+            "case-insensitive selection"
         );
     }
 }

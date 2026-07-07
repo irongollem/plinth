@@ -44,6 +44,9 @@ struct MemberRow {
     sculptor: Option<String>,
     base_round_mm: Option<String>,
     base_square_mm: Option<String>,
+    rotation: Option<String>,
+    dims_mm: Option<String>,
+    part_count: Option<String>,
 }
 
 fn member_rows(conn: &Connection, group: Option<&str>) -> Result<Vec<MemberRow>, AppError> {
@@ -61,7 +64,9 @@ fn member_rows(conn: &Connection, group: Option<&str>) -> Result<Vec<MemberRow>,
                 NULLIF(COALESCE(u.scale, m.scale), ''),
                 NULLIF(COALESCE(u.sculptor, m.sculptor), ''),
                 NULLIF(COALESCE(u.base_round, m.base_round), ''),
-                NULLIF(COALESCE(u.base_square, m.base_square), '')
+                NULLIF(COALESCE(u.base_square, m.base_square), ''),
+                NULLIF(COALESCE(u.rotation, m.rotation), ''),
+                m.dims_mm, m.part_count
          FROM models m
          LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
          LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)";
@@ -81,6 +86,9 @@ fn member_rows(conn: &Connection, group: Option<&str>) -> Result<Vec<MemberRow>,
             sculptor: row.get(11)?,
             base_round_mm: row.get(12)?,
             base_square_mm: row.get(13)?,
+            rotation: row.get(14)?,
+            dims_mm: row.get(15)?,
+            part_count: row.get(16)?,
         })
     }
     let rows = match group {
@@ -1512,6 +1520,12 @@ fn write_leaf_json(
         "release_name": pick(|r| r.release.as_ref()),
         "base_round_mm": pick(|r| r.base_round_mm.as_ref()),
         "base_square_mm": pick(|r| r.base_square_mm.as_ref()),
+        // Leaf-scoped like variant/support: a sibling leaf's orientation and
+        // measurements are facts about DIFFERENT geometry
+        "rotation": pick_leaf(|r| r.rotation.as_ref()),
+        "dims_mm": pick_leaf(|r| r.dims_mm.as_ref()),
+        "part_count": pick_leaf(|r| r.part_count.as_ref())
+            .and_then(|n| n.parse::<u32>().ok()),
         "file_poses": file_poses,
     });
     let pretty = serde_json::to_string_pretty(&json)
@@ -1608,6 +1622,7 @@ mod tests {
             base_round_mm: None,
             base_square_mm: None,
             group_name: Some(group.into()),
+            ..Default::default()
         }
     }
 

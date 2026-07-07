@@ -5,6 +5,7 @@ pub mod layout;
 pub mod normalize;
 pub mod pack;
 pub mod scanner;
+pub mod sidecar;
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -45,8 +46,9 @@ pub struct PackRow {
     pub packed_at: Option<i64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModelRow {
+    // Default-derived so tests can spell only the fields they exercise
     pub dir_path: String,
     pub name: String,
     pub description: Option<String>,
@@ -68,6 +70,13 @@ pub struct ModelRow {
     /// The logical model this row is a variant of; rows sharing it collapse
     /// into one catalog group (see db::search_groups).
     pub group_name: Option<String>,
+    /// Chosen render orientation "x,y,z" (Blender euler degrees), from
+    /// model.json — the studio-saved value overlays via model_user_meta.
+    pub rotation: Option<String>,
+    /// True printed bounding box "60.2x35.1x88.7" (mm) + part count,
+    /// measured by the render pipeline; round-trips through model.json.
+    pub dims_mm: Option<String>,
+    pub part_count: Option<String>,
 }
 
 /// A per-file pose/variant assignment imported from a model.json's
@@ -126,6 +135,16 @@ pub struct CatalogEntry {
     /// or extract first.
     #[serde(default)]
     pub packed: bool,
+    /// Chosen render orientation "x,y,z" (Blender euler degrees) — saved
+    /// when the studio renders this model; batch re-renders reuse it.
+    #[serde(default)]
+    pub rotation: Option<String>,
+    /// Measured printed size "60.2x35.1x88.7" in mm, and how many part
+    /// files make up the model — captured by the render pipeline.
+    #[serde(default)]
+    pub dims_mm: Option<String>,
+    #[serde(default)]
+    pub part_count: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

@@ -270,6 +270,7 @@ mod tests {
             base_round_mm: None,
             base_square_mm: None,
             group_name: None,
+            ..Default::default()
         }];
         db::test_init(&conn);
         db::replace_catalog(&mut conn, &dir.to_string_lossy(), &rows, &models, &[], &[], &[]).unwrap();
