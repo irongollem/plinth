@@ -16,7 +16,14 @@
             :key="root"
             class="font-mono text-[12px] text-base-content/60 truncate"
             :title="root"
-            >{{ root }}</span
+            >{{ root
+            }}<span
+              v-if="root === settings.catalog_primary_root"
+              class="text-warning"
+              title="Primary — Clean up moves every folder's models into this one"
+            >
+              ★ primary</span
+            ></span
           >
           <span
             v-if="!catalogRoots.length"
@@ -307,6 +314,7 @@ const settings = ref<Settings>({
   blender_path: null,
   catalog_root: null,
   catalog_roots: null,
+  catalog_primary_root: null,
   known_designers: null,
   print_action: null,
   release_field_defaults: null,
@@ -433,6 +441,7 @@ const saveSettings = async () => {
             ...settings.value,
             catalog_root: fresh.data.catalog_root,
             catalog_roots: fresh.data.catalog_roots,
+            catalog_primary_root: fresh.data.catalog_primary_root,
           }
         : settings.value;
     const result = await commands.setSettings(payload);

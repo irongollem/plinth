@@ -105,6 +105,17 @@ async fn configured_roots(app_handle: &AppHandle) -> Result<Vec<PathBuf>, AppErr
         .collect())
 }
 
+/// The configured primary (staging) folder, but only while it's actually
+/// one of the roots — a stale setting pointing at a removed folder must
+/// read as "no primary", not send cleanups into a folder we don't index.
+fn valid_primary(settings: &crate::models::Settings, roots: &[String]) -> Option<String> {
+    settings
+        .catalog_primary_root
+        .as_deref()
+        .map(normalized_root)
+        .filter(|p| roots.iter().any(|r| r == p))
+}
+
 /// Persist a changed roots list. catalog_root mirrors the first entry so a
 /// pre-multi-root build (or not-yet-migrated UI code) reading the same
 /// store stays coherent instead of resurrecting a removed folder.
@@ -266,6 +277,7 @@ pub async fn list_catalog_roots(
         .await
         .map_err(AppError::ConfigError)?;
     let roots = normalized_roots(&settings);
+    let primary = valid_primary(&settings, &roots);
     let conn = open_db(&app_handle)?;
     let scan_times: HashMap<String, i64> = db::root_scan_times(&conn)?.into_iter().collect();
     let mut out = Vec::with_capacity(roots.len());
@@ -273,6 +285,7 @@ pub async fn list_catalog_roots(
         let (model_count, file_count, total_bytes) = db::root_summary(&conn, &root)?;
         out.push(super::CatalogRootSummary {
             last_scan_epoch: scan_times.get(&root).map(|t| *t as f64),
+            primary: primary.as_deref() == Some(root.as_str()),
             root,
             model_count,
             file_count,
@@ -322,15 +335,57 @@ pub async fn remove_catalog_root(
     path: String,
 ) -> Result<Vec<String>, AppError> {
     let root = normalized_root(&path);
-    let settings = crate::settings::get_settings(app_handle.clone())
+    let mut settings = crate::settings::get_settings(app_handle.clone())
         .await
         .map_err(AppError::ConfigError)?;
     let mut roots = normalized_roots(&settings);
     roots.retain(|r| r != &root);
+    // A primary that leaves the catalog stops being the staging target —
+    // a dangling value would silently do nothing (valid_primary filters
+    // it), but showing it as still-set in the UI would lie.
+    if settings
+        .catalog_primary_root
+        .as_deref()
+        .map(normalized_root)
+        .as_deref()
+        == Some(root.as_str())
+    {
+        settings.catalog_primary_root = None;
+    }
     save_roots(&app_handle, settings, roots.clone()).await?;
     let mut conn = open_db(&app_handle)?;
     db::purge_root(&mut conn, &root)?;
     Ok(roots)
+}
+
+/// Choose (or clear, with None) the staging folder Clean up drains the
+/// other folders into. Must already be a configured catalog folder.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_primary_catalog_root(
+    app_handle: AppHandle,
+    path: Option<String>,
+) -> Result<(), AppError> {
+    let mut settings = crate::settings::get_settings(app_handle.clone())
+        .await
+        .map_err(AppError::ConfigError)?;
+    let primary = match path.as_deref().map(normalized_root) {
+        Some(p) => {
+            let roots = normalized_roots(&settings);
+            if !roots.iter().any(|r| r == &p) {
+                return Err(AppError::InvalidInput(format!(
+                    "'{}' is not a configured catalog folder",
+                    p
+                )));
+            }
+            Some(p)
+        }
+        None => None,
+    };
+    settings.catalog_primary_root = primary;
+    crate::settings::set_settings(app_handle, settings)
+        .await
+        .map_err(AppError::ConfigError)
 }
 
 #[tauri::command]
@@ -1514,11 +1569,23 @@ pub async fn plan_normalize(
     group: Option<String>,
 ) -> Result<NormalizePlan, AppError> {
     // The UI no longer nominates a root: each group's home folder is
-    // resolved from its members against the configured list.
-    let roots = configured_roots(&app_handle).await?;
+    // resolved from its members against the configured list — unless a
+    // primary is set, which stages every group into that one folder.
+    let settings = crate::settings::get_settings(app_handle.clone())
+        .await
+        .map_err(AppError::ConfigError)?;
+    let root_strs = normalized_roots(&settings);
+    let primary = valid_primary(&settings, &root_strs).map(PathBuf::from);
+    let roots: Vec<PathBuf> = root_strs.into_iter().map(PathBuf::from).collect();
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
-        normalize::plan(&conn, &roots, designer.as_deref(), group.as_deref())
+        normalize::plan(
+            &conn,
+            &roots,
+            primary.as_deref(),
+            designer.as_deref(),
+            group.as_deref(),
+        )
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Normalize plan task failed: {}", e)))?

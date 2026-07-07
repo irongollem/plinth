@@ -2532,6 +2532,27 @@ pub fn move_tree_index(conn: &mut Connection, from: &str, to: &str) -> Result<()
             params![from, sep],
         )
         .map_err(map_err)?;
+        // A dir move can cross catalog-folder boundaries (staging mode
+        // drains a raw folder's models into the primary) — the moved
+        // rows' root stamp is now stale, and this helper has no notion of
+        // configured catalog roots to recompute it. Clear it instead: the
+        // NULL-adoption fallback the scoped scan/purge queries already
+        // carry (see replace_catalog) treats NULL as "claimed by whichever
+        // folder's prefix matches", so the rows stay correctly discoverable
+        // and counted immediately, and get re-stamped by the next scan of
+        // wherever they now live.
+        tx.execute(
+            "UPDATE files SET root = NULL
+             WHERE dir_path = ?1 OR substr(dir_path, 1, length(?1) + 1) = ?1 || ?2",
+            params![to, sep],
+        )
+        .map_err(map_err)?;
+        tx.execute(
+            "UPDATE models SET root = NULL
+             WHERE dir_path = ?1 OR substr(dir_path, 1, length(?1) + 1) = ?1 || ?2",
+            params![to, sep],
+        )
+        .map_err(map_err)?;
     }
     tx.commit().map_err(map_err)
 }
@@ -2552,7 +2573,7 @@ pub fn move_file_index(conn: &mut Connection, from: &str, to: &str) -> Result<()
     let tx = conn.transaction().map_err(map_err)?;
     {
         tx.execute(
-            "UPDATE OR IGNORE files SET path = ?2, dir_path = ?3, file_name = ?4 WHERE path = ?1",
+            "UPDATE OR IGNORE files SET path = ?2, dir_path = ?3, file_name = ?4, root = NULL WHERE path = ?1",
             params![from, to, dir, name],
         )
         .map_err(map_err)?;
@@ -2918,6 +2939,78 @@ mod tests {
         // /other's footprint is untouched
         let (m, f, _) = root_summary(&conn, "/other").unwrap();
         assert_eq!((m, f), (1, 1));
+    }
+
+    #[test]
+    fn cross_root_dir_move_unclaims_the_row_instead_of_stranding_it() {
+        let mut conn = test_conn();
+        let (files, models, _) = sample_rows();
+        replace_catalog(&mut conn, "/lib", &files, &models, &[], &[], &[]).unwrap();
+
+        // stage "newt" from /lib into a second folder, exactly what the
+        // normalizer's wholesale dir move does for a primary/staging target
+        move_tree_index(&mut conn, "/lib/newt", "/primary/DTL/Giant Newt").unwrap();
+
+        // the row is unclaimed (NULL), not left claiming a root it no
+        // longer lives under — the prefix fallback still finds it under
+        // its NEW location...
+        let root: Option<String> = conn
+            .query_row(
+                "SELECT root FROM models WHERE dir_path = '/primary/DTL/Giant Newt'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(root, None);
+        let (m, f, _) = root_summary(&conn, "/primary").unwrap();
+        assert_eq!((m, f), (1, 1), "counted under its new folder pre-rescan");
+        let (m, f, _) = root_summary(&conn, "/lib").unwrap();
+        assert_eq!(f, 1, "bugbear only — newt no longer attributed to /lib");
+        let _ = m;
+
+        // ...and critically: rescanning the OLD folder (now missing the
+        // moved model on disk) must not delete the staged row. Before the
+        // root=NULL fix this failed — the row still said root='/lib' and
+        // the scoped delete caught it even though it had moved away.
+        let bugbear_only: Vec<_> = files
+            .iter()
+            .filter(|f| f.dir_path == "/lib/bugbear")
+            .cloned()
+            .collect();
+        let bugbear_model: Vec<_> = models
+            .iter()
+            .filter(|m| m.dir_path == "/lib/bugbear")
+            .cloned()
+            .collect();
+        replace_catalog(&mut conn, "/lib", &bugbear_only, &bugbear_model, &[], &[], &[]).unwrap();
+        assert_eq!(
+            search(&conn, "newt", &[], 10, 0).unwrap().total,
+            1,
+            "staged model must survive a rescan of the folder it moved OUT of"
+        );
+    }
+
+    #[test]
+    fn cross_root_file_move_unclaims_the_row() {
+        let mut conn = test_conn();
+        let (files, models, _) = sample_rows();
+        replace_catalog(&mut conn, "/lib", &files, &models, &[], &[], &[]).unwrap();
+
+        move_file_index(
+            &mut conn,
+            "/lib/newt/GiantNewt_v02.stl",
+            "/primary/DTL/Giant Newt/GiantNewt_v02.stl",
+        )
+        .unwrap();
+
+        let root: Option<String> = conn
+            .query_row(
+                "SELECT root FROM files WHERE path = '/primary/DTL/Giant Newt/GiantNewt_v02.stl'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(root, None);
     }
 
     #[test]

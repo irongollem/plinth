@@ -173,6 +173,9 @@ pub struct CatalogRootSummary {
     pub file_count: u32,
     pub total_size_bytes: f64,
     pub last_scan_epoch: Option<f64>,
+    /// The optional staging folder: Clean up drains the other folders'
+    /// models into this one. At most one row carries it.
+    pub primary: bool,
 }
 
 /// One designer and how many logical models (groups) carry that name —

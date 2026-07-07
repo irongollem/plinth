@@ -97,6 +97,19 @@
               :key="r.root"
               class="flex items-center gap-2 px-2 py-1.5"
             >
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs px-1"
+                :class="r.primary ? 'text-warning' : 'text-base-content/30'"
+                :title="
+                  r.primary
+                    ? 'Primary folder — Clean up moves every folder\'s models into this one. Click to unset.'
+                    : 'Make this the primary folder: Clean up will move models from every folder into it'
+                "
+                @click="togglePrimary(r)"
+              >
+                {{ r.primary ? "★" : "☆" }}
+              </button>
               <div class="min-w-0 flex-1">
                 <div class="truncate font-mono text-[11px]" :title="r.root">
                   {{ r.root }}
@@ -3466,6 +3479,20 @@ const removeRoot = async (root: string) => {
     return;
   }
   await Promise.all([refreshRoots(), runSearch(), refreshMeta()]);
+};
+
+/** Star a folder as the staging target: Clean up then moves every
+    folder's models into it. Starring the current primary unsets it —
+    back to each folder cleaning up in place. */
+const togglePrimary = async (target: CatalogRootSummary) => {
+  const result = await commands.setPrimaryCatalogRoot(
+    target.primary ? null : target.root,
+  );
+  if (result.status !== "ok") {
+    toastStore.reportError("Couldn't set primary folder", result.error);
+    return;
+  }
+  await refreshRoots();
 };
 
 const cancelAllScans = async () => {

@@ -22,6 +22,13 @@ pub struct Settings {
     /// this key, and its saves must not start failing.
     #[serde(default)]
     pub catalog_roots: Option<Vec<String>>,
+    /// Optional staging target: when set, Clean up builds every group's
+    /// canonical layout HERE, draining the raw folders into it. Unset =
+    /// each group cleans up inside its own folder. Must name one of
+    /// catalog_roots; validated at use and cleared when its folder is
+    /// removed.
+    #[serde(default)]
+    pub catalog_primary_root: Option<String>,
     /// Studios the scanner recognizes in folder names to infer a designer.
     /// Seeded from scanner::DEFAULT_DESIGNERS on first load; user-editable.
     pub known_designers: Option<Vec<String>>,
