@@ -39,7 +39,7 @@ fn db_path(app_handle: &AppHandle) -> Result<PathBuf, AppError> {
         .join("catalog.db"))
 }
 
-fn open_db(app_handle: &AppHandle) -> Result<Connection, AppError> {
+pub(crate) fn open_db(app_handle: &AppHandle) -> Result<Connection, AppError> {
     db::open(&db_path(app_handle)?)
 }
 
@@ -63,7 +63,7 @@ fn unregister_job(job_id: &str) {
 /// wholesale-rewrites the very rows a pack job updates in place, so letting
 /// them overlap leaves the index claiming loose files that only exist inside
 /// an archive.
-fn job_active(prefix: &str) -> bool {
+pub(crate) fn job_active(prefix: &str) -> bool {
     ACTIVE_CATALOG_JOBS
         .lock()
         .map(|jobs| jobs.keys().any(|id| id.starts_with(prefix)))
@@ -160,6 +160,13 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
     if job_active("pack:") {
         return Err(AppError::InvalidInput(
             "A pack job is running — rescan when it finishes".to_string(),
+        ));
+    }
+    if crate::render::batch::batch_render_active() {
+        // replace_catalog would rewrite the very rows the batch updates
+        // (previews, measured geometry) per finished model
+        return Err(AppError::InvalidInput(
+            "A batch render is running — rescan when it finishes".to_string(),
         ));
     }
 
@@ -513,6 +520,12 @@ pub async fn pack_models(
             "A pack job is already running".to_string(),
         ));
     }
+    if crate::render::batch::batch_render_active() {
+        // packing deletes the loose STLs Blender is reading mid-batch
+        return Err(AppError::InvalidInput(
+            "A batch render is running — pack when it finishes".to_string(),
+        ));
+    }
     // Zstd level from settings (async store read) before the blocking job.
     // Clamped to zstd's actual range — the zip writer errors on anything
     // outside it, and a hand-edited settings.json shouldn't brick packing.
@@ -804,6 +817,11 @@ pub async fn unpack_models(
     if job_active("pack:") {
         return Err(AppError::InvalidInput(
             "A pack job is already running".to_string(),
+        ));
+    }
+    if crate::render::batch::batch_render_active() {
+        return Err(AppError::InvalidInput(
+            "A batch render is running — unpack when it finishes".to_string(),
         ));
     }
     let job_id = format!("pack:{}", Uuid::new_v4());
@@ -1380,58 +1398,150 @@ pub async fn set_model_preview(
     variant_key: Option<String>,
 ) -> Result<String, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
-        if !Path::new(&image_path).is_file() {
-            return Err(AppError::NotFoundError(format!(
-                "Image not found: {}",
-                image_path
-            )));
-        }
-        let previews_dir = app_handle
-            .path()
-            .app_data_dir()
-            .map_err(|e| AppError::ConfigError(format!("No app data dir: {}", e)))?
-            .join("previews");
-        std::fs::create_dir_all(&previews_dir)
-            .map_err(|e| AppError::IoError(format!("Failed to create previews dir: {}", e)))?;
-
-        // Hash the variant_key when present so each member's preview gets its
-        // own on-disk file: sharing a dir_path-only prefix would make one
-        // pose's render sweep away a sibling pose's still-referenced image.
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        variant_key
-            .as_deref()
-            .unwrap_or(&dir_path)
-            .hash(&mut hasher);
-        let prefix = format!("{:016x}", hasher.finish());
-
-        if let Ok(entries) = std::fs::read_dir(&previews_dir) {
-            for entry in entries.flatten() {
-                if entry.file_name().to_string_lossy().starts_with(&prefix) {
-                    std::fs::remove_file(entry.path()).ok();
-                }
-            }
-        }
-
-        let extension = Path::new(&image_path)
-            .extension()
-            .map(|e| e.to_string_lossy().to_lowercase())
-            .unwrap_or_else(|| "png".to_string());
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let dest = previews_dir.join(format!("{}-{}.{}", prefix, stamp, extension));
-        std::fs::copy(&image_path, &dest)
-            .map_err(|e| AppError::IoError(format!("Failed to copy preview: {}", e)))?;
-
-        let dest_str = dest.to_string_lossy().into_owned();
-        let conn = open_db(&app_handle)?;
-        db::set_preview(&conn, &dir_path, variant_key.as_deref(), &dest_str)?;
-        Ok(dest_str)
+        persist_preview(&app_handle, &dir_path, variant_key.as_deref(), &image_path)
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Preview task failed: {}", e)))?
+}
+
+/// The preview-persistence body, callable outside the command (the batch
+/// render job stores one preview per finished model): copy the image into
+/// app_data/previews under a per-member hash prefix, sweep older copies of
+/// the same member, record the copy in the index.
+pub(crate) fn persist_preview(
+    app_handle: &AppHandle,
+    dir_path: &str,
+    variant_key: Option<&str>,
+    image_path: &str,
+) -> Result<String, AppError> {
+    if !Path::new(image_path).is_file() {
+        return Err(AppError::NotFoundError(format!(
+            "Image not found: {}",
+            image_path
+        )));
+    }
+    let previews_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| AppError::ConfigError(format!("No app data dir: {}", e)))?
+        .join("previews");
+    std::fs::create_dir_all(&previews_dir)
+        .map_err(|e| AppError::IoError(format!("Failed to create previews dir: {}", e)))?;
+
+    // Hash the variant_key when present so each member's preview gets its
+    // own on-disk file: sharing a dir_path-only prefix would make one
+    // pose's render sweep away a sibling pose's still-referenced image.
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    variant_key.unwrap_or(dir_path).hash(&mut hasher);
+    let prefix = format!("{:016x}", hasher.finish());
+
+    if let Ok(entries) = std::fs::read_dir(&previews_dir) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                std::fs::remove_file(entry.path()).ok();
+            }
+        }
+    }
+
+    let extension = Path::new(image_path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_else(|| "png".to_string());
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dest = previews_dir.join(format!("{}-{}.{}", prefix, stamp, extension));
+    std::fs::copy(image_path, &dest)
+        .map_err(|e| AppError::IoError(format!("Failed to copy preview: {}", e)))?;
+
+    let dest_str = dest.to_string_lossy().into_owned();
+    let conn = open_db(app_handle)?;
+    db::set_preview(&conn, dir_path, variant_key, &dest_str)?;
+    Ok(dest_str)
+}
+
+/// Persist the orientation a render used ("the render IS the chosen
+/// orientation") — the studio calls this after a successful catalog-preview
+/// render, and batch renders read it back so re-renders never need
+/// repositioning.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_model_rotation(
+    app_handle: AppHandle,
+    dir_path: String,
+    rotation: (f64, f64, f64),
+) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::set_rotation(
+            &conn,
+            &dir_path,
+            &format!("{},{},{}", rotation.0, rotation.1, rotation.2),
+        )
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Rotation task failed: {}", e)))?
+}
+
+/// One member the batch renderer could target. `parts` are the member's
+/// loose .stl paths; packed members surface with `packed: true` and no
+/// extraction (batch is a throughput feature for loose libraries — packed
+/// models render fine individually via the drawer).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, specta::Type)]
+pub struct RenderCandidate {
+    pub dir_path: String,
+    pub variant_key: Option<String>,
+    pub name: String,
+    pub parts: Vec<String>,
+    /// Stored orientation "x,y,z", if the studio ever saved one.
+    pub rotation: Option<String>,
+    pub has_preview: bool,
+    pub packed: bool,
+}
+
+/// Everything the batch confirm dialog needs, resolved through
+/// group_members (NOT raw SQL: expand_file_variants is what gives fanned
+/// members their own variant_key + per-variant preview state).
+#[tauri::command]
+#[specta::specta]
+pub async fn get_render_candidates(
+    app_handle: AppHandle,
+    designer: Option<String>,
+    groups: Vec<String>,
+) -> Result<Vec<RenderCandidate>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        let group_names = db::render_scope_groups(&conn, designer.as_deref(), &groups)?;
+        let mut candidates = Vec::new();
+        for group_name in group_names {
+            for member in db::group_members(&conn, &group_name)? {
+                let files =
+                    db::model_files(&conn, &member.dir_path, member.variant_key.as_deref())?;
+                let parts: Vec<String> = files
+                    .iter()
+                    .filter(|f| f.extension == "stl" && !f.packed)
+                    .map(|f| f.path.clone())
+                    .collect();
+                if parts.is_empty() && !member.packed {
+                    continue; // nothing renderable (.obj/.3mf-only members)
+                }
+                candidates.push(RenderCandidate {
+                    dir_path: member.dir_path.clone(),
+                    variant_key: member.variant_key.clone(),
+                    name: member.name.clone(),
+                    parts,
+                    rotation: member.rotation.clone(),
+                    has_preview: member.preview_path.is_some(),
+                    packed: member.packed,
+                });
+            }
+        }
+        Ok(candidates)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Candidate task failed: {}", e)))?
 }
 
 #[tauri::command]

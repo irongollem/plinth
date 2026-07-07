@@ -16,7 +16,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-static ACTIVE_RENDERS: Lazy<Mutex<HashMap<String, Arc<Notify>>>> =
+// pub(crate): batch renders register here too, so the one cancel_render
+// command serves both the studio and the batch job.
+pub(crate) static ACTIVE_RENDERS: Lazy<Mutex<HashMap<String, Arc<Notify>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[tauri::command]

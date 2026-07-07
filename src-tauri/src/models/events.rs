@@ -240,6 +240,75 @@ pub struct ProvisionCancelledStatus {
     pub job_id: String,
 }
 
+/// Batch preview rendering: many models, ONE Blender launch. Deliberately
+/// its own stream — RenderStatus is the studio's single-job protocol and
+/// batch events flowing through it would hijack that UI.
+#[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
+pub enum BatchRenderStatus {
+    Started(BatchRenderStartedStatus),
+    Progress(BatchRenderProgressStatus),
+    /// One model finished (ok or not) — previews land incrementally, so the
+    /// catalog can refresh without waiting for the whole sweep.
+    ModelFinished(BatchRenderModelStatus),
+    Completed(BatchRenderCompletedStatus),
+    Failed(BatchRenderFailedStatus),
+    Cancelled(BatchRenderCancelledStatus),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BatchRenderStartedStatus {
+    pub job_id: String,
+    pub total_models: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BatchRenderProgressStatus {
+    pub job_id: String,
+    /// Display name of the model currently rendering.
+    pub current_model: String,
+    /// 1-based position in the batch.
+    pub model_index: u32,
+    pub total_models: u32,
+    /// Cycles sample progress of the current model.
+    pub model_percent: u32,
+    /// Whole-batch percent: (finished*100 + model_percent) / total.
+    pub percent: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BatchRenderModelStatus {
+    pub job_id: String,
+    pub model_index: u32,
+    pub dir_path: String,
+    pub variant_key: Option<String>,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BatchRenderCompletedStatus {
+    pub job_id: String,
+    pub succeeded: u32,
+    pub failed: u32,
+    pub total_models: u32,
+    pub elapsed_seconds: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BatchRenderFailedStatus {
+    pub job_id: String,
+    pub error: String,
+    /// Models finished before the failure — their previews are already
+    /// persisted and real.
+    pub succeeded: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BatchRenderCancelledStatus {
+    pub job_id: String,
+    pub succeeded: u32,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
 pub enum RenderStatus {
     Started(RenderStartedStatus),

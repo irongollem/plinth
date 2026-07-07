@@ -14,19 +14,21 @@ use catalog::commands::{
     ensure_model_files, finalize_normalize, get_catalog_designers, get_catalog_group_members,
     get_catalog_group_sources, get_catalog_model_files, get_catalog_releases, get_catalog_stats,
     get_catalog_tags, get_duplicate_groups, get_file_variants, get_pack_candidates,
-    list_catalog_roots, merge_duplicate_files, set_primary_catalog_root, pack_models, plan_normalize, remove_catalog_root,
-    remove_catalog_tag, remove_group_tag, rename_catalog_group, search_catalog,
-    search_catalog_groups, set_group_cover, set_model_preview, start_catalog_scan,
-    start_duplicate_scan, supports_file_links, unpack_models, update_model_metadata,
+    get_render_candidates, list_catalog_roots, merge_duplicate_files, pack_models, plan_normalize,
+    remove_catalog_root, remove_catalog_tag, remove_group_tag, rename_catalog_group,
+    search_catalog, search_catalog_groups, set_group_cover, set_model_preview, set_model_rotation,
+    set_primary_catalog_root, start_catalog_scan, start_duplicate_scan, supports_file_links,
+    unpack_models, update_model_metadata,
 };
 use file::commands::{
     add_model, cancel_compression, create_release, finalize_release, import_release,
     open_with_default_app,
 };
 use models::events::{
-    BlenderProvisionStatus, CompressionStatus, DuplicateStatus, PackStatus, RenderStatus,
-    ScanStatus,
+    BatchRenderStatus, BlenderProvisionStatus, CompressionStatus, DuplicateStatus, PackStatus,
+    RenderStatus, ScanStatus,
 };
+use render::batch::start_batch_render;
 use render::commands::{
     cancel_render, detect_blender, read_image_base64, read_look_json, start_render,
     write_look_json, write_png_base64,
@@ -120,6 +122,9 @@ fn create_specta_builder() -> Builder {
             get_pack_candidates,
             ensure_model_files,
             cleanup_ephemeral_files,
+            start_batch_render,
+            get_render_candidates,
+            set_model_rotation,
         ])
         .events(collect_events![
             CompressionStatus,
@@ -128,6 +133,7 @@ fn create_specta_builder() -> Builder {
             DuplicateStatus,
             PackStatus,
             BlenderProvisionStatus,
+            BatchRenderStatus,
         ])
 }
 
