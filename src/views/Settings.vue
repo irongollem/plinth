@@ -320,6 +320,7 @@ const settings = ref<Settings>({
   release_field_defaults: null,
   pack_level: null,
   pack_cleanup_after: null,
+  blender_setup_acknowledged: null,
 });
 
 // Display only — the Catalog tab manages the list. Falls back to the
@@ -431,9 +432,10 @@ onMounted(async () => {
 
 const saveSettings = async () => {
   try {
-    // The Catalog tab owns the roots list and this tab may have loaded
-    // before folders were added there — saving the stale copy would drop
-    // them. Re-read the authoritative values right before writing.
+    // The Catalog tab owns the roots list (and the setup dialog owns the
+    // Blender acknowledgement) and this tab may have loaded before they
+    // wrote — saving the stale copy would drop their changes. Re-read the
+    // authoritative values right before writing.
     const fresh = await commands.getSettings();
     const payload =
       fresh.status === "ok"
@@ -442,6 +444,7 @@ const saveSettings = async () => {
             catalog_root: fresh.data.catalog_root,
             catalog_roots: fresh.data.catalog_roots,
             catalog_primary_root: fresh.data.catalog_primary_root,
+            blender_setup_acknowledged: fresh.data.blender_setup_acknowledged,
           }
         : settings.value;
     const result = await commands.setSettings(payload);

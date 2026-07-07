@@ -21,6 +21,7 @@ pub(crate) static SETTINGS_CACHE: Lazy<Mutex<Settings>> = Lazy::new(|| {
         release_field_defaults: None,
         pack_level: None,
         pack_cleanup_after: None,
+        blender_setup_acknowledged: None,
     })
 });
 
@@ -129,6 +130,10 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
 
     let pack_cleanup_after = store.get("pack_cleanup_after").and_then(|v| v.as_bool());
 
+    let blender_setup_acknowledged = store
+        .get("blender_setup_acknowledged")
+        .and_then(|v| v.as_str().map(String::from));
+
     // Seed the lexicon on first load so the UI has something to show and the
     // scanner has something to match; the user's saved list wins thereafter.
     let known_designers = store
@@ -157,6 +162,7 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         release_field_defaults,
         pack_level,
         pack_cleanup_after,
+        blender_setup_acknowledged,
     };
 
     {
@@ -255,6 +261,11 @@ pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(
         &store,
         "pack_cleanup_after",
         settings.pack_cleanup_after.map(|v| json!(v)),
+    );
+    set_or_delete(
+        &store,
+        "blender_setup_acknowledged",
+        settings.blender_setup_acknowledged.as_deref().map(|v| json!(v)),
     );
 
     store.save().map_err(|e| e.to_string())?;

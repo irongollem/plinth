@@ -46,6 +46,11 @@ pub struct Settings {
     /// After a packed model's files were extracted for printing/preview,
     /// remove them again once the action is done (None = true).
     pub pack_cleanup_after: Option<bool>,
+    /// The managed Blender version (e.g. "5.1.2") whose first-run setup the
+    /// user last completed or dismissed. A version string, not a bool, so
+    /// bumping the pin re-offers the dialog exactly once.
+    #[serde(default)]
+    pub blender_setup_acknowledged: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

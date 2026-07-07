@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import BlenderSetupDialog from "./components/BlenderSetupDialog.vue";
 import Sidebar from "./components/Sidebar.vue";
 import ToastContainer from "./components/ToastContainer.vue";
 import { use3DPackageHandler } from "./composables/use3DPackageHandler";
@@ -39,4 +40,6 @@ const currentTabComponent = computed(() => {
   </div>
 
   <ToastContainer />
+  <!-- Outside the KeepAlive so first-run setup overlays every tab -->
+  <BlenderSetupDialog />
 </template>
