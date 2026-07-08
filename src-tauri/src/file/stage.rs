@@ -642,7 +642,7 @@ mod tests {
         let library = dir.join("library");
         fs::create_dir_all(&library).unwrap();
         let outcome =
-            crate::file::import::import_release(&out.join("release.3pk"), &library).unwrap();
+            crate::file::import::import_release(&out.join("release.3pk"), &library, None).unwrap();
         assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
         assert!(
             Path::new(&outcome.dest_dir).ends_with("Bestiarum/2026-07 Dread Swamp"),

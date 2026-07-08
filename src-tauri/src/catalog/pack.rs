@@ -550,8 +550,9 @@ pub fn unpack_model(model_dir: &Path) -> Result<UnpackOutcome, AppError> {
 }
 
 /// A non-clobbering sibling name for a diverged loose file: "body (edited).stl",
-/// numbered when even that exists.
-fn edited_aside_path(path: &Path) -> PathBuf {
+/// numbered when even that exists. Shared with release-update imports, which
+/// honor the same "never truncate a user-edited file" contract.
+pub(crate) fn edited_aside_path(path: &Path) -> PathBuf {
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())

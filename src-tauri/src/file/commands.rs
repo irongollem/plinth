@@ -296,21 +296,43 @@ pub async fn finalize_release(
 /// Import a packed release into the library: verify component checksums,
 /// extract (rematerializing dedup-elided names), land it under the same
 /// naming scheme create_release uses. A catalog scan afterwards restores
-/// the packed curation.
+/// the packed curation. `components` limits the run to the named components
+/// (selective import / update); None imports everything.
 #[tauri::command]
 #[specta::specta]
 pub async fn import_release(
     package_path: String,
     library_dir: String,
+    components: Option<Vec<String>>,
 ) -> Result<super::import::ImportOutcome, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         super::import::import_release(
             std::path::Path::new(&package_path),
             std::path::Path::new(&library_dir),
+            components,
         )
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Import task failed: {}", e)))?
+}
+
+/// Diff a `release.3pk` against the library without touching anything: per
+/// component, is it new, changed, unchanged, packed at rest, or missing its
+/// archive? Feeds the selective-import dialog shown before an import runs.
+#[tauri::command]
+#[specta::specta]
+pub async fn inspect_release_package(
+    package_path: String,
+    library_dir: String,
+) -> Result<super::import::PackageInspection, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        super::import::inspect_package(
+            std::path::Path::new(&package_path),
+            std::path::Path::new(&library_dir),
+        )
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Inspect task failed: {}", e)))?
 }
 
 /// Open files with their OS-default application — the "print" hand-off to

@@ -29,8 +29,9 @@ Designer-05-2026-Dungeon Classics/
 - **Component archives** (`<component>.zip`, later `<component>.tar.zst`)
   — the model files (STL/OBJ/3MF/LYS/…) for one group/model. One archive
   per component so a client can fetch, verify, or update them
-  independently (the Modular Package Strategy: selective download and
-  update-detection fall straight out of the per-component checksums).
+  independently (the Modular Package Strategy: update detection and
+  selective import fall straight out of the per-component checksums —
+  both shipped, see Import below).
 
 The `.3pk` never embeds the heavy model files — only references them by
 archive filename + checksum. A single-file distribution is a future
@@ -125,8 +126,8 @@ of making pose _metadata_ rather than folder structure.
 - **Algorithm:** BLAKE3 (already shipped for duplicate detection), encoded
   `blake3:<hex>`.
 - **Component `checksum`** (required): hash of the archive file's bytes.
-  This is what update-detection compares — a changed component is a
-  changed hash, so a client re-fetches only what moved.
+  This is what update detection compares — a changed component is a
+  changed hash, so a client re-imports only what moved.
 - **File `checksum`** (recommended): hash of each model file's content,
   for granular integrity and cross-release dedup.
 
@@ -171,21 +172,46 @@ Compression is ZIP in v1 (the only writer today); TAR+Zstd is a tracked
 upgrade and only changes component `archive` extensions + the reader's
 dispatch, not the manifest schema.
 
-## Read path (scanner import)
+## Import (opening a `release.3pk`)
 
-When a scan encounters a `release.3pk`:
+Opening or drag-dropping a `release.3pk` first **inspects** it — nothing
+touches the disk until the user confirms:
 
 1. Read `manifest.json`; reject unknown `version` majors.
-2. For each component, index its models exactly as folder-scanned models,
-   but seed identity from the manifest (`id`, `name`, `group`).
-3. Restore user metadata into `model_user_meta`, tags into `model_tags`,
-   and per-file assignments into `file_variants` — all keyed by
-   `dir_path`/`path` so they survive later rescans like any local edit.
-4. Verify component `checksum` when present; a mismatch surfaces as a
-   health warning rather than blocking the scan.
+2. Resolve the canonical landing spot (`Designer/YYYY-MM Release` under
+   the library) and read the **local manifest** a previous import left
+   there, if any.
+3. Diff each incoming component's `checksum` against the local manifest:
+   **new** (not imported before), **changed** (checksums differ),
+   **unchanged** (identical), **packed** (the local copy is compressed at
+   rest — unpack first), or **missing archive** (the sibling zip isn't
+   next to the `.3pk`).
 
-Legacy `release.json` / `model.json` sidecars remain readable; the `.3pk`
-manifest supersedes them when both are present.
+The import dialog pre-selects new + changed components; the user can
+deselect anything or re-select an unchanged component to repair deleted
+files. The confirmed import then, per selected component:
+
+1. Verifies the archive bytes against the manifest `checksum` — a
+   truncated download or bit-rot is refused per component, the rest of
+   the release still imports.
+2. On an update, moves aside any file the user edited since the last
+   import (bytes match neither the old nor the incoming checksum) as
+   `<name> (edited).<ext>` — slicer-saved supports are never truncated.
+3. Extracts, rematerializing dedup-elided names (see Deduplication).
+4. On an update, deletes files the previous import wrote that the new
+   manifest no longer lists, and sweeps emptied dirs. Files the user
+   added themselves were never in a manifest and survive.
+
+Finally the manifest is written into the release dir recording **what is
+actually on disk**: new entries for components that imported, the
+previous entry for ones that failed or were deselected. A partially
+failed update therefore still reads as "changed" on the next inspect —
+update detection stays truthful across partial runs.
+
+A catalog scan afterwards restores the packed curation from the
+`model.json` sidecars. Legacy `release.json` / `model.json` sidecars
+remain readable; the `.3pk` manifest supersedes them when both are
+present.
 
 ## Versioning & compatibility
 
@@ -198,8 +224,8 @@ manifest supersedes them when both are present.
 ## Out of scope for v1 (tracked separately)
 
 - Single self-contained `.3pk` container (v1 is modular).
-- Selective/partial download + reconstruction UI (builds on component
-  checksums — see the Modular Package Strategy todo section).
+- Partial download over a network (selective import of local components
+  shipped; fetching only changed components from a host needs a
+  distribution channel that doesn't exist yet).
 - TAR+Zstd component compression (todo: replace ZIP for local
   compression/cataloging).
-- Compress-at-rest for catalog models (uses the same component archives).

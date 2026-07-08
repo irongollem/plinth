@@ -24,7 +24,7 @@ use catalog::commands::{
 };
 use file::commands::{
     add_models, cancel_compression, create_release, finalize_release, import_release,
-    list_release_drafts, load_release_draft, open_with_default_app,
+    inspect_release_package, list_release_drafts, load_release_draft, open_with_default_app,
 };
 use minihoard::{cancel_minihoard, detect_minihoard, run_minihoard, MinihoardStatus};
 use models::events::{
@@ -70,6 +70,7 @@ fn create_specta_builder() -> Builder {
             cancel_compression,
             open_with_default_app,
             import_release,
+            inspect_release_package,
             list_release_drafts,
             load_release_draft,
             settings::get_settings,
