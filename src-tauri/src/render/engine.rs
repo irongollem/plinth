@@ -186,16 +186,9 @@ async fn blender_version(binary: &Path) -> Option<String> {
         .map(|line| line.trim().to_string())
 }
 
+/// All Blender spawns share the no-console-flash guarantee (crate::process).
 pub fn new_command(binary: &Path) -> Command {
-    let cmd = Command::new(binary);
-    #[cfg(target_os = "windows")]
-    let cmd = {
-        let mut cmd = cmd;
-        // CREATE_NO_WINDOW: don't flash a console per render
-        cmd.creation_flags(0x08000000);
-        cmd
-    };
-    cmd
+    crate::process::new_async_command(binary)
 }
 
 /// Blender 5+ moved render stats ("Fra: 1 | ... | Sample 8/96") behind the

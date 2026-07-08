@@ -14,6 +14,7 @@ use crate::error::AppError;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use crate::process::new_command;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -93,7 +94,7 @@ pub async fn detect_minihoard() -> Option<MinihoardInfo> {
             if !candidate.is_file() {
                 continue;
             }
-            let Ok(output) = Command::new(&candidate).arg("--version").output() else {
+            let Ok(output) = new_command(&candidate).arg("--version").output() else {
                 continue;
             };
             if !output.status.success() {
@@ -148,7 +149,7 @@ pub async fn run_minihoard(
         }
     }
 
-    let mut command = Command::new(&binary);
+    let mut command = new_command(&binary);
     command
         .args(&args)
         // batch downloads confirm interactively; there is no terminal here
@@ -258,6 +259,8 @@ fn spawn_line_reader<R: std::io::Read + Send + 'static>(
     tauri::async_runtime::spawn_blocking(move || {
         for line in BufReader::new(pipe).lines() {
             let Ok(line) = line else { break };
+            // lines() only strips \n — Windows children emit \r\n
+            let line = line.trim_end_matches('\r').to_string();
             MinihoardStatus::Line(MinihoardLine {
                 job_id: job_id.clone(),
                 line,

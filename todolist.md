@@ -58,15 +58,15 @@ the remaining half and depends on the release-builder flow settling first.
 
 ### Modular Package Strategy Implementation
 
-- [ ] Create a modular compression system that packages each group separately
+- [x] Create a modular compression system that packages each group separately — shipped as the 3pk writer: pack groups staged models into components (by group, else per model) and writes one archive per component (file/pack_manifest.rs, docs/3PK.md)
 - [ ] Create update detection system that compares local files with metadata checksums
-- [ ] Add selective download functionality to only retrieve changed/new components
+- [ ] PARKED — Selective download functionality to only retrieve changed/new components: presupposes a distribution channel (HTTP host serving components) that doesn't exist yet; the local half (selective import of changed components) is covered below
 - [x] Reconstruction v1: opening/dropping a release.3pk imports it — confirm dialog → library dir (catalog root default) → checksum-verified extraction → auto-scan restores curation. (Selective per-component UI still open below.)
 - [ ] Implement preview generation for .3dpak files (thumbnail/icon)
 - [ ] Create documentation for creators explaining the modular release strategy
-- [ ] Add bandwidth estimation and progress indicators for partial downloads
+- [ ] PARKED — Bandwidth estimation and progress indicators for partial downloads: blocked on the same missing distribution story as selective download
 - [x] Implement integrity verification for downloaded components (import_release refuses any component whose archive bytes don't match the manifest's blake3)
-- [ ] Create a manifest generator that builds the .3dpak file from component ZIPs
+- [x] Create a manifest generator that builds the .3dpak file from component ZIPs — this is pack_manifest.rs + the sequenced pack in compression_jobs.rs (the checked "Container manifest.json in release.3pk" bullet above, in older words)
 
 ## Done
 

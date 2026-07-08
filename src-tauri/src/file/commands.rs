@@ -329,7 +329,7 @@ pub async fn open_with_default_app(paths: Vec<String>) -> Result<(), AppError> {
         #[cfg(target_os = "macos")]
         {
             // one `open` call: multiple files reach the slicer as one batch
-            let output = std::process::Command::new("open")
+            let output = crate::process::new_command("open")
                 .args(&paths)
                 .output()
                 .map_err(|e| AppError::IoError(format!("Failed to run open: {}", e)))?;
@@ -343,7 +343,9 @@ pub async fn open_with_default_app(paths: Vec<String>) -> Result<(), AppError> {
         }
         #[cfg(target_os = "windows")]
         for path in &paths {
-            let status = std::process::Command::new("cmd")
+            // new_command: without CREATE_NO_WINDOW this cmd shim flashed a
+            // console window on every PRINT click
+            let status = crate::process::new_command("cmd")
                 .args(["/C", "start", "", path])
                 .status()
                 .map_err(|e| AppError::IoError(format!("Failed to run start: {}", e)))?;
@@ -356,7 +358,7 @@ pub async fn open_with_default_app(paths: Vec<String>) -> Result<(), AppError> {
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         for path in &paths {
-            let status = std::process::Command::new("xdg-open")
+            let status = crate::process::new_command("xdg-open")
                 .arg(path)
                 .status()
                 .map_err(|e| AppError::IoError(format!("Failed to run xdg-open: {}", e)))?;

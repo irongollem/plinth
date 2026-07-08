@@ -5,6 +5,7 @@ mod image;
 mod manifest;
 mod minihoard;
 mod models;
+mod process;
 mod render;
 mod settings;
 
