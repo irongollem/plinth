@@ -1,20 +1,30 @@
-# Sharing releases
+# Distributing & moving your library
 
-Sharing in Plinth always goes through the **release builder**: models
-leave your machine as a `.3pk` release — checksum-verified,
-deduplicated, and carrying your curation — never as loose files or
-internal archives. This page covers both directions: packing a release
-and importing one.
+Models leave a Plinth catalog for two legitimate reasons, and the app
+is built around exactly those two:
 
-::: tip Not the sharing format
-You may see `model.plinthpack` files inside your own library. That's
-the space-saving "packed at rest" storage, internal to your catalog —
-don't send those to anyone. If a model you want to share is packed,
-unpack it first; Plinth skips packed models when adding to a release
-and tells you why.
+- **Distributing as a creator** — you made the models (or hold the
+  rights to publish them) and want them to reach your customers or
+  patrons with your curation intact.
+- **Moving your own collection** — the same person, a different
+  machine: a new PC, a new NAS, a backup you want to be able to trust.
+
+::: warning Respect model licences
+Plinth packs and moves files; it doesn't grant rights. Most purchased
+or Patreon models are licensed for personal use only — moving them
+between **your own** systems is exactly that, but passing them to
+someone else usually isn't. The distribution features exist for
+creators publishing their own work.
 :::
 
-## Packing a release
+::: tip Not the distribution format
+You may see `model.plinthpack` files inside your library. That's the
+space-saving "packed at rest" storage, internal to your catalog — a
+model that's packed has no loose files to stage, so unpack it before
+building a release (Plinth skips packed models and tells you why).
+:::
+
+## Distributing as a creator
 
 1. **Collect models** — in the Catalog, open a model's drawer and hit
    **+ Add to release**. A group goes in with all its poses; per-file
@@ -39,15 +49,41 @@ My Studio-05-2026-Dungeon Classics/
 └── behir.zip
 ```
 
-Share that folder however you like — cloud storage, Patreon, a USB
-stick. Keep the component archives next to the `.3pk`; the manifest
-references them by filename. Identical files repeated across variants
-are stored once per component and restored on import, so the archives
-only carry unique content.
+Publish that folder wherever you distribute your work — your store,
+Patreon, cloud storage. Keep the component archives next to the
+`.3pk`; the manifest references them by filename. Identical files
+repeated across variants are stored once per component and restored on
+import, so the archives only carry unique content.
 
-If you distribute releases at scale (customers, patrons), read the
-[creator guide](../CREATORS.md) — it covers versioning, how updates
-reach your users, and practical tips.
+If you distribute at scale, read the [creator guide](../CREATORS.md) —
+it covers versioning, how updates reach your users, and practical tips
+for structuring releases.
+
+## Moving your collection to another system
+
+Your library is plain folders — Plinth catalogs files where they are,
+it doesn't lock them into a database. That gives you two migration
+paths:
+
+### Copy the folders (whole-library moves)
+
+1. Run **Clean up…** on the catalog first. Besides normalizing the
+   folder structure, the cleaner writes an authoritative `model.json`
+   sidecar into every model folder — your names, poses, variants, and
+   support assignments recorded _next to the files_.
+2. Copy the library folder(s) to the new system (or just point the new
+   machine at the same NAS share).
+3. Add the folder as a catalog folder on the new install and scan. The
+   sidecars restore the catalog — no guessing, no re-curating.
+
+### Pack releases (verified, selective moves)
+
+For moving specific releases — or when you want checksums proving the
+copy arrived intact — use the same pack/import flow creators use:
+build a release from the models, carry the folder over, and import it
+on the other side. Every file is verified against its BLAKE3 checksum
+on import, so silent corruption in transit is caught instead of
+discovered mid-print.
 
 ## Importing a release
 

@@ -9,7 +9,7 @@ _(repo name `stl-pack` for historical reasons; the product is Plinth)_
 [![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg?style=flat-square)](CONTRIBUTING.md)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri-purple?style=flat-square)](https://tauri.app/)
 
-Plinth is an opinionated desktop tool for cataloging, rendering, compressing, and bundling STL files "the right way". It provides an easy-to-use interface for organizing a disk-scale 3D model library and packing releases so they're efficient and ready to share.
+Plinth is an opinionated desktop tool for cataloging, rendering, compressing, and bundling STL files "the right way". It provides an easy-to-use interface for organizing a disk-scale 3D model library and packing releases so creators can distribute them efficiently — and collectors can move their own library between systems without losing curation.
 
 **📖 Documentation: [irongollem.github.io/stl-pack](https://irongollem.github.io/stl-pack/)** — installation, guides, and format reference.
 
@@ -65,7 +65,7 @@ instructions, updating, and troubleshooting.
 
 Plinth is an opinionated tool, and we believe in "the right way" to manage and distribute 3D printable files. This means:
 
-- **Efficiency:** Optimizing file sizes without compromising detail, making sharing and storage easier.
+- **Efficiency:** Optimizing file sizes without compromising detail, making distribution and storage easier.
 - **Organization:** Bundling models, metadata, and previews into a clear, structured format (`.3pk`).
 - **Reproducibility:** Ensuring that users have all the information needed to understand and use the models.
 
@@ -118,21 +118,25 @@ release they already have offers only the components that actually
 changed — an update to one model never means re-downloading or
 re-importing the whole release.
 
-### Sharing content from your catalog
+### Distributing and moving models
 
-The release builder is the sharing flow: select models in the catalog,
-"+ Add to release", fill in the release details, and pack. The result is
-a folder — `release.3pk` plus one component archive per model — that you
-hand to someone else however you like; they double-click or drag-drop
-the `.3pk` into Plinth and get your models _with_ your curation (names,
-poses, scale, support status, previews).
+Models leave a Plinth catalog for two reasons, and the release builder
+serves both: **creators distributing their own work** (select models,
+"+ Add to release", fill in the details, pack — customers import the
+`.3pk` and get the models _with_ your curation: names, poses, scale,
+support status, previews) and **moving your own collection** between
+your systems, either by packing releases for a checksum-verified
+transfer or simply by copying the library folders and rescanning (the
+`model.json` sidecars carry the curation). Plinth moves files, it
+doesn't grant rights — distribution features exist for creators
+publishing their own models, not for passing along purchased ones.
 
 You may also see `model.plinthpack` files inside your own library —
-that's the space-saving "packed at rest" storage, **not** a sharing
-format. Don't send those to anyone; they're an internal detail that only
-your own catalog (via its `pack.json` sidecar) knows how to read, and
-the format may change between app versions. A packed model needs to be
-unpacked before it can be staged into a release.
+that's the space-saving "packed at rest" storage, **not** a
+distribution format. Don't send those to anyone; they're an internal
+detail that only your own catalog (via its `pack.json` sidecar) knows
+how to read, and the format may change between app versions. A packed
+model needs to be unpacked before it can be staged into a release.
 
 - [Format specification](docs/3PK.md) — the frozen v1 manifest schema,
   deduplication rules, and import semantics.

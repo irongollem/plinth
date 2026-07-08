@@ -3,8 +3,9 @@
 Plinth is a desktop catalog for disk-scale 3D-print libraries: point it
 at the folders where your models already live and it gives you search,
 designer/release browsing, rendered previews, duplicate merging,
-space-saving packing, and a way to [share releases](./sharing.md) that
-carry their curation with them. Your files stay where they are — Plinth
+space-saving packing, and a way to
+[distribute releases and migrate your collection](./distributing.md)
+without losing curation. Your files stay where they are — Plinth
 indexes them, it doesn't move them (unless you ask it to).
 
 ## 1. Install
@@ -77,4 +78,4 @@ dialog showing every component with its size — checksum-verified
 extraction, then the release appears in your catalog with all the
 creator's curation. Opening a newer version of a release you already
 imported offers only what changed. Details in
-[Sharing releases](./sharing.md).
+[Distributing & moving your library](./distributing.md).

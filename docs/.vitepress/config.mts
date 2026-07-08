@@ -5,7 +5,7 @@ import { defineConfig } from "vitepress";
 export default defineConfig({
   title: "Plinth",
   description:
-    "An opinionated desktop tool for cataloging, rendering, and sharing 3D-printable model libraries",
+    "An opinionated desktop tool for cataloging, rendering, and distributing 3D-printable model libraries",
   base: "/stl-pack/",
   cleanUrls: true,
   lastUpdated: true,
@@ -25,7 +25,7 @@ export default defineConfig({
         items: [
           { text: "Installation", link: "/INSTALL" },
           { text: "Getting started", link: "/guide/getting-started" },
-          { text: "Sharing releases", link: "/guide/sharing" },
+          { text: "Distributing & moving", link: "/guide/distributing" },
         ],
       },
       {

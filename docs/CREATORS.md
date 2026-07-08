@@ -82,17 +82,17 @@ per-file pose assignments all arrive intact in the user's catalog, and
 even survive their own rescans. The more you fill in while building the
 release, the better it lands.
 
-## Not a sharing format: `model.plinthpack`
+## Not a distribution format: `model.plinthpack`
 
 If you use Plinth's compressed-at-rest feature, your own library will
 contain `model.plinthpack` archives (with `pack.json` sidecars). Those
 are **internal storage**, not a distribution format: only your own
 catalog knows how to read them, and unlike the frozen `.3pk` spec they
-may change between app versions. To share anything — with customers or
-just a friend — always go through the release builder so it leaves your
-machine as a `.3pk`. A model that is packed at rest has no loose files
-to stage, so unpack it first (Plinth skips packed models when adding to
-a release and tells you why).
+may change between app versions. Anything that leaves your machine —
+to customers, or to your own second system — should leave through the
+release builder as a `.3pk`. A model that is packed at rest has no
+loose files to stage, so unpack it first (Plinth skips packed models
+when adding to a release and tells you why).
 
 ## Practical tips
 
