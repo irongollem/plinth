@@ -3630,8 +3630,12 @@ const addToDraftRelease = async () => {
     const entry = selected.value;
     const groupName = selectedGroup.value?.group_name ?? entry.name;
     const variants = members.value.length ? members.value : [entry];
+    // Staging copies the loose files (file/stage.rs), which a packed
+    // member doesn't have — same refusal as normalize/move/dup-merge
+    const packedSkipped = variants.filter((variant) => variant.packed);
     const newVariants = variants.filter(
       (variant) =>
+        !variant.packed &&
         !releasesStore.models.some(
           (draft) => draft.source_dir === variant.dir_path,
         ),
@@ -3697,12 +3701,20 @@ const addToDraftRelease = async () => {
         file_poses: filePoses,
       });
     }
-    toastStore.addToast(
-      newVariants.length
-        ? `Added “${groupName}” with ${newVariants.length} pose${newVariants.length === 1 ? "" : "s"}`
-        : `“${groupName}” is already in the release`,
-      newVariants.length ? "success" : "info",
-    );
+    if (packedSkipped.length) {
+      toastStore.addToast(
+        `📦 ${packedSkipped.length} pose${packedSkipped.length === 1 ? "" : "s"} skipped — packed (unpack first to add to a release)`,
+        "warning",
+      );
+    }
+    if (newVariants.length || !packedSkipped.length) {
+      toastStore.addToast(
+        newVariants.length
+          ? `Added “${groupName}” with ${newVariants.length} pose${newVariants.length === 1 ? "" : "s"}`
+          : `“${groupName}” is already in the release`,
+        newVariants.length ? "success" : "info",
+      );
+    }
   } catch (error) {
     toastStore.reportError("Failed to add model to release", error);
   }
