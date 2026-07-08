@@ -22,10 +22,14 @@ jobs:
             platform: macos-latest
             rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
             tauri-args: --target universal-apple-darwin
+          # NSIS only: the MSI bundler rejects semver pre-release versions
+          # (its ProductVersion is numeric-only, so "0.2.0-alpha.1" fails to
+          # bundle). NSIS handles the full version and is the recommended
+          # installer anyway (Plinth_<ver>_x64-setup.exe).
           - name: Windows x64
             platform: windows-latest
             rust-targets: ""
-            tauri-args: ""
+            tauri-args: --bundles nsis
           - name: Linux x64
             platform: ubuntu-latest
             rust-targets: ""

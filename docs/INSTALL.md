@@ -25,9 +25,9 @@ through each platform's warning step by step.
 ## Windows
 
 Download **`Plinth_<version>_x64-setup.exe`** from the
-[releases page](https://github.com/irongollem/stl-pack/releases) — this
-is the recommended installer. An `.msi` is also published for admins
-and deployment tooling; regular users should take the `.exe`.
+[releases page](https://github.com/irongollem/stl-pack/releases) — the
+NSIS installer. (Pre-release builds ship the `.exe` only; an `.msi` for
+deployment tooling may return for stable releases.)
 
 ### If your browser flags the download
 
@@ -149,8 +149,7 @@ binary. Walk through the same steps as before.
 
 ## Uninstalling
 
-- **Windows**: Settings → Apps → Installed apps → Plinth → Uninstall
-  (or via the `.msi` if that's how it was deployed).
+- **Windows**: Settings → Apps → Installed apps → Plinth → Uninstall.
 - **macOS**: drag `Plinth.app` from Applications to the Trash.
 - **Linux**: `sudo apt remove plinth` / `sudo dnf remove plinth` for
   the packaged installs; for the AppImage, just delete the file.
