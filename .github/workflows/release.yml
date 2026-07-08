@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "[0-9]+.[0-9]+.[0-9]+*" # matches the existing un-prefixed tag style (0.1.0-beta.2)
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Universal binary: macos-latest runners are Apple Silicon, but Intel
+          # Mac users exist — build both halves and lipo them together.
+          - name: macOS universal
+            platform: macos-latest
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            tauri-args: --target universal-apple-darwin
+          - name: Windows x64
+            platform: windows-latest
+            rust-targets: ""
+            tauri-args: ""
+          - name: Linux x64
+            platform: ubuntu-latest
+            rust-targets: ""
+            tauri-args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux system dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      # tauri-action runs `bun run build` itself via beforeBuildCommand,
+      # so there is no separate frontend build step here.
+      - name: Build and upload Tauri bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Plinth v__VERSION__"
+          releaseBody: "See the assets below to download and install."
+          releaseDraft: true
+          args: ${{ matrix.tauri-args }}
