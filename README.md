@@ -11,6 +11,8 @@ _(repo name `stl-pack` for historical reasons; the product is Plinth)_
 
 Plinth is an opinionated desktop tool for cataloging, rendering, compressing, and bundling STL files "the right way". It provides an easy-to-use interface for organizing a disk-scale 3D model library and packing releases so they're efficient and ready to share.
 
+**📖 Documentation: [irongollem.github.io/stl-pack](https://irongollem.github.io/stl-pack/)** — installation, guides, and format reference.
+
 ## Features
 
 - Compress STL files to reduce file size without losing quality.
@@ -21,7 +23,35 @@ Plinth is an opinionated desktop tool for cataloging, rendering, compressing, an
 
 ## Installation
 
-To install Plinth, download the latest release from the [releases page](https://github.com/irongollem/stl-pack/releases) and follow the installation instructions for your operating system.
+Download the latest release for your platform from the
+[releases page](https://github.com/irongollem/stl-pack/releases):
+
+- **Windows** — `Plinth_<version>_x64-setup.exe`
+- **macOS** — `Plinth_<version>_universal.dmg` (Apple Silicon and Intel)
+- **Linux** — `.AppImage`, `.deb`, or `.rpm`
+
+> [!IMPORTANT]
+> **Plinth is currently unsigned**, so your operating system will warn you
+> the first time you install or run it. Code-signing certificates cost
+> hundreds of euros per year, which we've chosen not to spend on a free
+> beta — the trade-off is one extra click for you:
+>
+> - **Windows**: SmartScreen shows "Windows protected your PC" — click
+>   **More info**, then **Run anyway**.
+> - **macOS 15+**: the app is blocked with "Apple could not verify…" —
+>   click **Done**, then open **System Settings → Privacy & Security**,
+>   scroll down, and click **Open Anyway**. (On macOS 14 and earlier,
+>   right-click the app → **Open** → **Open** is enough.)
+> - **Linux**: no warnings; make the AppImage executable first
+>   (`chmod +x Plinth_*.AppImage`).
+>
+> These warnings only mean the build isn't registered with Microsoft or
+> Apple — not that anything is wrong with it. Plinth is open source and
+> every release is built in public by [GitHub Actions](.github/workflows/release.yml)
+> from a tagged commit, so you can audit exactly what you're running.
+
+See the [installation guide](docs/INSTALL.md) for step-by-step
+instructions, updating, and troubleshooting.
 
 ## Usage
 
@@ -77,6 +107,36 @@ But prohibits:
 
 See [`LICENSE.md`](LICENSE.md) for the complete license terms and [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for information about included components.
 
-## 3pk
+## The `.3pk` release format
 
-Plinth generates and in the future consumes an original 3pk file which is a compressed archive containing metadata, licence data and images representing a full release or bundle in a structured format.
+Plinth packs and imports releases in its own modular format: a small
+`release.3pk` (metadata, previews, licence, and a checksum for every file)
+next to one component archive per model or group. Because every component
+carries its own BLAKE3 checksum, importing is verified end-to-end, users
+can pick exactly which models to import, and opening a newer version of a
+release they already have offers only the components that actually
+changed — an update to one model never means re-downloading or
+re-importing the whole release.
+
+### Sharing content from your catalog
+
+The release builder is the sharing flow: select models in the catalog,
+"+ Add to release", fill in the release details, and pack. The result is
+a folder — `release.3pk` plus one component archive per model — that you
+hand to someone else however you like; they double-click or drag-drop
+the `.3pk` into Plinth and get your models _with_ your curation (names,
+poses, scale, support status, previews).
+
+You may also see `model.plinthpack` files inside your own library —
+that's the space-saving "packed at rest" storage, **not** a sharing
+format. Don't send those to anyone; they're an internal detail that only
+your own catalog (via its `pack.json` sidecar) knows how to read, and
+the format may change between app versions. A packed model needs to be
+unpacked before it can be staged into a release.
+
+- [Format specification](docs/3PK.md) — the frozen v1 manifest schema,
+  deduplication rules, and import semantics.
+- [Creator guide](docs/CREATORS.md) — what packing produces, how updates
+  reach your users, and practical tips for structuring a release.
+- [Catalog internals](docs/CATALOG.md) — how imported releases and
+  scanned folders become the searchable library.
