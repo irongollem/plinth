@@ -5,8 +5,8 @@
 //! The extracted tree matches what the builder staged, so a normal catalog
 //! scan restores the packed curation via the model.json sidecars.
 
+use crate::catalog::layout;
 use crate::error::AppError;
-use crate::file::utils::clean_name;
 use crate::manifest::{self, Manifest};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -58,22 +58,16 @@ pub fn import_release(package_path: &Path, library_dir: &Path) -> Result<ImportO
         .parent()
         .ok_or_else(|| AppError::InvalidInput("Package has no parent directory".into()))?;
 
-    // Same naming scheme create_release uses, so imported and self-made
-    // releases sit uniformly in the library. Manifest date is YYYY-MM;
-    // the on-disk convention is MM-YYYY.
-    let date = manifest
-        .release
-        .date
-        .split_once('-')
-        .map(|(y, m)| format!("{}-{}", m, y))
-        .unwrap_or_else(|| manifest.release.date.clone());
-    let dir_name = format!(
-        "{}-{}-{}",
-        clean_name(&manifest.release.designer),
-        date,
-        clean_name(&manifest.release.name)
+    // Land at the CANONICAL library spot — Designer/YYYY-MM Release — so an
+    // imported release drops into the catalog already normal-form and the
+    // normalizer has nothing to move. The manifest date is already the
+    // sortable YYYY-MM the release segment wants.
+    let dest = layout::release_dir(
+        library_dir,
+        &manifest.release.designer,
+        &manifest.release.name,
+        Some(&manifest.release.date),
     );
-    let dest = library_dir.join(dir_name);
     if dest.exists() {
         return Err(AppError::InvalidInput(format!(
             "'{}' already exists — remove it first to re-import",
@@ -114,7 +108,10 @@ pub fn import_release(package_path: &Path, library_dir: &Path) -> Result<ImportO
             .iter()
             .flat_map(|m| m.files.iter().cloned())
             .collect();
-        let component_dest = dest.join(&component.name);
+        // sanitize_segment: idempotent for our own packages (staging already
+        // sanitized the dir name) and stops a hostile manifest component
+        // name ("../x") from landing outside the release dir
+        let component_dest = dest.join(layout::sanitize_segment(&component.name));
         manifest::extract_component_archive(&archive_path, &component_dest, &manifest_files)?;
         components += 1;
         files += manifest_files.len() as u32;
@@ -199,7 +196,11 @@ mod tests {
         assert_eq!(outcome.components, 1);
 
         let release_dir = Path::new(&outcome.dest_dir);
-        assert!(release_dir.ends_with("dtl-05-2026-knights"));
+        assert!(
+            release_dir.ends_with("DTL/2026-05 Knights"),
+            "canonical Designer/YYYY-MM Release landing spot, got {}",
+            release_dir.display()
+        );
         // Every manifest name exists — including the dedup-elided twin
         for name in [
             "knight/base.stl",

@@ -111,6 +111,34 @@ pub fn support_segment(support: Option<&str>) -> Option<&'static str> {
     }
 }
 
+/// The designer tier under a catalog root. A catalog folder that IS the
+/// designer's folder ("…/dm_stash" added as a root) already spells the
+/// designer — adding the segment again would nest DM Stash/DM Stash.
+/// Matched with the same fuzzy key as designer inference, so
+/// spelling/punctuation differences don't fool it.
+fn designer_tier(root: &Path, designer: &str) -> PathBuf {
+    let root_names_designer = root.file_name().is_some_and(|name| {
+        super::scanner::alnum_key(&name.to_string_lossy()) == super::scanner::alnum_key(designer)
+    });
+    if root_names_designer {
+        root.to_path_buf()
+    } else {
+        root.join(sanitize_segment(designer))
+    }
+}
+
+/// The canonical dir for one RELEASE under a catalog root:
+/// root/[Designer/]YYYY-MM Release. This is where an imported release.3pk
+/// lands, so imports drop into the library already normal-form.
+pub fn release_dir(
+    root: &Path,
+    designer: &str,
+    release_name: &str,
+    release_date: Option<&str>,
+) -> PathBuf {
+    designer_tier(root, designer).join(release_segment(release_name, release_date))
+}
+
 /// The canonical dir for one MODEL (the group card):
 /// root/Designer/[YYYY-MM Release/]Model. A release-less model sits
 /// directly under its designer.
@@ -121,18 +149,7 @@ pub fn model_dir(
     release_date: Option<&str>,
     model_name: &str,
 ) -> PathBuf {
-    // A catalog folder that IS the designer's folder ("…/dm_stash" added
-    // as a root) already spells the designer — adding the segment again
-    // would nest DM Stash/DM Stash. Matched with the same fuzzy key as
-    // designer inference, so spelling/punctuation differences don't fool it.
-    let root_names_designer = root.file_name().is_some_and(|name| {
-        super::scanner::alnum_key(&name.to_string_lossy()) == super::scanner::alnum_key(designer)
-    });
-    let mut dir = if root_names_designer {
-        root.to_path_buf()
-    } else {
-        root.join(sanitize_segment(designer))
-    };
+    let mut dir = designer_tier(root, designer);
     if let Some(release) = release_name.filter(|r| !r.trim().is_empty()) {
         dir = dir.join(release_segment(release, release_date));
     }
@@ -254,6 +271,19 @@ mod tests {
         );
         // unknown support -> model root, variant tier does not apply
         assert_eq!(member_dir(model, None, Some("sword")), model);
+    }
+
+    #[test]
+    fn release_dir_places_releases_under_the_designer_tier() {
+        assert_eq!(
+            release_dir(Path::new("/lib"), "Bestiarum", "Dread Swamp", Some("2026-07")),
+            Path::new("/lib/Bestiarum/2026-07 Dread Swamp")
+        );
+        // the designer-named-root skip applies here exactly as for models
+        assert_eq!(
+            release_dir(Path::new("/nas/dm_stash"), "DM Stash", "Dungeon", Some("1/2026")),
+            Path::new("/nas/dm_stash/2026-01 Dungeon")
+        );
     }
 
     #[test]
