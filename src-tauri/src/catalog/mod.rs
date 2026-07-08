@@ -351,6 +351,19 @@ pub struct TagCount {
     pub count: u32,
 }
 
+/// One (designer, release_name) origin among the models a group rename would
+/// touch. group_renames is keyed purely on the scanner-derived group name —
+/// no root/designer scoping — so a generic name ("Spear") reused by an
+/// unrelated designer collides with it silently. More than one distinct
+/// origin here means the rename reaches further than whatever single card
+/// the user is looking at.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct GroupOrigin {
+    pub designer: Option<String>,
+    pub release_name: Option<String>,
+    pub model_count: u32,
+}
+
 /// One requested directory move: rename `from` to `to` on disk and repoint
 /// the catalog index to match.
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

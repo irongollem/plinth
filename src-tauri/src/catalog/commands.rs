@@ -20,8 +20,8 @@ use uuid::Uuid;
 use super::{
     db, dups, normalize, pack, scanner, BatchOutcome, CatalogEntry, CatalogFile,
     CatalogGroupResult, CatalogSearchResult, CatalogStats, DesignerCount, DuplicateGroup,
-    EnsureOutcome, FileVariant, ModelMetaUpdate, MoveOperation, NormalizeOp, NormalizePlan,
-    ReleaseSummary, TagCount,
+    EnsureOutcome, FileVariant, GroupOrigin, ModelMetaUpdate, MoveOperation, NormalizeOp,
+    NormalizePlan, ReleaseSummary, TagCount,
 };
 
 /// Scan and duplicate jobs share one registry; both cancel through
@@ -1032,6 +1032,24 @@ pub async fn get_catalog_group_sources(
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Group source task failed: {}", e)))?
+}
+
+/// Where a rename/combine of `group_name` would actually reach — call this
+/// before committing one, so the UI can warn when a generic scanner-derived
+/// name ("Spear") turns out to also belong to an unrelated designer/release
+/// (see the group_renames CREATE TABLE comment: no root/designer scoping).
+#[tauri::command]
+#[specta::specta]
+pub async fn get_group_rename_origins(
+    app_handle: AppHandle,
+    group_name: String,
+) -> Result<Vec<GroupOrigin>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::group_rename_origins(&conn, &group_name)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Group origin task failed: {}", e)))?
 }
 
 /// Remove one mis-combined source from a card (its rename row) so it comes

@@ -4,7 +4,8 @@ use std::path::Path;
 
 use super::{
     CatalogEntry, CatalogFile, CatalogGroup, CatalogStats, DesignerCount, DuplicateGroup,
-    ExtensionStat, FileRow, FileVariant, FileVariantRow, ModelRow, PackRow, ReleaseSummary,
+    ExtensionStat, FileRow, FileVariant, FileVariantRow, GroupOrigin, ModelRow, PackRow,
+    ReleaseSummary,
 };
 
 const SCHEMA_VERSION: i64 = 5;
@@ -1287,6 +1288,42 @@ pub fn group_sources(conn: &Connection, group_name: &str) -> Result<Vec<String>,
         .map_err(map_err)?;
     let rows = stmt
         .query_map([group_name], |row| row.get(0))
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
+/// (designer, release_name) origins among the models a rename/combine of
+/// `group_name` would touch — the SAME predicate upsert_group_rename uses,
+/// so this predicts exactly what a rename reaches. group_renames has no
+/// root/designer scoping (see the group_renames CREATE TABLE comment), so
+/// a generic scanner-derived name ("Spear") reused by an unrelated designer
+/// collides here; more than one distinct origin is the signal a caller
+/// should confirm with the user before committing the rename.
+pub fn group_rename_origins(
+    conn: &Connection,
+    group_name: &str,
+) -> Result<Vec<GroupOrigin>, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Group origin lookup failed: {}", e));
+    let mut stmt = conn
+        .prepare(
+            "SELECT m.designer, m.release_name, COUNT(*) AS model_count
+             FROM models m
+             LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)
+             WHERE lower(COALESCE(r.display_name, m.group_name, m.name)) = lower(?1)
+             GROUP BY m.designer, m.release_name
+             ORDER BY model_count DESC",
+        )
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map([group_name], |row| {
+            Ok(GroupOrigin {
+                designer: row.get(0)?,
+                release_name: row.get(1)?,
+                model_count: row.get(2)?,
+            })
+        })
         .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
         .map_err(map_err)?;
     Ok(rows)
@@ -4084,6 +4121,38 @@ mod tests {
         assert!(page.groups.iter().any(|g| g.group_name == "Giant Newt"));
 
         assert!(rename_group(&conn, "no such group", "x").is_err());
+    }
+
+    /// The safety check a caller should run before committing a rename: two
+    /// unrelated designers/releases sharing a scanner-derived group name
+    /// (group_renames has no root/designer scoping) must show up as two
+    /// distinct origins, not silently merge invisibly.
+    #[test]
+    fn group_rename_origins_reports_each_distinct_designer_release() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+
+        // Giant Newt (DTL / Critterfolk) hasn't been touched yet — one origin
+        let origins = group_rename_origins(&conn, "Giant Newt").unwrap();
+        assert_eq!(origins.len(), 1);
+        assert_eq!(origins[0].designer.as_deref(), Some("DTL"));
+        assert_eq!(origins[0].release_name.as_deref(), Some("Critterfolk"));
+        assert_eq!(origins[0].model_count, 1);
+
+        // Renaming Bugbear (no designer/release) onto the same display name
+        // as Giant Newt merges them — group_rename_origins on either name
+        // must now surface BOTH origins so a caller can warn before this
+        // happens, not just after
+        rename_group(&conn, "Giant Newt", "Stone Guardian").unwrap();
+        rename_group(&conn, "Bugbear", "Stone Guardian").unwrap();
+        let origins = group_rename_origins(&conn, "Stone Guardian").unwrap();
+        assert_eq!(origins.len(), 2);
+        assert!(origins.iter().any(|o| o.designer.as_deref() == Some("DTL")
+            && o.release_name.as_deref() == Some("Critterfolk")));
+        assert!(origins
+            .iter()
+            .any(|o| o.designer.is_none() && o.release_name.is_none()));
     }
 
     #[test]

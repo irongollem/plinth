@@ -1739,6 +1739,7 @@ import {
   type CatalogStats,
   type DesignerCount,
   type DuplicateGroup,
+  type GroupOrigin,
   type NormalizePlan,
   type RenderCandidate,
   type TagCount,
@@ -2468,6 +2469,38 @@ const detachSelectedSource = async () => {
   await selectGroup(group);
 };
 
+const originLabel = (o: GroupOrigin) =>
+  `${o.designer ?? "unknown designer"} / ${o.release_name ?? "unknown release"} (${o.model_count} model${o.model_count === 1 ? "" : "s"})`;
+
+// group_renames has no root/designer scoping (scanner-derived group names
+// are bare strings), so a generic name like "Spear" can already silently
+// span more than one designer/release before the user ever touches it.
+// Check each name a rename/combine is about to reach and let the user bail
+// if that turns out to be a surprise, rather than merging it invisibly.
+const confirmRenameAmbiguity = async (names: string[], actionLabel: string) => {
+  const results = await Promise.all(
+    names.map(async (name) => ({
+      name,
+      origins: await commands.getGroupRenameOrigins(name),
+    })),
+  );
+  const ambiguous = results.filter(
+    (r) => r.origins.status === "ok" && r.origins.data.length > 1,
+  );
+  if (!ambiguous.length) return true;
+  const detail = ambiguous
+    .map(({ name, origins }) =>
+      origins.status === "ok"
+        ? `"${name}" also includes:\n${origins.data.map((o) => `  · ${originLabel(o)}`).join("\n")}`
+        : "",
+    )
+    .join("\n\n");
+  return confirm(
+    `This name is shared with models from other designers/releases:\n\n${detail}\n\n${actionLabel} anyway?`,
+    { title: "Ambiguous group name", kind: "warning" },
+  );
+};
+
 // Undo for combine (and for a rename collision that merged two models):
 // clearing the name overrides brings every source group back as its own
 // card, named after its folder again. Nothing on disk moves.
@@ -2501,6 +2534,12 @@ const renameGroup = async () => {
   if (!group) return;
   const newName = groupNameDraft.value.trim();
   if (newName === group.group_name) return;
+  if (
+    newName &&
+    !(await confirmRenameAmbiguity([group.group_name], "Rename"))
+  ) {
+    return;
+  }
   const result = await commands.renameCatalogGroup(group.group_name, newName);
   if (result.status !== "ok") {
     toastStore.reportError("Failed to rename model", result.error);
@@ -3312,6 +3351,7 @@ const combineChecked = async () => {
   const names = [...checkedGroups.value];
   const target = combineName.value.trim();
   if (!target || names.length < 2) return;
+  if (!(await confirmRenameAmbiguity(names, "Combine"))) return;
   const result = await commands.combineCatalogGroups(names, target);
   combining.value = false;
   if (result.status !== "ok") {
@@ -3505,6 +3545,10 @@ const saveMetadata = async () => {
   // NAME edits the group/card name (the sort key) for every model.
   const newName = draft.name.trim();
   if (newName && newName !== group.group_name) {
+    if (!(await confirmRenameAmbiguity([group.group_name], "Rename"))) {
+      savedToast();
+      return;
+    }
     const renamed = await commands.renameCatalogGroup(
       group.group_name,
       newName,
