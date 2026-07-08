@@ -24,9 +24,9 @@ async addModels(models: StlModel[], releaseDir: string) : Promise<Result<([StlMo
     else return { status: "error", error: e  as any };
 }
 },
-async createRelease(release: Release, imagePaths: string[], otherFilePaths: string[]) : Promise<Result<string, AppError>> {
+async createRelease(release: Release, imagePaths: string[], otherFilePaths: string[], licencePath: string | null) : Promise<Result<string, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("create_release", { release, imagePaths, otherFilePaths }) };
+    return { status: "ok", data: await TAURI_INVOKE("create_release", { release, imagePaths, otherFilePaths, licencePath }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1353,7 +1353,12 @@ scale_reference_path?: string | null;
  * How tall the reference stands, in the model's own mm space
  * (None = 28 — a classic tabletop human).
  */
-scale_reference_height_mm?: number | null }
+scale_reference_height_mm?: number | null; 
+/**
+ * The creator's licence file (PDF/txt/md), offered as a toggle in the
+ * release builder — set once, ride along in every release.3pk.
+ */
+licence_path?: string | null }
 export type StartedStatus = { job_id: string; total_files: number; total_size_kb: number }
 /**
  * A model as the release builder stages it and `model.json` records it.

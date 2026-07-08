@@ -328,6 +328,39 @@
       <div class="flex flex-col gap-1.5">
         <span
           class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          >CREATOR LICENCE</span
+        >
+        <div
+          class="flex items-center gap-2.5 bg-base-200 border border-base-content/10 rounded-lg px-2.5 py-1.5"
+        >
+          <span
+            class="font-mono text-[12px] text-base-content/60 flex-1 truncate"
+          >
+            {{ settings.licence_path || "No licence file chosen" }}
+          </span>
+          <button type="button" class="btn btn-xs" @click="browseLicence">
+            Browse…
+          </button>
+          <button
+            v-if="settings.licence_path"
+            type="button"
+            class="btn btn-xs btn-ghost"
+            @click="settings.licence_path = null"
+          >
+            clear
+          </button>
+        </div>
+        <p class="text-[10.5px] text-base-content/40">
+          Your licence terms as a file (PDF, txt, md…). The release builder
+          offers to include it in every release you pack — it travels inside the
+          release.3pk, named licence, so your customers always receive your
+          terms alongside the models.
+        </p>
+      </div>
+
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
           >APPEARANCE</span
         >
         <div
@@ -463,6 +496,16 @@ const browseScaleRef = async () => {
   });
   if (files?.length) {
     settings.value.scale_reference_path = files[0].path;
+  }
+};
+
+const browseLicence = async () => {
+  const files = await selectFiles({
+    multiple: false,
+    title: "Select your licence file",
+  });
+  if (files?.length) {
+    settings.value.licence_path = files[0].path;
   }
 };
 

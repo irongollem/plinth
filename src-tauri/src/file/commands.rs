@@ -147,6 +147,7 @@ pub async fn create_release(
     release: Release,
     image_paths: Vec<String>,
     other_file_paths: Vec<String>,
+    licence_path: Option<String>,
 ) -> Result<String, AppError> {
     let release_name = clean_name(&release.name);
     let designer_name = clean_name(&release.designer);
@@ -178,7 +179,12 @@ pub async fn create_release(
     let release_path = storage::create_dir_on_scratch(&app_handle, release_dir_name.clone())?;
 
     let copied_images = storage::copy_images(&image_paths, &release_path, &release_name)?;
-    let copied_files = storage::copy_files(&other_file_paths, &release_path)?;
+    let mut copied_files = storage::copy_files(&other_file_paths, &release_path)?;
+    // The creator's licence (default from Settings, toggled in the builder)
+    // lands as canonical licence.<ext> so it rides inside release.3pk
+    if let Some(licence) = licence_path {
+        copied_files.push(storage::copy_licence(&licence, &release_path)?);
+    }
 
     let relative_image_paths = storage::convert_to_relative_paths(&copied_images, &release_path)?;
     let relative_file_paths = storage::convert_to_relative_paths(&copied_files, &release_path)?;

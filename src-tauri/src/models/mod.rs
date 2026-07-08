@@ -61,6 +61,10 @@ pub struct Settings {
     /// (None = 28 — a classic tabletop human).
     #[serde(default)]
     pub scale_reference_height_mm: Option<f64>,
+    /// The creator's licence file (PDF/txt/md), offered as a toggle in the
+    /// release builder — set once, ride along in every release.3pk.
+    #[serde(default)]
+    pub licence_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

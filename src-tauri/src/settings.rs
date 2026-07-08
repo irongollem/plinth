@@ -24,6 +24,7 @@ pub(crate) static SETTINGS_CACHE: Lazy<Mutex<Settings>> = Lazy::new(|| {
         blender_setup_acknowledged: None,
         scale_reference_path: None,
         scale_reference_height_mm: None,
+        licence_path: None,
     })
 });
 
@@ -144,6 +145,10 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         .get("scale_reference_height_mm")
         .and_then(|v| v.as_f64());
 
+    let licence_path = store
+        .get("licence_path")
+        .and_then(|v| v.as_str().map(String::from));
+
     // Seed the lexicon on first load so the UI has something to show and the
     // scanner has something to match; the user's saved list wins thereafter.
     let known_designers = store
@@ -175,6 +180,7 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         blender_setup_acknowledged,
         scale_reference_path,
         scale_reference_height_mm,
+        licence_path,
     };
 
     {
@@ -288,6 +294,11 @@ pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(
         &store,
         "scale_reference_height_mm",
         settings.scale_reference_height_mm.map(|v| json!(v)),
+    );
+    set_or_delete(
+        &store,
+        "licence_path",
+        settings.licence_path.as_deref().map(|v| json!(v)),
     );
 
     store.save().map_err(|e| e.to_string())?;

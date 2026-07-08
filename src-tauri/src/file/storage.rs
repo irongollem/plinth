@@ -114,6 +114,46 @@ pub fn copy_files(file_paths: &[String], model_folder: &Path) -> Result<Vec<Stri
     Ok(copied_files)
 }
 
+/// Copy the creator's licence file into the release root under the CANONICAL
+/// name `licence.<ext>` — collect_files_for_compression recognizes that stem
+/// and routes the file into release.3pk, whatever the source was called.
+pub fn copy_licence(source: &str, release_dir: &Path) -> Result<String, AppError> {
+    let source_path = Path::new(source);
+    if !source_path.is_file() {
+        return Err(AppError::NotFoundError(format!(
+            "Licence file '{}' does not exist — update it in Settings",
+            source
+        )));
+    }
+    let extension = source_path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let destination = release_dir.join(format!("licence{}", extension));
+    fs::copy(source_path, &destination)
+        .map_err(|e| AppError::IoError(format!("Failed to copy licence file: {}", e)))?;
+    Ok(destination.to_string_lossy().into_owned())
+}
+
+/// Root-level loose files that belong INSIDE release.3pk: the release-level
+/// metadata (jsons), preview images in any format the builder accepts, and
+/// the licence file copy_licence wrote. Everything else loose stays
+/// zip-only — the .3pk is deliberately small.
+fn belongs_in_3pk(file_name: &str) -> bool {
+    let lower = file_name.to_lowercase();
+    if lower.ends_with(".json") {
+        return true;
+    }
+    if crate::catalog::IMAGE_EXTENSIONS
+        .iter()
+        .any(|ext| lower.ends_with(&format!(".{}", ext)))
+    {
+        return true;
+    }
+    let stem = lower.rsplit_once('.').map_or(lower.as_str(), |(s, _)| s);
+    stem == "licence" || stem == "license"
+}
+
 pub fn convert_to_relative_path(absolute_path: &str, base_dir: &Path) -> Result<String, AppError> {
     // strip_prefix is component-aware: unlike string starts_with it can't
     // mistake a sibling like /x/ScratchOld for being inside /x/Scratch
@@ -168,7 +208,7 @@ pub fn collect_files_for_compression(
                 .to_string_lossy()
                 .into_owned();
 
-            if file_name.ends_with(".json") || file_name.ends_with(".png") {
+            if belongs_in_3pk(&file_name) {
                 files_for_3pk.push(path.clone());
             }
 
@@ -177,4 +217,51 @@ pub fn collect_files_for_compression(
     }
 
     Ok((group_and_model_dirs, files_for_3pk, files_for_zip))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The .3pk carries release-level metadata, previews in EVERY builder
+    /// image format (a .jpg cover used to be silently left out), and the
+    /// licence — while bulky extras stay zip-only.
+    #[test]
+    fn routes_metadata_images_and_licence_into_the_3pk() {
+        for name in [
+            "release.json",
+            "manifest.json",
+            "cover.png",
+            "group-shot.jpg",
+            "teaser.webp",
+            "licence.pdf",
+            "LICENSE.md",
+            "licence",
+        ] {
+            assert!(belongs_in_3pk(name), "{} belongs in release.3pk", name);
+        }
+        for name in ["paint-guide.pdf", "extras.zip", "notes.txt", "licences-overview.pdf"] {
+            assert!(!belongs_in_3pk(name), "{} stays zip-only", name);
+        }
+    }
+
+    #[test]
+    fn licence_copy_lands_under_the_canonical_name() {
+        let dir = std::env::temp_dir().join(format!("stlpack_licence_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("release")).unwrap();
+        let source = dir.join("My Custom EULA v3.PDF");
+        std::fs::write(&source, b"terms").unwrap();
+
+        let copied = copy_licence(&source.to_string_lossy(), &dir.join("release")).unwrap();
+        let copied = Path::new(&copied);
+        assert_eq!(copied.file_name().unwrap(), "licence.PDF");
+        assert_eq!(std::fs::read(copied).unwrap(), b"terms");
+
+        // A stale settings path fails loudly, not with a half-made release
+        let missing = copy_licence(&dir.join("gone.pdf").to_string_lossy(), &dir.join("release"));
+        assert!(missing.is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

@@ -125,6 +125,10 @@ const releaseForm = ref<Release>({
 });
 const extraFiles = ref<SelectedFile[]>([]);
 const releaseImages = ref<SelectedFile[]>([]);
+/* The creator's licence: the file lives in Settings (set once), the
+   include/exclude choice lives here per release. */
+const settingsLicencePath = ref<string | null>(null);
+const includeLicence = ref(true);
 const isSavingInfo = ref(false);
 
 const formComplete = computed(
@@ -156,7 +160,7 @@ const clearReleaseForm = () => {
    to localStorage so a restart resumes mid-form. */
 const FORM_STORAGE_KEY = "plinth.releaseFormDraft";
 watch(
-  [releaseForm, extraFiles, releaseImages],
+  [releaseForm, extraFiles, releaseImages, includeLicence],
   () => {
     localStorage.setItem(
       FORM_STORAGE_KEY,
@@ -165,6 +169,7 @@ watch(
         form: releaseForm.value,
         extraPaths: extraFiles.value.map((file) => file.path),
         imagePaths: releaseImages.value.map((file) => file.path),
+        includeLicence: includeLicence.value,
       }),
     );
   },
@@ -176,6 +181,7 @@ onMounted(async () => {
   if (settings.status === "ok") {
     fieldDefaults.value = settings.data.release_field_defaults ?? {};
     rememberDesigner.value = "designer" in fieldDefaults.value;
+    settingsLicencePath.value = settings.data.licence_path ?? null;
   }
 
   // Details already committed to the store (restored draft) win; otherwise
@@ -192,6 +198,7 @@ onMounted(async () => {
         // doesn't survive JSON; files deleted since simply drop out
         extraFiles.value = await filesFromPaths(saved.extraPaths ?? []);
         releaseImages.value = await filesFromPaths(saved.imagePaths ?? []);
+        includeLicence.value = saved.includeLicence ?? true;
       }
     } catch {
       localStorage.removeItem(FORM_STORAGE_KEY);
@@ -330,6 +337,7 @@ const finalizeRelease = async () => {
         release.value,
         releaseImages.value.map((image) => image.path),
         extraFiles.value.map((file) => file.path),
+        includeLicence.value ? settingsLicencePath.value : null,
       );
       if (created.status !== "ok") throw created.error;
 
@@ -567,11 +575,30 @@ const cancelCompression = async () => {
           />
           <FileSelect
             id="extraFiles"
-            label="Additional content (license, PDFs)"
+            label="Additional content (PDFs, extras)"
             multiple
             accept="pdf, md, zip"
             v-model="extraFiles"
           />
+          <div v-if="settingsLicencePath" class="flex flex-col gap-0.5 -mt-1.5">
+            <label class="flex items-center gap-1.5 text-[12px] cursor-pointer">
+              <input
+                type="checkbox"
+                class="checkbox checkbox-xs"
+                v-model="includeLicence"
+              />
+              Include your licence file in this release
+            </label>
+            <span
+              class="font-mono text-[11px] text-base-content/40 truncate pl-5.5"
+              :title="settingsLicencePath"
+              >{{ settingsLicencePath }}</span
+            >
+          </div>
+          <p v-else class="text-[11px] text-base-content/40 -mt-1.5">
+            Tip: set your licence file once in Settings and every release can
+            include it with one checkbox.
+          </p>
           <Switch
             v-model="openOnSave"
             :label="`Open temporary directory in ${fileExplorerName} after creation`"

@@ -24,8 +24,10 @@ Designer-05-2026-Dungeon Classics/
 ```
 
 - **`release.3pk`** — a zip archive containing `manifest.json`, the
-  release-level preview `images/`, and any `licence/` + PDFs. Small; this
-  is what a client fetches first to learn the release's shape.
+  release-level metadata jsons, preview images, and the creator's licence
+  (packed under the canonical name `licence.<ext>` when the builder's
+  licence toggle is on). Small; this is what a client fetches first to
+  learn the release's shape.
 - **Component archives** (`<component>.zip`, later `<component>.tar.zst`)
   — the model files (STL/OBJ/3MF/LYS/…) for one group/model. One archive
   per component so a client can fetch, verify, or update them
