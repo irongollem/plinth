@@ -22,7 +22,7 @@ export type StlDecodeResponse = {
   error?: string;
 };
 
-self.onmessage = (event: MessageEvent<StlDecodeRequest>) => {
+self.addEventListener("message", (event: MessageEvent<StlDecodeRequest>) => {
   const { id, buffers } = event.data;
   try {
     const loader = new STLLoader();
@@ -58,4 +58,4 @@ self.onmessage = (event: MessageEvent<StlDecodeRequest>) => {
       error: String(error),
     } satisfies StlDecodeResponse);
   }
-};
+});

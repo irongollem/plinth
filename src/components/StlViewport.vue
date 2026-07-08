@@ -79,13 +79,16 @@ const spawnWorker = () => {
     new URL("../utils/stlGeometry.worker.ts", import.meta.url),
     { type: "module" },
   );
-  worker.onmessage = (event: MessageEvent<StlDecodeResponse>) => {
-    if (!pendingDecode || event.data.id !== pendingDecode.id) return;
-    const { resolve, reject } = pendingDecode;
-    pendingDecode = null;
-    if (event.data.error) reject(new Error(event.data.error));
-    else resolve(event.data.parts);
-  };
+  worker.addEventListener(
+    "message",
+    (event: MessageEvent<StlDecodeResponse>) => {
+      if (!pendingDecode || event.data.id !== pendingDecode.id) return;
+      const { resolve, reject } = pendingDecode;
+      pendingDecode = null;
+      if (event.data.error) reject(new Error(event.data.error));
+      else resolve(event.data.parts);
+    },
+  );
   return worker;
 };
 
