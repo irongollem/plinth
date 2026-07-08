@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { commands } from "../bindings";
+import { useMinihoard } from "../composables/useMinihoard";
 import { useOS } from "../composables/useOS";
 import { useReleasesStore } from "../stores/releasesStore";
 import type { ReleaseStep } from "../stores/releasesStore";
@@ -9,6 +10,9 @@ import { formatFileSize } from "../utils/format";
 
 const releasesStore = useReleasesStore();
 const themeStore = useThemeStore();
+// The easter egg: this stays null (and the menu invisible) unless the
+// minihoard CLI is actually installed on this machine.
+const { info: minihoardInfo, detect: detectMinihoard } = useMinihoard();
 const { osType } = useOS();
 // The window's titlebar is transparent (titleBarStyle: Overlay), so the
 // sidebar bg flows up behind the traffic lights. Only macOS parks lights
@@ -26,6 +30,7 @@ const rootsLine = computed(() =>
 );
 
 onMounted(async () => {
+  detectMinihoard();
   const [settings, stats] = await Promise.all([
     commands.getSettings(),
     commands.getCatalogStats(),
@@ -196,6 +201,35 @@ const stepState = (step: ReleaseStep) => {
         <circle cx="12" cy="13" r="4"></circle>
       </svg>
       Render studio
+    </button>
+
+    <!-- easter egg: only exists when the sibling minihoard CLI is installed -->
+    <button
+      v-if="minihoardInfo"
+      type="button"
+      class="flex items-center gap-2.5 px-4.5 py-2.25 font-semibold text-[13px] cursor-pointer border-l-2 text-left"
+      :class="
+        releasesStore.activeTab === 'minihoard'
+          ? 'bg-base-content/5 border-primary'
+          : 'border-transparent text-base-content/60 hover:text-base-content'
+      "
+      @click="releasesStore.setActiveTab('minihoard')"
+    >
+      <svg
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+      >
+        <!-- a treasure chest, for the hoard -->
+        <path
+          d="M3 10V8a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3v2M3 10v9h18v-9M3 10h18"
+        ></path>
+        <path d="M12 10v4m-1.5-4h3"></path>
+      </svg>
+      Minihoard
     </button>
 
     <span class="flex-1"></span>

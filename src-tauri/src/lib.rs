@@ -3,6 +3,7 @@ mod error;
 mod file;
 mod image;
 mod manifest;
+mod minihoard;
 mod models;
 mod render;
 mod settings;
@@ -24,6 +25,7 @@ use file::commands::{
     add_models, cancel_compression, create_release, finalize_release, import_release,
     list_release_drafts, load_release_draft, open_with_default_app,
 };
+use minihoard::{cancel_minihoard, detect_minihoard, run_minihoard, MinihoardStatus};
 use models::events::{
     BatchRenderStatus, BlenderProvisionStatus, CompressionStatus, DuplicateStatus, PackStatus,
     RenderStatus, ScanStatus,
@@ -128,6 +130,9 @@ fn create_specta_builder() -> Builder {
             start_batch_render,
             get_render_candidates,
             set_model_rotation,
+            detect_minihoard,
+            run_minihoard,
+            cancel_minihoard,
         ])
         .events(collect_events![
             CompressionStatus,
@@ -137,6 +142,7 @@ fn create_specta_builder() -> Builder {
             PackStatus,
             BlenderProvisionStatus,
             BatchRenderStatus,
+            MinihoardStatus,
         ])
 }
 

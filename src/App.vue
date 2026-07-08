@@ -6,6 +6,7 @@ import ToastContainer from "./components/ToastContainer.vue";
 import { use3DPackageHandler } from "./composables/use3DPackageHandler";
 import { useReleasesStore } from "./stores/releasesStore";
 import Catalog from "./views/Catalog.vue";
+import Minihoard from "./views/Minihoard.vue";
 import Releases from "./views/Releases.vue";
 import Render from "./views/Render.vue";
 import Settings from "./views/Settings.vue";
@@ -21,6 +22,8 @@ const currentTabComponent = computed(() => {
       return Releases;
     case "render":
       return Render;
+    case "minihoard":
+      return Minihoard;
     case "settings":
       return Settings;
     default:

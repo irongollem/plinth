@@ -18,7 +18,9 @@ export type DraftReleaseModel = StlModel & {
 
 // Top-level sidebar sections. The old flat release/addStl/finalize tabs are
 // gone — those now live as steps INSIDE "releases" (see releaseStep below).
-export type Tab = "catalog" | "releases" | "render" | "settings";
+// "minihoard" only ever becomes reachable when the sidebar detects the
+// sibling CLI on this machine (the easter egg stays invisible otherwise).
+export type Tab = "catalog" | "releases" | "render" | "minihoard" | "settings";
 
 /** The release-builder flow: Models (including renders) -> Details -> Pack. */
 export type ReleaseStep = 1 | 2 | 3;
