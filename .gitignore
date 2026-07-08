@@ -31,3 +31,7 @@ src-tauri/target/
 
 # Design export drops (temporary, extracted into scratch space)
 raw/
+
+# VitePress (docs site) build output and cache
+docs/.vitepress/dist/
+docs/.vitepress/cache/
