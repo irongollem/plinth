@@ -24,8 +24,10 @@ dist-ssr
 *.sw?
 .zed
 
-# Auto generated type file during a build
-src/bindings.ts
+# src/bindings.ts is auto-generated (cargo test regenerates it) but IS
+# committed: the frontend can't typecheck or build without it, and neither
+# CI's frontend job nor the release runners compile Rust first. CI fails
+# if the committed copy drifts from the command list.
 
 src-tauri/target/
 

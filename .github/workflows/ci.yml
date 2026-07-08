@@ -68,3 +68,11 @@ jobs:
       - name: Run Rust tests
         run: cargo test --verbose
         working-directory: src-tauri
+
+      # cargo test rewrites src/bindings.ts from the live command list; a
+      # diff here means someone changed commands without committing the
+      # regenerated bindings the frontend builds against. One platform
+      # suffices (the output is deterministic).
+      - name: Bindings are committed and current
+        if: matrix.platform == 'ubuntu-latest'
+        run: git diff --exit-code src/bindings.ts
