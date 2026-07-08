@@ -767,7 +767,7 @@ pub(crate) fn support_from_segment(segment: &str) -> Option<&'static str> {
 /// Support status hinted by a file NAME (not a whole segment): creators
 /// often tag an .stl "..._Supported.stl". A substring check, so it fires
 /// mid-name — "unsupported" is tested first since it contains "supported".
-fn support_from_filename(name: &str) -> Option<&'static str> {
+pub(crate) fn support_from_filename(name: &str) -> Option<&'static str> {
     let lower = name.to_lowercase();
     if lower.contains("unsupported") {
         Some("unsupported")

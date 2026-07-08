@@ -66,50 +66,6 @@ pub fn rename_image(model_name: &str, original_path: &Path, index: usize) -> Str
     }
 }
 
-pub fn get_destination_folder(model_folder: &Path, file_path: &Path) -> PathBuf {
-    let extension = file_path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    match extension.as_str() {
-        "chitubox" => {
-            let subfolder = model_folder.join("chitubox");
-            fs::create_dir_all(&subfolder).unwrap_or_default();
-            subfolder
-        }
-        "lys" => {
-            let subfolder = model_folder.join("lychee");
-            fs::create_dir_all(&subfolder).unwrap_or_default();
-            subfolder
-        }
-        "stl" => {
-            let filename = file_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-
-            // Split on every non-alphanumeric character so spaced or
-            // parenthesised names ("knight (supported).stl", "dragon sup.stl")
-            // tokenize correctly too
-            let is_presupported = filename.split(|c: char| !c.is_alphanumeric()).any(|part| {
-                part == "sup" || part == "supported" || part == "presupported" || part == "ps"
-            });
-
-            if is_presupported {
-                let subfolder = model_folder.join("supported");
-                fs::create_dir_all(&subfolder).unwrap_or_default();
-                subfolder
-            } else {
-                model_folder.to_path_buf()
-            }
-        }
-        _ => model_folder.to_path_buf(),
-    }
-}
-
 pub fn copy_images(
     image_paths: &[String],
     model_folder: &Path,
@@ -139,8 +95,7 @@ pub fn copy_files(file_paths: &[String], model_folder: &Path) -> Result<Vec<Stri
             .file_name()
             .ok_or_else(|| AppError::IoError(format!("Invalid file path: {}", path)))?;
 
-        let destination_folder = get_destination_folder(model_folder, source_path);
-        let destination_path = destination_folder.join(file_name);
+        let destination_path = model_folder.join(file_name);
 
         // Same basename from two different source folders would silently
         // overwrite here — fail loudly instead of losing a part

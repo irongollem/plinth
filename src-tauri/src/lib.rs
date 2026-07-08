@@ -21,7 +21,7 @@ use catalog::commands::{
     start_duplicate_scan, supports_file_links, unpack_models, update_model_metadata,
 };
 use file::commands::{
-    add_model, cancel_compression, create_release, finalize_release, import_release,
+    add_models, cancel_compression, create_release, finalize_release, import_release,
     list_release_drafts, load_release_draft, open_with_default_app,
 };
 use models::events::{
@@ -61,7 +61,7 @@ fn get_pending_3dpak(state: tauri::State<'_, PendingPackageOpen>) -> Option<Stri
 fn create_specta_builder() -> Builder {
     Builder::<tauri::Wry>::new()
         .commands(collect_commands![
-            add_model,
+            add_models,
             create_release,
             finalize_release,
             cancel_compression,

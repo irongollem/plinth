@@ -16,7 +16,7 @@ use walkdir::WalkDir;
 
 /// "MM/YYYY" (the builder's input form) → canonical "YYYY-MM"; anything
 /// already canonical (or unrecognized) passes through untouched.
-fn canonical_date(date: &str) -> String {
+pub(crate) fn canonical_date(date: &str) -> String {
     let parts: Vec<&str> = date.split('/').collect();
     if let [month, year] = parts.as_slice() {
         if let (Ok(m), Ok(y)) = (month.trim().parse::<u8>(), year.trim().parse::<u16>()) {
@@ -66,11 +66,13 @@ pub fn build_manifest(
             .map(|e| (e.name.as_str(), e))
             .collect();
 
-        // Every model.json under the component dir: the dir itself for an
-        // ungrouped model, one level down per model for a group.
+        // Every model.json under the component dir. Canonical staging puts
+        // sidecars in the leaves: the model root (unknown support, depth 1),
+        // a build dir (Supported/model.json, depth 2), or a variant dir
+        // (Supported/Sword/model.json, depth 3).
         let mut models = Vec::new();
         for entry in WalkDir::new(&component_dir)
-            .max_depth(2)
+            .max_depth(3)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name() == "model.json")

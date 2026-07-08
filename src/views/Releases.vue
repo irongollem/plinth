@@ -335,19 +335,17 @@ const finalizeRelease = async () => {
 
       releasesStore.setReleaseDir(created.data);
       releasesStore.clearModels();
-      for (const staged of stagedModels) {
-        // Sequential on purpose: addModel does a read-modify-write on
-        // release.json with no locking, so parallel calls would race and
-        // drop entries.
-        // oxlint-disable-next-line no-await-in-loop
-        const added = await commands.addModel(
-          { ...staged, id: null, images: [], model_files: [] },
-          created.data,
-          staged.model_files,
-          staged.images,
-        );
-        if (added.status !== "ok") throw added.error;
-        releasesStore.addModel(...added.data);
+      // One batch call: the backend lays the whole draft out canonically
+      // (members sharing a leaf merge — two poses of one model come back
+      // as ONE model with file-level poses) and writes release.json once.
+      // Draft ids are local "draft-…" strings, not UUIDs — the backend
+      // assigns real ids, so they must not cross the boundary. In-place is
+      // fine: clearModels() above already detached these from the store.
+      for (const staged of stagedModels) staged.id = null;
+      const added = await commands.addModels(stagedModels, created.data);
+      if (added.status !== "ok") throw added.error;
+      for (const [model, sidecarPath] of added.data) {
+        releasesStore.addModel(model, sidecarPath);
       }
       if (openOnSave.value) await openPath(created.data);
     }

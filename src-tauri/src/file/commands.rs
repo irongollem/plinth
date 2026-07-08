@@ -7,7 +7,7 @@ use crate::models::events::CancelledStatus;
 use crate::models::events::CompletedStatus;
 use crate::models::events::CompressionStatus;
 use crate::models::events::FailedStatus;
-use crate::models::{ModelLocation, Release, ReleaseDraftSummary, StlModel};
+use crate::models::{ModelLocation, ModelReference, Release, ReleaseDraftSummary, StlModel};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::fs;
@@ -21,56 +21,48 @@ use uuid::Uuid;
 static ACTIVE_COMPRESSIONS: Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Stage the whole draft into the release directory in CANONICAL layout
+/// (Model/Supported|Unsupported[/Variant], sidecar per leaf — see
+/// file/stage.rs), then record every leaf in release.json in one write.
+/// One command for the whole batch on purpose: members sharing a canonical
+/// leaf must merge (poses become file-level metadata), and the old
+/// per-model command raced its own release.json read-modify-write.
 #[tauri::command]
 #[specta::specta]
-pub async fn add_model(
-    model: StlModel,
+pub async fn add_models(
+    models: Vec<StlModel>,
     release_dir: String,
-    file_paths: Vec<String>,
-    image_paths: Vec<String>,
-) -> Result<(StlModel, String), AppError> {
-    let release_path = PathBuf::from(release_dir);
+) -> Result<Vec<(StlModel, String)>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let release_path = PathBuf::from(&release_dir);
+        let release_json_path = release_path.join("release.json");
+        let mut release: Release = serde_json::from_str(
+            &fs::read_to_string(&release_json_path)
+                .map_err(|e| AppError::NotFoundError(format!("No release.json: {}", e)))?,
+        )?;
 
-    let clean_model_name = clean_name(&model.name);
-    let model_folder = match model.group {
-        Some(ref group_name) => {
-            let clean_group_name = clean_name(group_name);
-            let group_dir = release_path.join(&clean_group_name);
-            group_dir.join(&clean_model_name)
+        let staged = super::stage::stage_models(&release_path, &release, &models)?;
+
+        for (model, sidecar_rel) in &staged {
+            let model_id = model.id.ok_or_else(|| {
+                AppError::ConfigError("Staged model is missing its id".to_string())
+            })?;
+            release.model_references.push(ModelReference {
+                id: model_id,
+                location: ModelLocation::Local(sidecar_rel.clone()),
+            });
+            if let Some(group) = &model.group {
+                if !release.groups.contains(group) {
+                    release.groups.push(group.clone());
+                }
+            }
         }
-        None => release_path.join(&clean_model_name),
-    };
+        writer::write_json(serde_json::to_string_pretty(&release)?, release_json_path)?;
 
-    fs::create_dir_all(&model_folder)
-        .map_err(|e| AppError::IoError(format!("failed to create model folder; {}", e)))?;
-
-    let copied_images = storage::copy_images(&image_paths, &model_folder, &clean_model_name)?;
-    let copied_files = storage::copy_files(&file_paths, &model_folder)?;
-
-    let relative_image_paths = storage::convert_to_relative_paths(&copied_images, &model_folder)?;
-    let relative_file_paths = storage::convert_to_relative_paths(&copied_files, &model_folder)?;
-
-    let model_id = model.id.unwrap_or(Uuid::new_v4());
-    // Struct-update: the rich catalog metadata (pose/scale/support/designer/
-    // file_poses…) passes through untouched — dropping it here would strip
-    // the curation the 3pk format exists to carry
-    let model_with_relative_paths = StlModel {
-        id: Some(model_id),
-        name: clean_model_name,
-        images: relative_image_paths,
-        model_files: relative_file_paths,
-        ..model
-    };
-
-    let model_json_path = model_folder.join("model.json");
-    let model_json = serde_json::to_string_pretty(&model_with_relative_paths)?;
-    writer::write_json(model_json, model_json_path.clone())?;
-    writer::add_model_to_release_json(release_path, &model_with_relative_paths)?;
-
-    Ok((
-        model_with_relative_paths,
-        model_json_path.to_string_lossy().into_owned(),
-    ))
+        Ok(staged)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Staging task failed: {}", e)))?
 }
 
 /// WIP releases that never got packed — a successful finalize removes the
@@ -109,7 +101,7 @@ pub async fn list_release_drafts(
 /// Rehydrate a WIP release for the builder UI: release.json only carries
 /// {id, path} per model (ModelReference), so the rich curation the UI needs
 /// (designer/pose/variant/tags/file_poses…) is read back from each model's
-/// own model.json sidecar — the same file add_model wrote it to.
+/// own model.json sidecar — the same file add_models staged it to.
 #[tauri::command]
 #[specta::specta]
 pub async fn load_release_draft(release_dir: String) -> Result<(Release, Vec<StlModel>), AppError> {
@@ -428,7 +420,7 @@ mod tests {
         }
     }
 
-    /// A WIP release folder as `create_release` + `add_model` actually leave
+    /// A WIP release folder as `create_release` + `add_models` actually leave
     /// it: release.json referencing per-model sidecars by relative path.
     /// load_release_draft must rebuild the full StlModels from those
     /// sidecars, and skip (not fail on) one that went missing.

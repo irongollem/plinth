@@ -158,7 +158,11 @@ metadata. Packing then:
 
 1. Groups staged models into components (by `group`, else per model).
 2. Writes each component's model files into `<component>.zip`, hashing the
-   archive → `checksum`, and each file → per-file `checksum`.
+   archive → `checksum`, and each file → per-file `checksum`. Entries
+   inside a component follow the canonical catalog layout
+   (`Supported|Unsupported[/Variant]/files`, a `model.json` per leaf), so
+   an imported release is already normal-form — the on-disk normalizer
+   plans zero moves for it.
 3. Emits `manifest.json` from the staged metadata **including
    `file_variants`** for any split folders, plus release-level info.
 4. Zips `manifest.json` + release images + licence into `release.3pk`.

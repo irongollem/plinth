@@ -321,7 +321,7 @@ fn disk_images_under(dir: &Path, exclude: &[&str]) -> Vec<String> {
 /// The same bytes in two places? Hardlinked names are trivially identical
 /// (one inode); otherwise size then a full BLAKE3 compare settles it. Only
 /// ever called for name CLASHES, so the hashing cost stays negligible.
-fn same_content(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_content(a: &Path, b: &Path) -> bool {
     if let (Some(ia), Some(ib)) = (dups::file_identity(a), dups::file_identity(b)) {
         if ia == ib {
             return true;
