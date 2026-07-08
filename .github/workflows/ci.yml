@@ -65,8 +65,23 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev
 
+      # Windows can't RUN the tests: our tests are lib unit tests, and a
+      # Tauri lib test binary dies at load with STATUS_ENTRYPOINT_NOT_FOUND
+      # without the Common-Controls manifest the app binary gets from
+      # tauri-build — and cargo has no stable way to embed a manifest into
+      # lib unit-test exes (rustc-link-arg-tests only covers a tests/ dir we
+      # don't have; see rust-lang/cargo#10937). So Windows COMPILES+LINKS the
+      # tests (catching Windows-specific build errors and #[cfg(windows)]
+      # code) while the logic — all platform-independent — runs for real on
+      # Linux and macOS.
       - name: Run Rust tests
+        if: matrix.platform != 'windows-latest'
         run: cargo test --verbose
+        working-directory: src-tauri
+
+      - name: Compile Rust tests (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: cargo test --verbose --no-run
         working-directory: src-tauri
 
       # cargo test rewrites src/bindings.ts from the live command list; a
