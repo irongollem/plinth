@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import BlenderSetupDialog from "./components/BlenderSetupDialog.vue";
+import ImportPackageModal from "./components/ImportPackageModal.vue";
 import Sidebar from "./components/Sidebar.vue";
 import ToastContainer from "./components/ToastContainer.vue";
 import { use3DPackageHandler } from "./composables/use3DPackageHandler";
@@ -11,7 +12,8 @@ import Releases from "./views/Releases.vue";
 import Render from "./views/Render.vue";
 import Settings from "./views/Settings.vue";
 
-use3DPackageHandler();
+const { pendingImport, importing, confirmImport, cancelImport } =
+  use3DPackageHandler();
 const releasesStore = useReleasesStore();
 
 const currentTabComponent = computed(() => {
@@ -45,4 +47,10 @@ const currentTabComponent = computed(() => {
   <ToastContainer />
   <!-- Outside the KeepAlive so first-run setup overlays every tab -->
   <BlenderSetupDialog />
+  <ImportPackageModal
+    :inspection="pendingImport?.inspection ?? null"
+    :importing="importing"
+    @confirm="confirmImport"
+    @cancel="cancelImport"
+  />
 </template>
