@@ -1111,6 +1111,7 @@ const importLook = async () => {
 const resetRenderSettings = () => {
   view.value = { ...VIEW_DEFAULTS };
   viewport.value?.setView(VIEW_DEFAULTS);
+  viewport.value?.resetPan();
   matchCamera.value = true;
   alignParts.value = false;
   resolution.value = 1600;

@@ -8,11 +8,19 @@
  * camera); the resulting orientation is emitted as Blender euler XYZ degrees
  * (three.js 'ZYX' order == Blender 'XYZ'), ready for --rotate.
  * Right-drag orbits the camera, wheel zooms; both are emitted so the final
- * render can match the previewed framing.
+ * render can match the previewed framing. Middle-drag (or Shift+left-drag)
+ * pans the view, and a connected 3D mouse (3Dconnexion SpaceMouse) drives
+ * all of it at once. Pan is a preview-only convenience for inspecting the
+ * model up close — the render always frames the model centered — so it is
+ * not part of the emitted view and resets with the model.
  */
 import { readFile } from "@tauri-apps/plugin-fs";
 import * as THREE from "three";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import {
+  type SpaceMouseMotion,
+  useSpaceMouse,
+} from "../composables/useSpaceMouse.ts";
 import type {
   StlDecodeResponse,
   StlPartPayload,
@@ -105,6 +113,12 @@ const view = {
   elevation: 0.22,
   zoom: 1.15,
 };
+
+// Lateral shift of the camera target, in world units. Preview-only (the
+// render always centers the model), so it lives outside `view` and is not
+// emitted. The final look-at point after panning, cached for pan math.
+const panOffset = new THREE.Vector3();
+const cameraTarget = new THREE.Vector3();
 
 const setupScene = (el: HTMLDivElement) => {
   renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -379,9 +393,33 @@ const updateCamera = () => {
     distance = needed * view.zoom;
   }
 
+  // Pan shifts the look-at point without touching the framing distance, so
+  // zoom stays exact while the model slides across the frame.
+  target.add(panOffset);
   camera.position.copy(target).addScaledVector(direction, distance);
   camera.lookAt(target);
+  cameraTarget.copy(target);
   requestRender();
+};
+
+/** Slide the view by a screen-space delta (pixels), grab-the-model feel. */
+const panBy = (dxPixels: number, dyPixels: number) => {
+  if (!camera || !container.value) return;
+  const half = Math.tan((camera.fov * Math.PI) / 360);
+  const dist = camera.position.distanceTo(cameraTarget) || 1;
+  // World units spanned by one pixel at the target depth — a dragged point
+  // tracks the cursor 1:1 regardless of zoom
+  const worldPerPixel = (2 * half * dist) / container.value.clientHeight;
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+  panOffset.addScaledVector(right, -dxPixels * worldPerPixel);
+  panOffset.addScaledVector(up, dyPixels * worldPerPixel);
+  updateCamera();
+};
+
+const resetPan = () => {
+  panOffset.set(0, 0, 0);
+  updateCamera();
 };
 
 const floorModel = (precise = false) => {
@@ -469,10 +507,11 @@ const setView = (next: {
   emitView();
 };
 
-defineExpose({ setRotation, rotateWorld, resetRotation, setView });
+defineExpose({ setRotation, rotateWorld, resetRotation, setView, resetPan });
 
 // ---- pointer interaction ----
 let dragButton: number | null = null;
+let isPanning = false;
 let lastX = 0;
 let lastY = 0;
 
@@ -481,6 +520,14 @@ const onPointerDown = (e: PointerEvent) => {
   lastX = e.clientX;
   lastY = e.clientY;
   (e.target as HTMLElement).setPointerCapture(e.pointerId);
+
+  // Middle-drag, or Shift+left-drag, pans the view
+  if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+    isPanning = true;
+    ringDrag = null;
+    return;
+  }
+  isPanning = false;
 
   // Grabbing a gizmo ring wins over free tumble
   if (e.button === 0) {
@@ -517,7 +564,9 @@ const onPointerMove = (e: PointerEvent) => {
   lastX = e.clientX;
   lastY = e.clientY;
 
-  if (dragButton === 0 && ringDrag) {
+  if (isPanning) {
+    panBy(dx, dy);
+  } else if (dragButton === 0 && ringDrag) {
     // Constrained rotation: angle around the grabbed ring's axis, applied
     // to the quaternion captured at drag start (no incremental drift)
     const angle = ringAngleAt(
@@ -556,8 +605,9 @@ const onPointerMove = (e: PointerEvent) => {
 };
 
 const onPointerUp = (e: PointerEvent) => {
-  const wasRotating = dragButton === 0;
+  const wasRotating = dragButton === 0 && !isPanning;
   dragButton = null;
+  isPanning = false;
   ringDrag = null;
   (e.target as HTMLElement).releasePointerCapture(e.pointerId);
   // Snap floor + framing to exact vertex bounds now that the drag is over
@@ -570,6 +620,74 @@ const onWheel = (e: WheelEvent) => {
   updateCamera();
   emitView();
 };
+
+// ---- 3D mouse (3Dconnexion SpaceMouse) ----
+// Translate the puck to pan, push/pull it to zoom, twist it to tumble the
+// model — every degree of freedom the mouse handlers expose, in one grip.
+// Per-frame gains; signs chosen so the model follows the puck. The whole
+// mapping is intentionally small and local so it can be retuned per device.
+const SM_PAN = 0.035; // world-unit fraction of view distance, per frame
+const SM_ZOOM = 0.03;
+const SM_ROTATE = 0.03; // radians per frame at full deflection
+let smSettle: number | null = null;
+
+const onSpaceMouse = (m: SpaceMouseMotion) => {
+  if (!pivot || !camera) return;
+
+  // Translate: X/Z slide the view in its own plane, Y (push) dollies zoom
+  if (m.tx || m.tz) {
+    const dist = camera.position.distanceTo(cameraTarget) || 1;
+    const step = dist * SM_PAN;
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+    panOffset.addScaledVector(right, m.tx * step);
+    panOffset.addScaledVector(up, m.tz * step);
+  }
+  if (m.ty) {
+    view.zoom = Math.min(3, Math.max(0.5, view.zoom * (1 - m.ty * SM_ZOOM)));
+    emitView();
+  }
+
+  // Rotate: twist the model the way twisting the puck suggests
+  let rotated = false;
+  if (m.rz) {
+    // yaw → spin around world up (Z)
+    pivot.quaternion.premultiply(
+      new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 0, 1),
+        m.rz * SM_ROTATE,
+      ),
+    );
+    rotated = true;
+  }
+  if (m.rx) {
+    // pitch → tilt around the camera's right axis
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+    pivot.quaternion.premultiply(
+      new THREE.Quaternion().setFromAxisAngle(right, m.rx * SM_ROTATE),
+    );
+    rotated = true;
+  }
+  if (m.ry) {
+    // roll → spin around the view axis (into the screen)
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(
+      camera.quaternion,
+    );
+    pivot.quaternion.premultiply(
+      new THREE.Quaternion().setFromAxisAngle(forward, m.ry * SM_ROTATE),
+    );
+    rotated = true;
+  }
+
+  // Mid-motion uses fast approximate bounds like a drag; snap to precise
+  // framing once the puck has been at rest briefly.
+  if (rotated) afterRotationChange();
+  else updateCamera();
+  if (smSettle) clearTimeout(smSettle);
+  smSettle = window.setTimeout(() => afterRotationChange(true), 200);
+};
+
+const spaceMouse = useSpaceMouse(onSpaceMouse);
 
 // ---- model loading ----
 const disposeModel = () => {
@@ -624,6 +742,7 @@ const loadParts = async () => {
   if (!pivot || !material) return;
   const token = ++loadToken;
   disposeModel();
+  panOffset.set(0, 0, 0); // a fresh subject starts centered
   if (!props.parts.length) {
     refreshBounds(false);
     updateGizmo();
@@ -726,6 +845,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   loadToken++;
+  spaceMouse.stop();
+  if (smSettle) clearTimeout(smSettle);
   abortDecode();
   decodeWorker?.terminate();
   decodeWorker = null;
@@ -787,7 +908,14 @@ onBeforeUnmount(() => {
         class="absolute bottom-2 left-2 text-xs text-base-content/40 pointer-events-none"
       >
         drag ring: rotate on axis · drag: free rotate · right-drag: orbit ·
-        wheel: zoom · dashed lines: render crop
+        middle/shift-drag: pan · wheel: zoom · dashed lines: render crop
+      </div>
+      <div
+        v-if="spaceMouse.connected.value"
+        class="absolute bottom-2 right-2 flex items-center gap-1 text-xs text-success/70 pointer-events-none"
+      >
+        <span class="inline-block w-1.5 h-1.5 rounded-full bg-success"></span>
+        3D mouse ready
       </div>
     </template>
   </div>
