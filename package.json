@@ -19,6 +19,10 @@
     "docs:preview": "vitepress preview docs"
   },
   "dependencies": {
+    "@fontsource/archivo": "^5.2.8",
+    "@fontsource/bebas-neue": "^5.2.7",
+    "@fontsource/cormorant-garamond": "^5.2.11",
+    "@fontsource/ibm-plex-mono": "^5.2.7",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "2.7.1",
     "@tauri-apps/plugin-fs": "^2.5.1",

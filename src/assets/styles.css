@@ -86,6 +86,37 @@
   --border: 1px;
 }
 
+/* daisyUI's .input/.select/.textarea default --input-color to a mix of the
+   TEXT color, which on this dark theme (light text) reads as a bright,
+   out-of-place border. Pin it to the same subtle line color as everything
+   else (--color-neutral, hex-matched to the design mock's --ln). Background
+   is pinned to base-300 too — daisyUI defaults inputs to base-100 (the main
+   content surface), which on this theme is LIGHTER than base-300, so fields
+   read as flush with the page instead of gently recessed like the mock. */
+.input,
+.select,
+.textarea {
+  --input-color: var(--color-neutral);
+  background-color: var(--color-base-300);
+}
+
+/* daisyUI's .btn border computes from --btn-bg (base-200) mixed with a hint
+   of black, which still reads noticeably lighter than the hairline used
+   everywhere else. Pin it to the same --color-neutral line color for a
+   button border that recedes instead of standing out. */
+.btn {
+  --btn-border: var(--color-neutral);
+}
+
+/* .btn:focus-visible outlines in `currentColor` — the button's light TEXT
+   color — which reads as a stark bright ring rather than a deliberate focus
+   indicator. Recolor it to the theme accent so keyboard/dropdown focus still
+   shows (accessibility), but matches the app instead of looking like a
+   leftover browser default. */
+.btn:focus-visible {
+  outline-color: var(--color-primary);
+}
+
 body {
   margin: 0;
 }
