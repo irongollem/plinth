@@ -1065,9 +1065,6 @@ const loadRenderSettings = () => {
 // out on purpose: logo paths are machine-local, and title/credit belong to
 // a model, not to a look.
 const LOOK_FILE_KIND = "plinth-look";
-// Look files written before the Plinth rename carry the old kind; still accept
-// them on import (the payload shape is unchanged).
-const LEGACY_LOOK_FILE_KINDS = new Set(["stl-pack-look"]);
 const LOOK_FILE_VERSION = 1;
 
 const exportLook = async () => {
@@ -1117,8 +1114,7 @@ const importLook = async () => {
     return;
   }
   const file = (raw ?? {}) as Record<string, unknown>;
-  const kind = file.kind;
-  if (kind !== LOOK_FILE_KIND && !LEGACY_LOOK_FILE_KINDS.has(kind as string)) {
+  if (file.kind !== LOOK_FILE_KIND) {
     toastStore.addToast("That file is not a Plinth look", "error");
     return;
   }
