@@ -1069,6 +1069,24 @@ pub async fn detach_catalog_group_source(
     .map_err(|e| AppError::ConfigError(format!("Detach task failed: {}", e)))?
 }
 
+/// Reset a card's auto-config: clear the scanner-inferred variant/pose on
+/// every member and drop every per-file pose assignment, collapsing the card
+/// to one flat file list the user can re-file by hand. Returns the number of
+/// file assignments cleared. Nothing moves on disk.
+#[tauri::command]
+#[specta::specta]
+pub async fn flatten_catalog_group(
+    app_handle: AppHandle,
+    group_name: String,
+) -> Result<u32, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::flatten_group(&conn, &group_name)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Flatten task failed: {}", e)))?
+}
+
 /// Pick which member's image fronts the group's card.
 #[tauri::command]
 #[specta::specta]

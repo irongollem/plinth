@@ -1484,6 +1484,36 @@ pub fn remove_group_tag(conn: &Connection, group_name: &str, tag: &str) -> Resul
     Ok(())
 }
 
+/// Collapse a whole card back to one undifferentiated pile: the scanner's
+/// auto-split guessed variant/pose wrong and the user wants to re-file by
+/// hand. Two clears, both surviving rescans. First, every member's variant
+/// AND pose is tombstoned with '' — that beats the scanner's inference on the
+/// next read (see update_model_facets and the NULLIF/COALESCE read path), so
+/// the variant/pose tier chips disappear. Second, every per-file pose
+/// assignment under those dirs is dropped, so any fanned-out dump folder folds
+/// back into its single residual member. Nothing moves on disk — the files
+/// stay put, ready for the assignment bar. Returns how many file assignments
+/// were dropped (for the toast).
+pub fn flatten_group(conn: &Connection, group_name: &str) -> Result<u32, AppError> {
+    let dirs = group_member_dirs(conn, group_name)?;
+    if dirs.is_empty() {
+        return Err(AppError::NotFoundError(format!(
+            "No catalog group named '{}'",
+            group_name
+        )));
+    }
+    let mut cleared = 0u32;
+    for dir in &dirs {
+        // Some("") is the tombstone; scale is left untouched with None.
+        update_model_facets(conn, dir, Some(""), Some(""), None)?;
+        cleared += conn
+            .execute("DELETE FROM file_variants WHERE dir_path = ?1", params![dir])
+            .map_err(|e| AppError::ConfigError(format!("Failed to clear assignments: {}", e)))?
+            as u32;
+    }
+    Ok(cleared)
+}
+
 /// The supported/unsupported (and format-variant) builds of the same sculpt:
 /// model dirs in the same group whose paths are identical once
 /// support-status segments are ignored. Exact structural match only — no
@@ -3467,6 +3497,63 @@ mod tests {
         // clearing every assignment collapses back to the whole-folder member
         clear_file_variants(&conn, &["/dump/mob/a.stl".into(), "/dump/mob/b.stl".into()]).unwrap();
         assert_eq!(group_members(&conn, "mob").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn flatten_group_clears_inferred_facets_and_file_assignments() {
+        let mut conn = test_conn();
+        // two heuristic members of one card, each wearing a scanner-guessed
+        // variant/pose the user never asked for
+        let member = |dir: &str, variant: &str, pose: &str| ModelRow {
+            dir_path: dir.into(),
+            name: format!("goblin {} {}", variant, pose),
+            source: "heuristic".into(),
+            file_count: 1,
+            total_size_bytes: 10,
+            variant: Some(variant.into()),
+            pose: Some(pose.into()),
+            group_name: Some("goblin".into()),
+            ..Default::default()
+        };
+        let files = vec![
+            file_row("/lib/goblin/spear-a/a.stl", "/lib/goblin/spear-a", 10),
+            file_row("/lib/goblin/spear-b/b.stl", "/lib/goblin/spear-b", 10),
+        ];
+        let models = vec![
+            member("/lib/goblin/spear-a", "Spear", "A"),
+            member("/lib/goblin/spear-b", "Spear", "B"),
+        ];
+        replace_catalog(&mut conn, "/lib", &files, &models, &[], &[], &[]).unwrap();
+        // plus a per-file pose assignment on one of them
+        set_file_variants(
+            &mut conn,
+            &["/lib/goblin/spear-a/a.stl".into()],
+            Some("axe".into()),
+            Some("2".into()),
+            None,
+        )
+        .unwrap();
+
+        // before: the card carries variants and poses
+        let before = group_members(&conn, "goblin").unwrap();
+        assert!(before.iter().any(|m| m.variant.is_some()));
+        assert!(before.iter().any(|m| m.pose.is_some()));
+
+        let cleared = flatten_group(&conn, "goblin").unwrap();
+        assert_eq!(cleared, 1, "the one file assignment is dropped");
+
+        // after: every member reads back with no variant and no pose, and the
+        // clear is the '' tombstone so a rescan can't resurrect the guess
+        replace_catalog(&mut conn, "/lib", &files, &models, &[], &[], &[]).unwrap();
+        let after = group_members(&conn, "goblin").unwrap();
+        assert!(after.iter().all(|m| m.variant.is_none()));
+        assert!(after.iter().all(|m| m.pose.is_none()));
+        assert!(get_file_variants(&conn, "/lib/goblin/spear-a")
+            .unwrap()
+            .is_empty());
+
+        // an unknown card is an error, not a silent no-op
+        assert!(flatten_group(&conn, "nope").is_err());
     }
 
     #[test]

@@ -585,6 +585,20 @@ async detachCatalogGroupSource(groupName: string, sourceGroup: string) : Promise
 }
 },
 /**
+ * Reset a card's auto-config: clear the scanner-inferred variant/pose on
+ * every member and drop every per-file pose assignment, collapsing the card
+ * to one flat file list the user can re-file by hand. Returns the number of
+ * file assignments cleared. Nothing moves on disk.
+ */
+async flattenCatalogGroup(groupName: string) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("flatten_catalog_group", { groupName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Pick which member's image fronts the group's card.
  */
 async setGroupCover(groupName: string, dirPath: string, variantKey: string | null) : Promise<Result<null, AppError>> {

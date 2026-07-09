@@ -1058,6 +1058,17 @@
               + Add to release
             </button>
 
+            <button
+              v-if="hasAutoSplit"
+              type="button"
+              class="font-semibold text-[11px] tracking-[0.03em] text-center border border-dashed border-base-content/15 text-base-content/40 hover:border-error/40 hover:text-error rounded-md py-2 cursor-pointer disabled:opacity-40 disabled:cursor-default"
+              title="The auto-detected variant/pose split got it wrong — clear every variant and pose tag on this model and dump all files into one box to re-file by hand. Nothing on disk moves."
+              :disabled="isFlattening"
+              @click="flattenGroup"
+            >
+              {{ isFlattening ? "resetting…" : "⇋ dump into one box" }}
+            </button>
+
             <div>
               <div
                 class="flex items-center gap-2 font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 mb-1.5"
@@ -2342,6 +2353,17 @@ const variantsInTab = computed(() => {
 });
 const variantLabel = (variant: string) => variant || "base";
 
+// Something for "dump into one box" to undo: the card carries more than one
+// member (poses/variants/fanned files), or any member wears a scanner-guessed
+// variant/pose. A single plain folder has nothing to flatten.
+const hasAutoSplit = computed(
+  () =>
+    members.value.length > 1 ||
+    members.value.some(
+      (m) => (m.variant ?? "") !== "" || (m.pose ?? "") !== "",
+    ),
+);
+
 // the pose members within the active (support, variant) bucket
 const tabMembers = computed(() =>
   supportMembers.value.filter(
@@ -2526,6 +2548,40 @@ const splitGroup = async () => {
   members.value = [];
   groupSources.value = [];
   await Promise.all([runSearch(), refreshMeta()]);
+};
+
+// Escape hatch for a wrong auto-config: drop the scanner's guessed
+// variant/pose on every member and every per-file pose assignment, so the
+// card collapses to one flat file list to re-file by hand with the
+// assignment bar. Supported/unsupported builds stay split — those are real,
+// not a guess. Nothing on disk moves; the clear survives rescans.
+const isFlattening = ref(false);
+const flattenGroup = async () => {
+  const group = selectedGroup.value;
+  if (!group || isFlattening.value) return;
+  const confirmed = await confirm(
+    `Dump every file in "${group.group_name}" into one box?\n\nThe auto-detected variant and pose tags are cleared across the whole model and won't come back on a rescan — you re-file the files yourself. Nothing on disk moves.`,
+    { title: "Reset to one box", kind: "warning" },
+  );
+  if (!confirmed) return;
+  isFlattening.value = true;
+  try {
+    const result = await commands.flattenCatalogGroup(group.group_name);
+    if (result.status !== "ok") {
+      toastStore.reportError("Failed to reset the model", result.error);
+      return;
+    }
+    toastStore.addToast(
+      result.data
+        ? `Reset to one box · ${result.data} assignment${result.data === 1 ? "" : "s"} cleared`
+        : "Reset to one box",
+      "success",
+    );
+    checkedFiles.value = [];
+    await Promise.all([runSearch(), reloadMembers()]);
+  } finally {
+    isFlattening.value = false;
+  }
 };
 
 const renameGroup = async () => {
