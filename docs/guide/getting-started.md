@@ -11,7 +11,7 @@ indexes them, it doesn't move them (unless you ask it to).
 ## 1. Install
 
 Grab the build for your OS from the
-[releases page](https://github.com/irongollem/stl-pack/releases) — see
+[releases page](https://github.com/irongollem/plinth/releases) — see
 the [installation guide](../INSTALL.md) for the unsigned-app warnings
 you'll click through on first run.
 

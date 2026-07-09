@@ -1,17 +1,15 @@
 # Plinth
 
-_(repo name `stl-pack` for historical reasons; the product is Plinth)_
-
-[![GitHub Release](https://img.shields.io/github/v/release/irongollem/stl-pack?include_prereleases&style=flat-square)](https://github.com/irongollem/stl-pack/releases)
-[![GitHub Issues](https://img.shields.io/github/issues/irongollem/stl-pack?style=flat-square)](https://github.com/irongollem/stl-pack/issues)
-[![GitHub Stars](https://img.shields.io/github/stars/irongollem/stl-pack?style=flat-square&cacheSeconds=3600)](https://github.com/irongollem/stl-pack/stargazers)
-[![GitHub Downloads](https://img.shields.io/github/downloads/irongollem/stl-pack/total?style=flat-square)](https://github.com/irongollem/stl-pack/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/irongollem/plinth?include_prereleases&style=flat-square)](https://github.com/irongollem/plinth/releases)
+[![GitHub Issues](https://img.shields.io/github/issues/irongollem/plinth?style=flat-square)](https://github.com/irongollem/plinth/issues)
+[![GitHub Stars](https://img.shields.io/github/stars/irongollem/plinth?style=flat-square&cacheSeconds=3600)](https://github.com/irongollem/plinth/stargazers)
+[![GitHub Downloads](https://img.shields.io/github/downloads/irongollem/plinth/total?style=flat-square)](https://github.com/irongollem/plinth/releases)
 [![Contributions Welcome](https://img.shields.io/badge/contributions-welcome-brightgreen.svg?style=flat-square)](CONTRIBUTING.md)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri-purple?style=flat-square)](https://tauri.app/)
 
 Plinth is an opinionated desktop tool for cataloging, rendering, compressing, and bundling STL files "the right way". It provides an easy-to-use interface for organizing a disk-scale 3D model library and packing releases so creators can distribute them efficiently — and collectors can move their own library between systems without losing curation.
 
-**📖 Documentation: [irongollem.github.io/stl-pack](https://irongollem.github.io/stl-pack/)** — installation, guides, and format reference.
+**📖 Documentation: [irongollem.github.io/plinth](https://irongollem.github.io/plinth/)** — installation, guides, and format reference.
 
 ## Features
 
@@ -24,7 +22,7 @@ Plinth is an opinionated desktop tool for cataloging, rendering, compressing, an
 ## Installation
 
 Download the latest release for your platform from the
-[releases page](https://github.com/irongollem/stl-pack/releases):
+[releases page](https://github.com/irongollem/plinth/releases):
 
 - **Windows** — `Plinth_<version>_x64-setup.exe`
 - **macOS** — `Plinth_<version>_universal.dmg` (Apple Silicon and Intel)

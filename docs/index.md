@@ -11,7 +11,7 @@ hero:
       link: /guide/getting-started
     - theme: alt
       text: Download
-      link: https://github.com/irongollem/stl-pack/releases
+      link: https://github.com/irongollem/plinth/releases
 
 features:
   - icon: 🗂️

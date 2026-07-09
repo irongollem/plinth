@@ -2,9 +2,7 @@
 
 Plinth is a desktop app for Windows, macOS, and Linux. Every release is
 built by public GitHub Actions from a tagged commit and published on the
-[releases page](https://github.com/irongollem/stl-pack/releases) — the
-repository is named `stl-pack` for historical reasons; the product it
-builds is Plinth.
+[releases page](https://github.com/irongollem/plinth/releases).
 
 Plinth is currently **beta software** (versions look like
 `0.1.0-beta.2`). Expect rough edges, and expect updates.
@@ -17,7 +15,7 @@ The practical consequence is that Windows and macOS will show a scary
 warning the first time you run the app. Those warnings mean "this
 publisher hasn't paid to be identified", not "this app is malicious" —
 but you shouldn't take that on faith. You can verify it yourself: the
-[source code](https://github.com/irongollem/stl-pack) is public, and
+[source code](https://github.com/irongollem/plinth) is public, and
 each release is produced by a public CI run from a tagged commit, so
 what you download is what the code says. The sections below walk
 through each platform's warning step by step.
@@ -25,7 +23,7 @@ through each platform's warning step by step.
 ## Windows
 
 Download **`Plinth_<version>_x64-setup.exe`** from the
-[releases page](https://github.com/irongollem/stl-pack/releases) — the
+[releases page](https://github.com/irongollem/plinth/releases) — the
 NSIS installer. (Pre-release builds ship the `.exe` only; an `.msi` for
 deployment tooling may return for stable releases.)
 
@@ -101,7 +99,7 @@ check rather than passing it.
 ## Linux
 
 No signing ceremony here; pick the format that fits your distro from
-the [releases page](https://github.com/irongollem/stl-pack/releases).
+the [releases page](https://github.com/irongollem/plinth/releases).
 
 ### AppImage (any distro)
 
@@ -168,7 +166,7 @@ the project grows, signing is the obvious first spend.
 ### Is it safe?
 
 You don't have to trust a claim: the code is
-[open source](https://github.com/irongollem/stl-pack), and every
+[open source](https://github.com/irongollem/plinth), and every
 release binary is built by a public GitHub Actions workflow from a
 tagged commit. Anyone can read the code, inspect the CI run that
 produced a release, or build the same thing themselves.
@@ -192,4 +190,4 @@ bun run tauri build
 
 The bundles land in `src-tauri/target/release/bundle/`. For a full
 development setup, see
-[CONTRIBUTING.md](https://github.com/irongollem/stl-pack/blob/main/CONTRIBUTING.md).
+[CONTRIBUTING.md](https://github.com/irongollem/plinth/blob/main/CONTRIBUTING.md).

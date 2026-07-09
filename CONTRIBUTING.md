@@ -1,6 +1,6 @@
 # Contribution Guidelines
 
-Thank you for considering contributing to stl-pack! We welcome all contributions, whether they are bug reports, feature requests, code changes, or documentation improvements.
+Thank you for considering contributing to Plinth! We welcome all contributions, whether they are bug reports, feature requests, code changes, or documentation improvements.
 
 ## Code of Conduct
 
@@ -11,8 +11,8 @@ By participating in this project, you agree to maintain a respectful and inclusi
 1. **Fork and Clone the Repository**
 
    ```bash
-   git clone https://github.com/YOUR_USERNAME/stl-pack.git
-   cd stl-pack
+   git clone https://github.com/YOUR_USERNAME/plinth.git
+   cd plinth
    ```
 
 2. **Install Dependencies**
@@ -40,7 +40,7 @@ These files are generated automatically during the build process and are exclude
 
 ## Reporting Issues
 
-- Use the [GitHub issue tracker](https://github.com/irongollem/stl-pack/issues) to report bugs or suggest features
+- Use the [GitHub issue tracker](https://github.com/irongollem/plinth/issues) to report bugs or suggest features
 - Before creating a new issue, please check if a similar issue already exists
 - Provide as much context as possible: version numbers, error messages, steps to reproduce, etc.
 
@@ -107,4 +107,4 @@ This project uses a custom source-available license. By contributing to this pro
 
 If you have any questions about contributing, feel free to open an issue for clarification.
 
-We appreciate your contributions to making stl-pack better!
+We appreciate your contributions to making Plinth better!

@@ -1,12 +1,12 @@
 import { defineConfig } from "vitepress";
 
-// Deployed to GitHub Pages at https://irongollem.github.io/stl-pack/
+// Deployed to GitHub Pages at https://irongollem.github.io/plinth/
 // by .github/workflows/docs.yml on every push to main touching docs/.
 export default defineConfig({
   title: "Plinth",
   description:
     "An opinionated desktop tool for cataloging, rendering, and distributing 3D-printable model libraries",
-  base: "/stl-pack/",
+  base: "/plinth/",
   cleanUrls: true,
   lastUpdated: true,
   themeConfig: {
@@ -16,7 +16,7 @@ export default defineConfig({
       { text: "Reference", link: "/3PK" },
       {
         text: "Download",
-        link: "https://github.com/irongollem/stl-pack/releases",
+        link: "https://github.com/irongollem/plinth/releases",
       },
     ],
     sidebar: [
@@ -41,7 +41,7 @@ export default defineConfig({
       },
     ],
     socialLinks: [
-      { icon: "github", link: "https://github.com/irongollem/stl-pack" },
+      { icon: "github", link: "https://github.com/irongollem/plinth" },
     ],
     search: { provider: "local" },
     outline: [2, 3],
