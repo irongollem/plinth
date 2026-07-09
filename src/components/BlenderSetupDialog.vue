@@ -47,17 +47,17 @@
           <template v-else-if="verdict === 'Outdated'">
             This works, but previews are tuned for Blender
             {{ recommendedSeries }} — older versions light and tone-map them
-            differently. You can keep yours, or let stl-pack fetch its own
+            differently. You can keep yours, or let Plinth fetch its own
             {{ managedVersion }} alongside it (~350&nbsp;MB, yours stays
             untouched).
           </template>
           <template v-else-if="verdict === 'TooOld'">
             This version is too old to drive the render engine (4.2 is the
-            minimum). stl-pack can download its own Blender
+            minimum). Plinth can download its own Blender
             {{ managedVersion }} without touching your install.
           </template>
           <template v-else>
-            No Blender found. Rendering model previews needs one — stl-pack can
+            No Blender found. Rendering model previews needs one — Plinth can
             download its own copy (~350&nbsp;MB), or you can point it at an
             existing install in Settings.
           </template>

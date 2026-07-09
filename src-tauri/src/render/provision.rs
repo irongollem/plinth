@@ -626,7 +626,7 @@ mod tests {
 
     #[test]
     fn old_managed_versions_are_removed_but_nothing_else() {
-        let root = std::env::temp_dir().join(format!("stl-pack-sweep-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("plinth-sweep-{}", uuid::Uuid::new_v4()));
         for dir in ["4.2.9", "5.1.2", "not-a-version"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn highest_complete_managed_version_wins() {
-        let root = std::env::temp_dir().join(format!("stl-pack-managed-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("plinth-managed-{}", uuid::Uuid::new_v4()));
 
         // No root dir at all -> no managed install
         assert_eq!(managed_binary_in(&root), None);
@@ -664,7 +664,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "downloads ~350 MB from download.blender.org"]
     async fn installs_managed_blender_end_to_end() {
-        let scratch = std::env::temp_dir().join(format!("stl-pack-e2e-{}", uuid::Uuid::new_v4()));
+        let scratch = std::env::temp_dir().join(format!("plinth-e2e-{}", uuid::Uuid::new_v4()));
         APP_DATA_DIR
             .set(scratch.clone())
             .expect("APP_DATA_DIR unset — run this test alone");

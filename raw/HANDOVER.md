@@ -3,7 +3,7 @@
 A headless Blender renderer that turns any printable STL into a standardized
 "resin promo" image: warm resin material with subsurface scattering, a soft warm
 key light on pure black with a deepened shadow side, rendered in Cycles with
-denoising. Built to be called per-mini from your Rust `stl-pack` tool as it grows
+denoising. Built to be called per-mini from your Rust `plinth` tool as it grows
 into a cataloging tool.
 
 ## Files in this folder

@@ -588,13 +588,13 @@
           <template v-if="verdict === 'TooOld'">
             Promo renders drive Blender headlessly, and
             {{ blenderInfo?.version ?? "your install" }} predates the 4.2
-            minimum. stl-pack can download its own Blender
+            minimum. Plinth can download its own Blender
             {{ managedVersion }} without touching yours.
           </template>
           <template v-else>
             Promo renders drive Blender headlessly — no Blender, no image.
-            stl-pack can download its own copy (~350&nbsp;MB), or you can point
-            it at an existing install in Settings.
+            Plinth can download its own copy (~350&nbsp;MB), or you can point it
+            at an existing install in Settings.
           </template>
         </p>
         <div class="flex justify-end gap-2">
@@ -1064,13 +1064,16 @@ const loadRenderSettings = () => {
 // resin color, camera, quality, and the advanced overrides. Branding stays
 // out on purpose: logo paths are machine-local, and title/credit belong to
 // a model, not to a look.
-const LOOK_FILE_KIND = "stl-pack-look";
+const LOOK_FILE_KIND = "plinth-look";
+// Look files written before the Plinth rename carry the old kind; still accept
+// them on import (the payload shape is unchanged).
+const LEGACY_LOOK_FILE_KINDS = new Set(["stl-pack-look"]);
 const LOOK_FILE_VERSION = 1;
 
 const exportLook = async () => {
   const path = await save({
     defaultPath: "render-look.json",
-    filters: [{ name: "stl-pack look", extensions: ["json"] }],
+    filters: [{ name: "Plinth look", extensions: ["json"] }],
   });
   if (!path) return;
   const payload = {
@@ -1097,7 +1100,7 @@ const exportLook = async () => {
 const importLook = async () => {
   const selected = await open({
     multiple: false,
-    filters: [{ name: "stl-pack look", extensions: ["json"] }],
+    filters: [{ name: "Plinth look", extensions: ["json"] }],
     title: "Import look file",
   });
   if (typeof selected !== "string") return;
@@ -1114,8 +1117,9 @@ const importLook = async () => {
     return;
   }
   const file = (raw ?? {}) as Record<string, unknown>;
-  if (file.kind !== LOOK_FILE_KIND) {
-    toastStore.addToast("That file is not an stl-pack look", "error");
+  const kind = file.kind;
+  if (kind !== LOOK_FILE_KIND && !LEGACY_LOOK_FILE_KINDS.has(kind as string)) {
+    toastStore.addToast("That file is not a Plinth look", "error");
     return;
   }
   if (typeof file.version === "number" && file.version > LOOK_FILE_VERSION) {

@@ -517,7 +517,7 @@ const blenderStatusText = computed(() => {
   if (blenderChecking.value) return "Checking...";
   const check = blenderCheck.value;
   if (!check) return "";
-  const managed = check.is_managed ? " (managed by stl-pack)" : "";
+  const managed = check.is_managed ? " (managed by Plinth)" : "";
   if (!check.info)
     return "Blender not found. Download it here or point to an install.";
   switch (check.verdict) {

@@ -1,6 +1,6 @@
-# STL Pack - Custom License
+# Plinth - Custom License
 
-Copyright (c) 2025 STL Pack Contributors
+Copyright (c) 2025 Plinth Contributors
 
 ## Terms and Conditions
 
