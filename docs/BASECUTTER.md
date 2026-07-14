@@ -198,6 +198,57 @@ cut progress / per-cut done / failed / job done — shaped like
 Shaded top-down geometry gives height cues for free; a 3D preview of a
 finished base is polish, not foundation.
 
+## The landscape generator (phase 6)
+
+Users shouldn't need a designer's sculpt to understand the tool — and a
+sculpt is not even required: every starter terrain we want (cobblestone
+street, sandy dunes, rocky ground) is a **heightfield**, and a displaced
+grid with a skirt and bottom cap is watertight by construction, has no
+undercuts, and prints clean. So instead of bundling STL samples (10–20 MB
+of dead installer weight), we ship one parametric generator script and
+presets as data:
+
+- `resources/gen_landscape.py` — embedded like the others, one Blender
+  run, deterministic from a seed. Parameters: plate size/resolution,
+  carrier thickness, relief height, plus style layers that mix — base
+  noise (scale/octaves/ridged), ripples (amplitude/wavelength/direction),
+  stones (Voronoi cell size, gap width, dome height, per-stone jitter),
+  boulders (count/size), camber.
+- **Presets are parameter sets** (cobblestone / sandy / rocky / lava
+  flow to start — the generic terrains whole armies get based on, which
+  is exactly why creators charge for them) — the cutter-library move
+  again: adding a preset is a new row, a new terrain style is a new
+  parameter, not a new pipeline. Lava is still a heightfield: smooth
+  ropey flow channels between raised crusted banks; the molten look is
+  the painter's job, the geometry's job is the crust.
+- Rust: `LandscapeParams` + a `generate_landscape` command riding the
+  same headless machinery as cuts and renders; output lands in app data
+  and auto-loads into the placement viewport.
+- UI: a "Generate landscape" section in the Base Cutter view — preset
+  chips up front, the sliders/numbers folded closed until opened (the
+  RenderAdvanced.vue pattern: presets for everyone, knobs for the pros).
+- The generated terrains double as the reference implementation of the
+  "cuttable landscape" spec for CREATORS.md, and they're our own meshes —
+  no licensing questions.
+
+### Further horizon (after the generator)
+
+- **Procedural scatter** (phase 7): loose rocks, bones, skulls, plants,
+  mushrooms sprinkled onto the terrain — raycast placement with random
+  rotation/scale/sink, then boolean-union during the cut, which the
+  pipeline already does for magnet bosses (a scattered skull is
+  geometrically a magnet boss upside down). Pebbles/rocks are procedural
+  (noise-displaced icospheres, no assets); organic pieces need a small
+  bundled library of watertight meshes. Works on ANY landscape,
+  including designer sculpts.
+- **Relief painting** (phase 8, "draw your trenches"): because generated
+  landscapes are heightfields, painting terrain is painting the
+  heightmap — a 2D brush (radius, strength, raise/lower/smooth) editing
+  a displacement image live in the existing top-down viewport. Trenches,
+  craters, ruts, riverbeds: one brush, sign flipped. No sculpt engine
+  needed. Generated landscapes only — an arbitrary designer mesh isn't a
+  heightfield.
+
 ## Synergy: standard bases in the Render tool
 
 A rendered mini on empty ground gives no sense of size; the same mini on
