@@ -1,3 +1,4 @@
+mod basecutter;
 mod catalog;
 mod error;
 mod file;
@@ -9,6 +10,7 @@ mod process;
 mod render;
 mod settings;
 
+use basecutter::cutters::get_cutter_library;
 use catalog::commands::{
     add_catalog_root, add_catalog_tag, add_group_tag, apply_normalize, assign_files_to_pose,
     batch_move_models, cancel_catalog_job, cleanup_ephemeral_files, clear_file_pose,
@@ -137,6 +139,7 @@ fn create_specta_builder() -> Builder {
             detect_minihoard,
             run_minihoard,
             cancel_minihoard,
+            get_cutter_library,
         ])
         .events(collect_events![
             CompressionStatus,

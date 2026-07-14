@@ -798,6 +798,9 @@ async cancelMinihoard(jobId: string) : Promise<Result<null, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async getCutterLibrary() : Promise<Cutter[]> {
+    return await TAURI_INVOKE("get_cutter_library");
 }
 }
 
@@ -1042,6 +1045,20 @@ model_names: string[];
 detail: string | null }
 export type CompressionStatus = { Started: StartedStatus } | { Progress: ProgressStatus } | { Completed: CompletedStatus } | { Failed: FailedStatus } | { Cancelled: CancelledStatus }
 export type CompressionType = "SevenZip" | "Zip"
+/**
+ * A standard-library cutter (or a later user-defined one). Dimensions are
+ * the NOMINAL (bottom-face, table-touching) footprint — the smaller cut
+ * footprint is always derived from these via `top_face_of`, never stored.
+ */
+export type Cutter = { id: string; label: string; kind: CutterKind }
+/**
+ * Cutter footprint shapes. Internally tagged on `kind` with lowercase
+ * variant names so the JSON matches `base_cut.py`'s job format verbatim
+ * (`{"kind": "circle", "diameter_mm": 32.0}` — see its top docstring and
+ * docs/BASECUTTER.md "Pinned interfaces"). Open for extension: a
+ * user-traced outline is a later variant, not a rewrite of this type.
+ */
+export type CutterKind = { kind: "circle"; diameter_mm: number } | { kind: "ellipse"; major_mm: number; minor_mm: number } | { kind: "rect"; width_mm: number; depth_mm: number }
 /**
  * One designer and how many logical models (groups) carry that name —
  * feeds the catalog's designer filter dropdown.
