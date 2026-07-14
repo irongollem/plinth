@@ -8,6 +8,7 @@ record.
 
 ### Buildable now
 
+- [ ] Base cutter (design settled, see [docs/BASECUTTER.md](docs/BASECUTTER.md)): cut standard-base plugs out of designer landscape sculpts and seat them on parametric standard tapered wargaming plinths — a second embedded Blender script riding the existing render/provision pipeline, plus a 2D top-down placement UI; phase 1 is a hand-run script spike (`landscape.stl + cutter + x/y/rot → base.stl`) printed once to retire the boolean/seam risk
 - [ ] Stage packed models into a release transparently: "+ Add to release" currently SKIPS packed members with an unpack-first hint (guard added 2026-07-08 — staging copies loose files, which packed members don't have); the transparent path would run ensure_model_files at staging time, but extracted files are ephemeral and a draft can outlive the cleanup sweep, so the extract-lifetime question needs answering first
 - [ ] Preview generation for `.3dpak` files (thumbnail/icon): OS-level Finder/Explorer thumbnails mean a QuickLook plugin (macOS) + a shell extension (Windows) — a lot of platform machinery. A cheaper v1 embeds a preview PNG inside the 3pk and shows it in the import dialog (the render pipeline already produces the image)
 
