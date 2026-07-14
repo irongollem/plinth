@@ -6,7 +6,7 @@
 //! "Pinned interfaces", and base_cut.py's own docstring for the exact job
 //! JSON shape and stdout protocol this file is the Rust side of.
 
-use crate::basecutter::cutters::{Placement, PlinthParams};
+use crate::basecutter::cutters::{top_face_of, Placement, PlinthParams};
 use crate::error::AppError;
 use crate::models::BlenderInfo;
 use serde::{Deserialize, Serialize};
@@ -141,11 +141,34 @@ pub fn parse_token(line: &str) -> Option<BaseCutToken> {
     None
 }
 
+/// Serialize `job` and inject each placement's derived cut footprint under a
+/// "cut" key (same tagged `CutterKind` shape as `cutter`) — Rust stays the
+/// single owner of the nominal->cut derivation (docs/BASECUTTER.md "The
+/// plinth": `top_face_of`), so base_cut.py consumes "cut" directly instead
+/// of re-deriving it from taper/height itself. Does not touch `BaseCutJob`
+/// (the frontend-facing type), only the JSON handed to the script.
+fn job_json_with_cut_footprints(job: &BaseCutJob) -> Result<serde_json::Value, AppError> {
+    let mut value = serde_json::to_value(job)
+        .map_err(|e| AppError::JsonError(format!("Failed to encode base-cut job: {}", e)))?;
+    if let Some(placements) = value.get_mut("placements").and_then(|p| p.as_array_mut()) {
+        for (placement_value, placement) in placements.iter_mut().zip(&job.placements) {
+            let cut = top_face_of(&placement.cutter, &job.plinth);
+            let cut_json = serde_json::to_value(&cut)
+                .map_err(|e| AppError::JsonError(format!("Failed to encode cut footprint: {}", e)))?;
+            if let Some(obj) = placement_value.as_object_mut() {
+                obj.insert("cut".to_string(), cut_json);
+            }
+        }
+    }
+    Ok(value)
+}
+
 /// Write the job JSON into `dir` (the materialized script's directory in
 /// production; a scratch dir in tests) so Blender can read it via `--job`.
 pub fn write_job_file(dir: &Path, job: &BaseCutJob, job_id: &str) -> Result<PathBuf, AppError> {
     let path = dir.join(format!("base_cut_job_{job_id}.json"));
-    let json = serde_json::to_string_pretty(job)
+    let value = job_json_with_cut_footprints(job)?;
+    let json = serde_json::to_string_pretty(&value)
         .map_err(|e| AppError::JsonError(format!("Failed to encode base-cut job: {}", e)))?;
     std::fs::write(&path, json)
         .map_err(|e| AppError::IoError(format!("Failed to write base-cut job file: {}", e)))?;
@@ -153,9 +176,15 @@ pub fn write_job_file(dir: &Path, job: &BaseCutJob, job_id: &str) -> Result<Path
 }
 
 /// Assemble the headless base-cut invocation: `--background
-/// --factory-startup --python <script> -- --job <json>` (see
-/// docs/BASECUTTER.md "Pinned interfaces" — same `--` convention as
+/// --factory-startup --python-exit-code 1 --python <script> -- --job <json>`
+/// (see docs/BASECUTTER.md "Pinned interfaces" — same `--` convention as
 /// render_mini.py, but base_cut.py takes one job file, not per-cut flags).
+/// `--python-exit-code 1` makes an uncaught script exception (bad job JSON,
+/// a multi-object STL, an unwritable out_dir — anything before the per-cut
+/// try/except in main()'s loop) exit Blender non-zero; without it Blender's
+/// default behaviour is to exit 0 even after a Python traceback, so a
+/// pre-loop crash would otherwise be reported as `Finished{ok_count:0}`
+/// instead of a failure.
 pub fn build_base_cut_command(
     blender: &BlenderInfo,
     script: &Path,
@@ -164,6 +193,8 @@ pub fn build_base_cut_command(
     let mut cmd = crate::render::engine::new_command(Path::new(&blender.path));
     cmd.arg("--background")
         .arg("--factory-startup")
+        .arg("--python-exit-code")
+        .arg("1")
         .arg("--python")
         .arg(script)
         .arg("--")
@@ -249,9 +280,12 @@ where
         }
     };
 
-    // Registered ONCE and kept alive across iterations — notify_waiters()
-    // stores no permit (see render/commands.rs::run_blender for the
-    // original rationale).
+    // Registered ONCE and kept alive across iterations. cancel_base_cut
+    // calls notify_one() rather than notify_waiters(): notify_one() stores
+    // a wake-up permit when no waiter is registered yet, so a cancel that
+    // lands before this notified() future exists (the lost-wakeup window
+    // between spawning the job task and reaching this loop) is still
+    // observed on the first poll instead of being silently dropped.
     let cancelled = cancel_token.notified();
     tokio::pin!(cancelled);
 
@@ -379,6 +413,42 @@ mod tests {
         assert_eq!(back.landscape_path, "/path/to/landscape.stl");
     }
 
+    /// The wire JSON (what actually reaches base_cut.py, via
+    /// job_json_with_cut_footprints/write_job_file) carries a "cut" key per
+    /// placement — the derived top-face footprint — so Rust stays the one
+    /// owner of the nominal->cut derivation instead of the script
+    /// re-deriving it. 32mm circle + default plinth -> 30.017mm (see
+    /// cutters::top_face_of_circle_matches_measured_taper for the math).
+    #[test]
+    fn wire_json_carries_the_derived_cut_footprint() {
+        let job = BaseCutJob {
+            landscape_path: "/l.stl".to_string(),
+            out_dir: "/out".to_string(),
+            plinth: PlinthParams::default(),
+            placements: vec![Placement {
+                cutter: CutterKind::Circle { diameter_mm: 32.0 },
+                x_mm: 0.0,
+                y_mm: 0.0,
+                rotation_deg: 0.0,
+                magnet: None,
+                name: Some("round32".to_string()),
+            }],
+        };
+        let wire = job_json_with_cut_footprints(&job).unwrap();
+        let cut = &wire["placements"][0]["cut"];
+        assert_eq!(cut["kind"], "circle");
+        let diameter_mm = cut["diameter_mm"].as_f64().unwrap();
+        assert!(
+            (diameter_mm - 30.017).abs() < 0.01,
+            "got {diameter_mm}, want 30.017 +/- 0.01"
+        );
+
+        // The frontend-facing BaseCutJob type itself must not gain a "cut"
+        // field — only the wire JSON does.
+        let plain = serde_json::to_value(&job).unwrap();
+        assert!(plain["placements"][0].get("cut").is_none());
+    }
+
     #[test]
     fn job_without_magnet_or_name_omits_them_as_null() {
         let job = BaseCutJob {
@@ -497,6 +567,8 @@ mod tests {
             vec![
                 "--background",
                 "--factory-startup",
+                "--python-exit-code",
+                "1",
                 "--python",
                 "/tmp/base_cut.py",
                 "--",
@@ -521,13 +593,24 @@ mod tests {
                 top_mm: 1.2,
                 magnet_clearance_mm: 0.15,
             },
-            placements: vec![],
+            placements: vec![Placement {
+                cutter: CutterKind::Circle { diameter_mm: 32.0 },
+                x_mm: 0.0,
+                y_mm: 0.0,
+                rotation_deg: 0.0,
+                magnet: None,
+                name: Some("round32".to_string()),
+            }],
         };
         let path = write_job_file(&dir, &job, "abc123").unwrap();
         assert!(path.is_file());
         let contents = std::fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
         assert_eq!(value["landscape"], "/l.stl");
+        // The file on disk (what Blender actually reads) carries the
+        // derived "cut" footprint, not just the raw BaseCutJob fields.
+        assert_eq!(value["placements"][0]["cut"]["kind"], "circle");
+        assert!(value["placements"][0]["cut"]["diameter_mm"].as_f64().unwrap() < 32.0);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -593,6 +676,17 @@ mod tests {
         assert!(
             tokens.iter().any(|t| matches!(t, BaseCutToken::Validating)),
             "expected a VALIDATING token"
+        );
+        // The generated test landscape is a clean, watertight Blender
+        // primitive, so the (now real, not a dead protocol arm — see
+        // base_cut.py's validate()) gate must pass it: VALIDATED, not
+        // VALIDATION_FAILED.
+        assert!(
+            tokens
+                .iter()
+                .any(|t| matches!(t, BaseCutToken::Validated(_))),
+            "expected a VALIDATED token, got: {:?}",
+            tokens
         );
         assert!(
             tokens

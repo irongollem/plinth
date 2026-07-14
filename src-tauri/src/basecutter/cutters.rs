@@ -95,9 +95,9 @@ pub struct Cutter {
 /// size by twice the taper inset. `base_cut.py`, the viewport overlay, and
 /// any future render-tool consumer must all compute this the same way —
 /// hence one function instead of three copies of the same formula.
-// Only called by tests until the viewport overlay and base_cut.py's Rust
-// callers (phase 3+) consume it; the derivation itself is already load-bearing.
-#[allow(dead_code)]
+/// Called by `job::write_job_file` (injects the "cut" key base_cut.py
+/// consumes) and `commands::validate_placements` (the too-small-footprint
+/// guard) — no longer test-only.
 pub fn top_face_of(kind: &CutterKind, plinth: &PlinthParams) -> CutterKind {
     let inset = plinth.height_mm * plinth.taper_deg.to_radians().tan();
     let shrink = 2.0 * inset;
@@ -211,6 +211,16 @@ pub fn seed_library() -> Vec<Cutter> {
 #[specta::specta]
 pub fn get_cutter_library() -> Vec<Cutter> {
     seed_library()
+}
+
+/// The caliper-measured plinth profile (see `PlinthParams::default`'s doc
+/// comment) as a command, so the frontend's "new job" defaults come from
+/// this one Rust value instead of a hand-copied literal that could drift
+/// from it.
+#[tauri::command]
+#[specta::specta]
+pub fn get_plinth_defaults() -> PlinthParams {
+    PlinthParams::default()
 }
 
 #[cfg(test)]
@@ -402,5 +412,17 @@ mod tests {
     #[test]
     fn get_cutter_library_matches_seed_library() {
         assert_eq!(get_cutter_library().len(), seed_library().len());
+    }
+
+    #[test]
+    fn get_plinth_defaults_matches_the_measured_base() {
+        let defaults = get_plinth_defaults();
+        let expected = PlinthParams::default();
+        assert_eq!(defaults.height_mm, expected.height_mm);
+        assert_eq!(defaults.taper_deg, expected.taper_deg);
+        assert_eq!(defaults.hollow, expected.hollow);
+        assert_eq!(defaults.wall_mm, expected.wall_mm);
+        assert_eq!(defaults.top_mm, expected.top_mm);
+        assert_eq!(defaults.magnet_clearance_mm, expected.magnet_clearance_mm);
     }
 }

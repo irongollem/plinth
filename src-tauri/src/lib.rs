@@ -11,7 +11,7 @@ mod render;
 mod settings;
 
 use basecutter::commands::{cancel_base_cut, start_base_cut};
-use basecutter::cutters::get_cutter_library;
+use basecutter::cutters::{get_cutter_library, get_plinth_defaults};
 use catalog::commands::{
     add_catalog_root, add_catalog_tag, add_group_tag, apply_normalize, assign_files_to_pose,
     batch_move_models, cancel_catalog_job, cleanup_ephemeral_files, clear_file_pose,
@@ -141,6 +141,7 @@ fn create_specta_builder() -> Builder {
             run_minihoard,
             cancel_minihoard,
             get_cutter_library,
+            get_plinth_defaults,
             start_base_cut,
             cancel_base_cut,
         ])

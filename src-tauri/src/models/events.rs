@@ -311,11 +311,13 @@ pub struct BatchRenderCancelledStatus {
 
 /// Base Cutter job progress — see docs/BASECUTTER.md "Pinned interfaces".
 /// Shaped like BatchRenderStatus (started / per-step progress / finished /
-/// failed), but the steps mirror base_cut.py's own token protocol
-/// (VALIDATING / VALIDATED / CUT_START / CUT_DONE / CUT_FAILED / JOB_DONE)
-/// rather than render's sample-progress model — there's no cancelled
-/// variant because job.rs reports a cancelled run through Failed, same as
-/// any other run that didn't reach JOB_DONE.
+/// failed / cancelled), but the steps mirror base_cut.py's own token
+/// protocol (VALIDATING / VALIDATED / CUT_START / CUT_DONE / CUT_FAILED /
+/// JOB_DONE) rather than render's sample-progress model. Cancellation gets
+/// its own variant (mirroring BatchRenderCancelledStatus) rather than
+/// flowing through Failed: commands.rs's run_base_cut_job matches
+/// AppError::UserCancelled specifically so the frontend can tell "the user
+/// stopped this" apart from "this actually broke".
 #[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
 pub enum BaseCutStatus {
     Started(BaseCutStartedStatus),
@@ -326,6 +328,7 @@ pub enum BaseCutStatus {
     CutFailed(BaseCutCutFailedStatus),
     Finished(BaseCutFinishedStatus),
     Failed(BaseCutFailedStatus),
+    Cancelled(BaseCutCancelledStatus),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
@@ -398,6 +401,11 @@ pub struct BaseCutFailedStatus {
     /// Last ~10 lines of Blender stdout — a post-mortem when the failure
     /// wasn't a clean CUT_FAILED/VALIDATION_FAILED token (e.g. a crash).
     pub stdout_tail: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BaseCutCancelledStatus {
+    pub job_id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]

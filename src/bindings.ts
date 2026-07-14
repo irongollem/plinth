@@ -802,6 +802,15 @@ async cancelMinihoard(jobId: string) : Promise<Result<null, AppError>> {
 async getCutterLibrary() : Promise<Cutter[]> {
     return await TAURI_INVOKE("get_cutter_library");
 },
+/**
+ * The caliper-measured plinth profile (see `PlinthParams::default`'s doc
+ * comment) as a command, so the frontend's "new job" defaults come from
+ * this one Rust value instead of a hand-copied literal that could drift
+ * from it.
+ */
+async getPlinthDefaults() : Promise<PlinthParams> {
+    return await TAURI_INVOKE("get_plinth_defaults");
+},
 async startBaseCut(job: BaseCutJob) : Promise<Result<string, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("start_base_cut", { job }) };
@@ -852,6 +861,7 @@ scanStatus: "scan-status"
 /** user-defined types **/
 
 export type AppError = { InvalidInput: string } | { IoError: string } | { JsonError: string } | { FileProcessingError: string } | { ConfigError: string } | { NotFoundError: string } | { ImageProcessingError: string } | { UserCancelled: string }
+export type BaseCutCancelledStatus = { job_id: string }
 export type BaseCutCutDoneStatus = { job_id: string; index: number; out_path: string; dims_mm: [number, number, number]; manifold: boolean }
 export type BaseCutCutFailedStatus = { job_id: string; index: number; reason: string }
 export type BaseCutCutStartedStatus = { job_id: string; index: number }
@@ -873,13 +883,15 @@ export type BaseCutStartedStatus = { job_id: string; total: number }
 /**
  * Base Cutter job progress — see docs/BASECUTTER.md "Pinned interfaces".
  * Shaped like BatchRenderStatus (started / per-step progress / finished /
- * failed), but the steps mirror base_cut.py's own token protocol
- * (VALIDATING / VALIDATED / CUT_START / CUT_DONE / CUT_FAILED / JOB_DONE)
- * rather than render's sample-progress model — there's no cancelled
- * variant because job.rs reports a cancelled run through Failed, same as
- * any other run that didn't reach JOB_DONE.
+ * failed / cancelled), but the steps mirror base_cut.py's own token
+ * protocol (VALIDATING / VALIDATED / CUT_START / CUT_DONE / CUT_FAILED /
+ * JOB_DONE) rather than render's sample-progress model. Cancellation gets
+ * its own variant (mirroring BatchRenderCancelledStatus) rather than
+ * flowing through Failed: commands.rs's run_base_cut_job matches
+ * AppError::UserCancelled specifically so the frontend can tell "the user
+ * stopped this" apart from "this actually broke".
  */
-export type BaseCutStatus = { Started: BaseCutStartedStatus } | { Validating: BaseCutValidatingStatus } | { Validated: BaseCutValidatedStatus } | { CutStarted: BaseCutCutStartedStatus } | { CutDone: BaseCutCutDoneStatus } | { CutFailed: BaseCutCutFailedStatus } | { Finished: BaseCutFinishedStatus } | { Failed: BaseCutFailedStatus }
+export type BaseCutStatus = { Started: BaseCutStartedStatus } | { Validating: BaseCutValidatingStatus } | { Validated: BaseCutValidatedStatus } | { CutStarted: BaseCutCutStartedStatus } | { CutDone: BaseCutCutDoneStatus } | { CutFailed: BaseCutCutFailedStatus } | { Finished: BaseCutFinishedStatus } | { Failed: BaseCutFailedStatus } | { Cancelled: BaseCutCancelledStatus }
 export type BaseCutValidatedStatus = { job_id: string; report: BaseCutValidationReport }
 export type BaseCutValidatingStatus = { job_id: string }
 /**
