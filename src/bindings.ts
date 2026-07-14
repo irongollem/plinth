@@ -1281,7 +1281,15 @@ export type LandscapeLayers = { noise?: NoiseLayer; ripples?: RipplesLayer; ston
  * (app data dir) and injects it into the wire JSON the same way
  * `job::job_json_with_cut_footprints` injects "cut" for base_cut.py.
  */
-export type LandscapeParams = { seed: number; width_mm: number; depth_mm: number; resolution_mm?: number; carrier_mm?: number; relief_mm: number; layers?: LandscapeLayers }
+export type LandscapeParams = { seed: number; width_mm: number; depth_mm: number; resolution_mm?: number; 
+/**
+ * One "zoom" for the terrain itself, distinct from resolution_mm's
+ * mesh density: multiplies every layer's characteristic length (stone
+ * cells+gaps, ripple wavelength, noise feature size, boulder sizes,
+ * channel width) so "same terrain, chunkier/finer" is one knob, not
+ * five consistent edits.
+ */
+feature_scale?: number; carrier_mm?: number; relief_mm: number; layers?: LandscapeLayers }
 /**
  * A magnet as it will be pocketed into a plinth's boss. Drawn from the
  * user's magnet inventory (app settings), never from a hardcoded

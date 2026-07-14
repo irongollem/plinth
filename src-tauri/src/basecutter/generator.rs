@@ -30,16 +30,21 @@ use uuid::Uuid;
 /// engine::materialize_embedded_script for the stale-copy trap this avoids).
 const GEN_LANDSCAPE_SCRIPT: &str = include_str!("../../resources/gen_landscape.py");
 
-/// Grid step floor (docs/BASECUTTER.md phase 6: "resolution_mm ... floor
-/// 0.4") — pinned here too so a too-fine request from the frontend is
-/// clamped before it ever reaches the script, not just inside it.
-pub const MIN_RESOLUTION_MM: f64 = 0.4;
+/// Grid step floor — 0.1mm is resin-grade lateral detail (the userbase
+/// prints resin); the script's own MAX_GRID_VERTS budget is what guards
+/// against a fine step on a huge plate, so this floor only exists to stop
+/// a typo like 0.01 from freezing a bake. Must match gen_landscape.py's
+/// MIN_RESOLUTION_MM.
+pub const MIN_RESOLUTION_MM: f64 = 0.1;
 
 fn default_resolution_mm() -> f64 {
     0.75
 }
 fn default_carrier_mm() -> f64 {
     2.0
+}
+fn default_feature_scale() -> f64 {
+    1.0
 }
 fn default_amount() -> f64 {
     1.0
@@ -251,6 +256,13 @@ pub struct LandscapeParams {
     pub depth_mm: f64,
     #[serde(default = "default_resolution_mm")]
     pub resolution_mm: f64,
+    /// One "zoom" for the terrain itself, distinct from resolution_mm's
+    /// mesh density: multiplies every layer's characteristic length (stone
+    /// cells+gaps, ripple wavelength, noise feature size, boulder sizes,
+    /// channel width) so "same terrain, chunkier/finer" is one knob, not
+    /// five consistent edits.
+    #[serde(default = "default_feature_scale")]
+    pub feature_scale: f64,
     #[serde(default = "default_carrier_mm")]
     pub carrier_mm: f64,
     pub relief_mm: f64,
@@ -302,6 +314,7 @@ pub fn seed_presets() -> Vec<GeneratorPreset> {
                 // Finer than the default grid: 4mm cobbles with 0.5mm
                 // mortar need ~0.4mm sampling or the joints alias.
                 resolution_mm: 0.4,
+                feature_scale: 1.0,
                 carrier_mm: 2.0,
                 relief_mm: 1.6,
                 layers: LandscapeLayers {
@@ -344,6 +357,7 @@ pub fn seed_presets() -> Vec<GeneratorPreset> {
                 width_mm: 120.0,
                 depth_mm: 80.0,
                 resolution_mm: 0.75,
+                feature_scale: 1.0,
                 carrier_mm: 2.0,
                 relief_mm: 4.0,
                 layers: LandscapeLayers {
@@ -376,6 +390,7 @@ pub fn seed_presets() -> Vec<GeneratorPreset> {
                 width_mm: 120.0,
                 depth_mm: 80.0,
                 resolution_mm: 0.75,
+                feature_scale: 1.0,
                 carrier_mm: 2.0,
                 relief_mm: 10.0,
                 layers: LandscapeLayers {
@@ -405,6 +420,7 @@ pub fn seed_presets() -> Vec<GeneratorPreset> {
                 width_mm: 120.0,
                 depth_mm: 80.0,
                 resolution_mm: 0.4,
+                feature_scale: 1.0,
                 carrier_mm: 2.0,
                 relief_mm: 4.5,
                 layers: LandscapeLayers {
@@ -870,6 +886,7 @@ mod tests {
             width_mm: 120.0,
             depth_mm: 80.0,
             resolution_mm: 0.75,
+            feature_scale: 1.0,
             carrier_mm: 2.0,
             relief_mm: 6.0,
             layers: LandscapeLayers {
@@ -922,6 +939,7 @@ mod tests {
             width_mm: 120.0,
             depth_mm: 80.0,
             resolution_mm: 0.1, // below the floor
+            feature_scale: 1.0,
             carrier_mm: 2.0,
             relief_mm: 6.0,
             layers: LandscapeLayers::default(),
@@ -1087,6 +1105,7 @@ mod tests {
             width_mm: 120.0,
             depth_mm: 80.0,
             resolution_mm: 0.75,
+            feature_scale: 1.0,
             carrier_mm: 2.0,
             relief_mm: 6.0,
             layers: LandscapeLayers::default(),

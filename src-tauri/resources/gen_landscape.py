@@ -16,6 +16,10 @@
 #   "resolution_mm": 0.75,      # grid step; floor 0.1 (resin-grade), and
 #                                # coarsened to fit MAX_GRID_VERTS on big
 #                                # plates — GENERATED reports the effective value
+#   "feature_scale": 1.0,       # zooms the TERRAIN (stone cells, ripple
+#                                # wavelengths, boulder sizes — every layer's
+#                                # characteristic length), clamped 0.25-4;
+#                                # orthogonal to resolution_mm's mesh density
 #   "carrier_mm": 2.0,          # flat plate thickness under the sculpted relief
 #   "relief_mm": 6.0,           # sculpted height ABOVE the carrier (max - min)
 #   "layers": {
@@ -501,9 +505,38 @@ def cleanup_and_check(obj):
 
 # ---------------------------------------------------------------------- job
 
+def _scaled_layers(layers, k):
+    """Apply the plate-level feature_scale: multiply every layer's
+    characteristic LENGTH by k (and divide noise's frequency-style `scale`),
+    so one knob zooms the terrain itself — distinct from resolution_mm,
+    which only changes mesh density. k=1 returns the dict untouched."""
+    if abs(k - 1.0) < 1e-9:
+        return layers
+    scaled = json.loads(json.dumps(layers))  # deep copy, layers are plain JSON
+    if "noise" in scaled and scaled["noise"]:
+        n = scaled["noise"]
+        n["scale"] = n.get("scale", 0.05) / k
+    if "ripples" in scaled and scaled["ripples"]:
+        r = scaled["ripples"]
+        r["wavelength_mm"] = r.get("wavelength_mm", 8.0) * k
+    if "stones" in scaled and scaled["stones"]:
+        s = scaled["stones"]
+        s["cell_mm"] = s.get("cell_mm", 4.0) * k
+        s["gap_mm"] = s.get("gap_mm", 0.5) * k
+    if "boulders" in scaled and scaled["boulders"]:
+        b = scaled["boulders"]
+        b["min_mm"] = b.get("min_mm", 8.0) * k
+        b["max_mm"] = b.get("max_mm", 20.0) * k
+    if "flow" in scaled and scaled["flow"]:
+        f = scaled["flow"]
+        f["channel_width_mm"] = f.get("channel_width_mm", 10.0) * k
+    return scaled
+
+
 def generate(params):
     width_mm = float(params["width_mm"])
     depth_mm = float(params["depth_mm"])
+    feature_scale = min(4.0, max(0.25, float(params.get("feature_scale", 1.0))))
     requested_mm = max(
         MIN_RESOLUTION_MM, float(params.get("resolution_mm", DEFAULT_RESOLUTION_MM))
     )
@@ -516,7 +549,7 @@ def generate(params):
     carrier_mm = float(params.get("carrier_mm", DEFAULT_CARRIER_MM))
     relief_mm = float(params.get("relief_mm", 6.0))
     seed = int(params.get("seed", 0))
-    layers = params.get("layers", {}) or {}
+    layers = _scaled_layers(params.get("layers", {}) or {}, feature_scale)
     out = params["out"]
 
     nx = max(2, round(width_mm / resolution_mm) + 1)

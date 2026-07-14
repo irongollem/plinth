@@ -105,6 +105,7 @@ const genParams = reactive<GenParams>({
   width_mm: 120,
   depth_mm: 80,
   resolution_mm: 0.75,
+  feature_scale: 1.0,
   carrier_mm: 2.0,
   relief_mm: 6.0,
   layers: {
@@ -546,6 +547,16 @@ const resultName = (index: number) =>
               :step="0.05"
               :min="0.1"
               v-model="genParams.resolution_mm"
+            />
+            <!-- Zooms the terrain itself (stone/dune/boulder sizes), not
+                 the mesh density — that's Resolution above. -->
+            <NumberInput
+              id="gen-feature-scale"
+              label="Feature scale ×"
+              :step="0.1"
+              :min="0.25"
+              :max="4"
+              v-model="genParams.feature_scale"
             />
             <NumberInput
               id="gen-carrier"
