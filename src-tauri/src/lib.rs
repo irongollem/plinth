@@ -10,6 +10,7 @@ mod process;
 mod render;
 mod settings;
 
+use basecutter::commands::{cancel_base_cut, start_base_cut};
 use basecutter::cutters::get_cutter_library;
 use catalog::commands::{
     add_catalog_root, add_catalog_tag, add_group_tag, apply_normalize, assign_files_to_pose,
@@ -31,8 +32,8 @@ use file::commands::{
 };
 use minihoard::{cancel_minihoard, detect_minihoard, run_minihoard, MinihoardStatus};
 use models::events::{
-    BatchRenderStatus, BlenderProvisionStatus, CompressionStatus, DuplicateStatus, PackStatus,
-    RenderStatus, ScanStatus,
+    BaseCutStatus, BatchRenderStatus, BlenderProvisionStatus, CompressionStatus, DuplicateStatus,
+    PackStatus, RenderStatus, ScanStatus,
 };
 use render::batch::start_batch_render;
 use render::commands::{
@@ -140,6 +141,8 @@ fn create_specta_builder() -> Builder {
             run_minihoard,
             cancel_minihoard,
             get_cutter_library,
+            start_base_cut,
+            cancel_base_cut,
         ])
         .events(collect_events![
             CompressionStatus,
@@ -150,6 +153,7 @@ fn create_specta_builder() -> Builder {
             BlenderProvisionStatus,
             BatchRenderStatus,
             MinihoardStatus,
+            BaseCutStatus,
         ])
 }
 

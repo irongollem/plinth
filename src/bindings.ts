@@ -801,6 +801,22 @@ async cancelMinihoard(jobId: string) : Promise<Result<null, AppError>> {
 },
 async getCutterLibrary() : Promise<Cutter[]> {
     return await TAURI_INVOKE("get_cutter_library");
+},
+async startBaseCut(job: BaseCutJob) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_base_cut", { job }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async cancelBaseCut(jobId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_base_cut", { jobId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -808,6 +824,7 @@ async getCutterLibrary() : Promise<Cutter[]> {
 
 
 export const events = __makeEvents__<{
+baseCutStatus: BaseCutStatus,
 batchRenderStatus: BatchRenderStatus,
 blenderProvisionStatus: BlenderProvisionStatus,
 compressionStatus: CompressionStatus,
@@ -817,6 +834,7 @@ packStatus: PackStatus,
 renderStatus: RenderStatus,
 scanStatus: ScanStatus
 }>({
+baseCutStatus: "base-cut-status",
 batchRenderStatus: "batch-render-status",
 blenderProvisionStatus: "blender-provision-status",
 compressionStatus: "compression-status",
@@ -834,6 +852,44 @@ scanStatus: "scan-status"
 /** user-defined types **/
 
 export type AppError = { InvalidInput: string } | { IoError: string } | { JsonError: string } | { FileProcessingError: string } | { ConfigError: string } | { NotFoundError: string } | { ImageProcessingError: string } | { UserCancelled: string }
+export type BaseCutCutDoneStatus = { job_id: string; index: number; out_path: string; dims_mm: [number, number, number]; manifold: boolean }
+export type BaseCutCutFailedStatus = { job_id: string; index: number; reason: string }
+export type BaseCutCutStartedStatus = { job_id: string; index: number }
+export type BaseCutFailedStatus = { job_id: string; message: string; 
+/**
+ * Last ~10 lines of Blender stdout — a post-mortem when the failure
+ * wasn't a clean CUT_FAILED/VALIDATION_FAILED token (e.g. a crash).
+ */
+stdout_tail: string }
+export type BaseCutFinishedStatus = { job_id: string; ok_count: number; total: number }
+/**
+ * A base-cut job, as sent from the frontend and forwarded to base_cut.py.
+ * Field names/renames match the script's job JSON verbatim (see its
+ * top docstring and docs/BASECUTTER.md "Pinned interfaces") — `landscape`
+ * and `out_dir` are the script's exact keys.
+ */
+export type BaseCutJob = { landscape: string; placements: Placement[]; plinth: PlinthParams; out_dir: string }
+export type BaseCutStartedStatus = { job_id: string; total: number }
+/**
+ * Base Cutter job progress — see docs/BASECUTTER.md "Pinned interfaces".
+ * Shaped like BatchRenderStatus (started / per-step progress / finished /
+ * failed), but the steps mirror base_cut.py's own token protocol
+ * (VALIDATING / VALIDATED / CUT_START / CUT_DONE / CUT_FAILED / JOB_DONE)
+ * rather than render's sample-progress model — there's no cancelled
+ * variant because job.rs reports a cancelled run through Failed, same as
+ * any other run that didn't reach JOB_DONE.
+ */
+export type BaseCutStatus = { Started: BaseCutStartedStatus } | { Validating: BaseCutValidatingStatus } | { Validated: BaseCutValidatedStatus } | { CutStarted: BaseCutCutStartedStatus } | { CutDone: BaseCutCutDoneStatus } | { CutFailed: BaseCutCutFailedStatus } | { Finished: BaseCutFinishedStatus } | { Failed: BaseCutFailedStatus }
+export type BaseCutValidatedStatus = { job_id: string; report: BaseCutValidationReport }
+export type BaseCutValidatingStatus = { job_id: string }
+/**
+ * Mirrors base_cut.py's `validate()` report dict exactly (see its
+ * docstring): non-manifold edge count, bounding box, vertex count, and an
+ * optional warning string added only when the landscape failed the check
+ * but the script kept going anyway (the "Spike policy" in base_cut.py's
+ * main(): report loudly, keep cutting, let the app-side gate harden later).
+ */
+export type BaseCutValidationReport = { non_manifold_edges?: number; dims_mm?: [number, number, number]; verts?: number; warning?: string | null }
 /**
  * Outcome of a batch that may partially succeed — the counts and the
  * per-item errors travel together so the UI can report both.
@@ -1125,6 +1181,14 @@ errors: string[];
  * Non-fatal notes, e.g. locally edited files kept aside as "(edited)".
  */
 warnings: string[] }
+/**
+ * A magnet as it will be pocketed into a plinth's boss. Drawn from the
+ * user's magnet inventory (app settings), never from a hardcoded
+ * base-size->magnet table — pairing is a suggestion rule over inventory.
+ * Consumed by `basecutter::job::BaseCutJob` (phase 3), which serializes it
+ * straight into a placement's `magnet` field for base_cut.py.
+ */
+export type MagnetSpec = { diameter_mm: number; height_mm: number; count: number }
 export type MinihoardFinished = { job_id: string; success: boolean; 
 /**
  * Present when the process couldn't run at all (spawn failure).
@@ -1224,6 +1288,36 @@ is_update: boolean;
  * readable manifest.json) — importing is refused rather than guessed at.
  */
 blocked: string | null; components: ComponentStatus[] }
+/**
+ * One cut instance: a cutter positioned on the landscape. Mirrors a job's
+ * `placements[]` entry (see base_cut.py's docstring) — `name` is a
+ * user-facing label echoed back in the script's `CUT_*` tokens so progress
+ * events can name the base, not just its index.
+ * Carried as a `Vec<Placement>` by `basecutter::job::BaseCutJob` (phase 3).
+ */
+export type Placement = { cutter: CutterKind; x_mm: number; y_mm: number; rotation_deg: number; 
+/**
+ * None = no magnet pocket. Suggested from the inventory, overridable
+ * per placement.
+ */
+magnet: MagnetSpec | null; name: string | null }
+/**
+ * Tapered plinth profile. Defaults are caliper-measured off a real 32 mm
+ * round base (32 -> 30 mm over 3.7 mm tall, 1.2 mm wall — see
+ * docs/BASECUTTER.md "The plinth"), not arbitrary round numbers.
+ * Carried one-per-job by `basecutter::job::BaseCutJob` (phase 3).
+ */
+export type PlinthParams = { height_mm: number; taper_deg: number; 
+/**
+ * Open-bottom shell (wall + top plate) vs. a solid plug. Hollow saves
+ * material and prints support-free; solid stays available as a flag.
+ */
+hollow: boolean; wall_mm: number; top_mm: number; 
+/**
+ * Pocket-to-magnet fit: FDM prints holes 0.1-0.25 mm undersized, resin
+ * differs again, so this stays a user-visible, per-job knob.
+ */
+magnet_clearance_mm: number }
 export type ProgressStatus = { job_id: string; processed_files: number; total_files: number; processed_size_kb: number; total_size_kb: number; percent_size: number; percent_files: number; current_file: string }
 export type ProvisionCancelledStatus = { job_id: string }
 export type ProvisionCompletedStatus = { job_id: string; info: BlenderInfo }

@@ -22,10 +22,8 @@ pub enum CutterKind {
 /// A magnet as it will be pocketed into a plinth's boss. Drawn from the
 /// user's magnet inventory (app settings), never from a hardcoded
 /// base-size->magnet table — pairing is a suggestion rule over inventory.
-// Only referenced by `Placement` until the phase-3 job pipeline (job.rs,
-// BaseCutJob) lands and actually builds jobs — pinned now so the shape
-// can't drift once that consumer arrives.
-#[allow(dead_code)]
+/// Consumed by `basecutter::job::BaseCutJob` (phase 3), which serializes it
+/// straight into a placement's `magnet` field for base_cut.py.
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
 pub struct MagnetSpec {
     pub diameter_mm: f64,
@@ -36,8 +34,7 @@ pub struct MagnetSpec {
 /// Tapered plinth profile. Defaults are caliper-measured off a real 32 mm
 /// round base (32 -> 30 mm over 3.7 mm tall, 1.2 mm wall — see
 /// docs/BASECUTTER.md "The plinth"), not arbitrary round numbers.
-// Only constructed by tests until BaseCutJob (phase 3) carries one per job.
-#[allow(dead_code)]
+/// Carried one-per-job by `basecutter::job::BaseCutJob` (phase 3).
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
 pub struct PlinthParams {
     pub height_mm: f64,
@@ -69,8 +66,7 @@ impl Default for PlinthParams {
 /// `placements[]` entry (see base_cut.py's docstring) — `name` is a
 /// user-facing label echoed back in the script's `CUT_*` tokens so progress
 /// events can name the base, not just its index.
-// Only constructed by tests until BaseCutJob (phase 3) carries a Vec of these.
-#[allow(dead_code)]
+/// Carried as a `Vec<Placement>` by `basecutter::job::BaseCutJob` (phase 3).
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
 pub struct Placement {
     pub cutter: CutterKind,

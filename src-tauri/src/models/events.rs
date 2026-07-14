@@ -309,6 +309,97 @@ pub struct BatchRenderCancelledStatus {
     pub succeeded: u32,
 }
 
+/// Base Cutter job progress — see docs/BASECUTTER.md "Pinned interfaces".
+/// Shaped like BatchRenderStatus (started / per-step progress / finished /
+/// failed), but the steps mirror base_cut.py's own token protocol
+/// (VALIDATING / VALIDATED / CUT_START / CUT_DONE / CUT_FAILED / JOB_DONE)
+/// rather than render's sample-progress model — there's no cancelled
+/// variant because job.rs reports a cancelled run through Failed, same as
+/// any other run that didn't reach JOB_DONE.
+#[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
+pub enum BaseCutStatus {
+    Started(BaseCutStartedStatus),
+    Validating(BaseCutValidatingStatus),
+    Validated(BaseCutValidatedStatus),
+    CutStarted(BaseCutCutStartedStatus),
+    CutDone(BaseCutCutDoneStatus),
+    CutFailed(BaseCutCutFailedStatus),
+    Finished(BaseCutFinishedStatus),
+    Failed(BaseCutFailedStatus),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BaseCutStartedStatus {
+    pub job_id: String,
+    pub total: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BaseCutValidatingStatus {
+    pub job_id: String,
+}
+
+/// Mirrors base_cut.py's `validate()` report dict exactly (see its
+/// docstring): non-manifold edge count, bounding box, vertex count, and an
+/// optional warning string added only when the landscape failed the check
+/// but the script kept going anyway (the "Spike policy" in base_cut.py's
+/// main(): report loudly, keep cutting, let the app-side gate harden later).
+#[derive(Serialize, Deserialize, Debug, Clone, Default, Type)]
+pub struct BaseCutValidationReport {
+    #[serde(default)]
+    pub non_manifold_edges: u32,
+    #[serde(default)]
+    pub dims_mm: [f64; 3],
+    #[serde(default)]
+    pub verts: u32,
+    #[serde(default)]
+    pub warning: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BaseCutValidatedStatus {
+    pub job_id: String,
+    pub report: BaseCutValidationReport,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BaseCutCutStartedStatus {
+    pub job_id: String,
+    pub index: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BaseCutCutDoneStatus {
+    pub job_id: String,
+    pub index: u32,
+    pub out_path: String,
+    pub dims_mm: [f64; 3],
+    pub manifold: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BaseCutCutFailedStatus {
+    pub job_id: String,
+    pub index: u32,
+    pub reason: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BaseCutFinishedStatus {
+    pub job_id: String,
+    pub ok_count: u32,
+    pub total: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct BaseCutFailedStatus {
+    pub job_id: String,
+    pub message: String,
+    /// Last ~10 lines of Blender stdout — a post-mortem when the failure
+    /// wasn't a clean CUT_FAILED/VALIDATION_FAILED token (e.g. a crash).
+    pub stdout_tail: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
 pub enum RenderStatus {
     Started(RenderStartedStatus),

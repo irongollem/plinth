@@ -12,9 +12,17 @@ use tokio::process::Command;
 /// script edits silently kept rendering with a stale copy during dev.
 const RENDER_SCRIPT: &str = include_str!("../../resources/render_mini.py");
 
-/// Write the embedded script where Blender can read it. Always overwrites,
-/// so the file on disk can never drift from the built app.
-pub fn materialize_render_script(app_handle: &AppHandle) -> Result<PathBuf, AppError> {
+/// Write an embedded Blender script where Blender can read it. Always
+/// overwrites, so the file on disk can never drift from the built app — the
+/// trap this avoids: as a bundled resource the script was only re-copied
+/// next to the binary when the Rust code rebuilt, so pure script edits
+/// silently kept running a stale copy during dev. Shared by every embedded
+/// script (render_mini.py, base_cut.py, ...) so the fix lives in one place.
+pub(crate) fn materialize_embedded_script(
+    app_handle: &AppHandle,
+    file_name: &str,
+    contents: &str,
+) -> Result<PathBuf, AppError> {
     let dir = app_handle
         .path()
         .app_cache_dir()
@@ -22,10 +30,16 @@ pub fn materialize_render_script(app_handle: &AppHandle) -> Result<PathBuf, AppE
         .map_err(|e| AppError::ConfigError(format!("No writable app dir: {}", e)))?;
     std::fs::create_dir_all(&dir)
         .map_err(|e| AppError::IoError(format!("Failed to create app dir: {}", e)))?;
-    let path = dir.join("render_mini.py");
-    std::fs::write(&path, RENDER_SCRIPT)
-        .map_err(|e| AppError::IoError(format!("Failed to write render script: {}", e)))?;
+    let path = dir.join(file_name);
+    std::fs::write(&path, contents)
+        .map_err(|e| AppError::IoError(format!("Failed to write {}: {}", file_name, e)))?;
     Ok(path)
+}
+
+/// Write the embedded render script where Blender can read it. Always
+/// overwrites, so the file on disk can never drift from the built app.
+pub fn materialize_render_script(app_handle: &AppHandle) -> Result<PathBuf, AppError> {
+    materialize_embedded_script(app_handle, "render_mini.py", RENDER_SCRIPT)
 }
 
 /// (blender_path setting at detection time, detected install)
