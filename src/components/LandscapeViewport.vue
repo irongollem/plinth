@@ -154,15 +154,55 @@ const applyCamera = () => {
   camera.top = halfH;
   camera.bottom = -halfH;
   camera.zoom = camZoom;
+  // Tilt pitches the camera around the view center's screen-horizontal
+  // axis (a transient "peek" — cuts are always vertical, so the resting
+  // pose stays a true top-down map). At tilt 0 this reduces exactly to
+  // the original straight-down pose. Interactions stay correct while
+  // tilted because pointerWorld raycasts against the maxZ plane rather
+  // than assuming a vertical view ray.
+  const dist = Math.max(halfW, halfH, 10) * 4 + 100;
+  const rad = (tiltDeg * Math.PI) / 180;
   camera.position.set(
     camX,
-    camY,
-    landscapeMaxZ + Math.max(halfW, halfH, 10) * 4 + 100,
+    camY - Math.sin(rad) * dist,
+    landscapeMaxZ + Math.cos(rad) * dist,
   );
-  camera.up.set(0, 1, 0);
+  camera.up.set(0, Math.cos(rad), Math.sin(rad));
   camera.lookAt(camX, camY, landscapeMaxZ);
   camera.updateProjectionMatrix();
   requestRender();
+};
+
+// ---- tilt peek (right-drag pitches the view; snaps back on release) ----
+const TILT_MAX_DEG = 60;
+let tiltDeg = 0;
+let tiltAnimation: number | null = null;
+
+const cancelTiltSnapBack = () => {
+  if (tiltAnimation !== null) {
+    cancelAnimationFrame(tiltAnimation);
+    tiltAnimation = null;
+  }
+};
+
+const snapTiltBack = () => {
+  cancelTiltSnapBack();
+  const from = tiltDeg;
+  if (from <= 0.01) {
+    tiltDeg = 0;
+    applyCamera();
+    return;
+  }
+  const started = performance.now();
+  const durationMs = 260;
+  const step = (now: number) => {
+    const t = Math.min(1, (now - started) / durationMs);
+    const eased = 1 - (1 - t) ** 3; // ease-out cubic
+    tiltDeg = from * (1 - eased);
+    applyCamera();
+    tiltAnimation = t < 1 ? requestAnimationFrame(step) : null;
+  };
+  tiltAnimation = requestAnimationFrame(step);
 };
 
 const frameToLandscape = (
@@ -493,6 +533,7 @@ const hitTestPlacement = (world: THREE.Vector2): number | null => {
 
 let dragButton: number | null = null;
 let isPanning = false;
+let isTilting = false;
 let dragIndex: number | null = null;
 let dragOffset = new THREE.Vector2();
 let lastX = 0;
@@ -505,8 +546,16 @@ const onPointerDown = (e: PointerEvent) => {
   lastY = e.clientY;
   (e.target as HTMLElement).setPointerCapture(e.pointerId);
 
-  if (e.button === 1 || e.button === 2) {
+  if (e.button === 1) {
     isPanning = true;
+    dragIndex = null;
+    return;
+  }
+  if (e.button === 2) {
+    // Right-drag = tilt peek (mirrors StlViewport's right-drag-orbits
+    // convention); it snaps back on release in onPointerUp.
+    cancelTiltSnapBack();
+    isTilting = true;
     dragIndex = null;
     return;
   }
@@ -538,6 +587,12 @@ const onPointerMove = (e: PointerEvent) => {
   lastX = e.clientX;
   lastY = e.clientY;
 
+  if (isTilting) {
+    tiltDeg = Math.min(TILT_MAX_DEG, Math.max(0, tiltDeg + dy * 0.4));
+    applyCamera();
+    return;
+  }
+
   if (isPanning) {
     if (!camera || !container.value) return;
     const { clientWidth, clientHeight } = container.value;
@@ -565,6 +620,10 @@ const onPointerUp = (e: PointerEvent) => {
   dragButton = null;
   isPanning = false;
   dragIndex = null;
+  if (isTilting) {
+    isTilting = false;
+    snapTiltBack();
+  }
   (e.target as HTMLElement).releasePointerCapture(e.pointerId);
 };
 
@@ -607,6 +666,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   loadToken++;
+  cancelTiltSnapBack();
   stlDecode.dispose();
   resizeObserver?.disconnect();
   disposeLandscape();
@@ -654,7 +714,7 @@ onBeforeUnmount(() => {
       class="absolute bottom-2 left-2 text-xs text-base-content/40 pointer-events-none"
     >
       drag: move selected · click: select · [ / ]: rotate (shift: 15°) · delete:
-      remove · middle/right-drag: pan · wheel: zoom
+      remove · middle-drag: pan · right-drag: tilt peek · wheel: zoom
     </div>
   </div>
 </template>
