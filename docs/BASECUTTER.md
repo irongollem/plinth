@@ -78,12 +78,15 @@ behave.
 
 Consequences, all deliberate:
 
-- **The cut footprint is the top face, not the nominal.** The script
-  derives it: `cut = nominal − 2 × inset`, where
-  `inset = height × tan(taper)`. A 25 mm square cutter therefore cuts a
-  plug slightly under 25 mm. One function owns this derivation
-  (`top_face_of(nominal, plinth)`) so the script, the viewport overlay,
-  and a future render-tool consumer can never disagree.
+- **The cut footprint is the top face, not the nominal.**
+  `cut = nominal − 2 × inset`, where `inset = height × tan(taper)` — a
+  25 mm square cutter therefore cuts a plug slightly under 25 mm. **Rust
+  owns this derivation at runtime**: `cutters::top_face_of` computes it,
+  `job.rs` injects it per placement into the job JSON as `"cut"`, and
+  the script consumes it verbatim, never re-deriving. The viewport's
+  dashed preview uses a TS mirror (`utils/cutFootprint.ts`) pinned to
+  the same constants as the Rust tests, so drift fails a test instead
+  of shipping.
 - The plug wall meets the plinth's top rim exactly: clean
   vertical-to-taper seam, no ledge.
 - Walls lean inward going up — no FDM overhang.
@@ -148,10 +151,14 @@ Progress protocol clones batch render: `TOKEN {json}` lines on stdout
 (see the pinned interfaces below), parsed by the Rust side into events; a stdout tail ring buffer for post-mortems, child
 spawned with `kill_on_drop`, cancel by job id.
 
-An up-front **validation pass** in the same run gates the whole job:
-manifold (or voxel-remeshable), roughly flat bottom, minimum thickness,
-sane scale (mm, Z-up). The validation rules double as the published
-"cuttable landscape" spec for designers (→ CREATORS.md, phase 5).
+An up-front **validation pass** in the same run gates the whole job,
+deliberately lenient: it fails only on catastrophic breakage — zero
+faces, a degenerate bounding box (any dimension < 0.1 mm), or
+non-manifold edges above 2% of the total — via `VALIDATION_FAILED`,
+which kills the run before any boolean work. Mild non-manifold passes
+with a `warning` in the `VALIDATED` report (the exact solver usually
+copes). The validation rules double as the published "cuttable
+landscape" spec for designers (→ CREATORS.md, phase 5).
 
 ## Backend plan
 
@@ -285,6 +292,7 @@ Implementation must not improvise these; change them here first.
 ```text
 // commands (specta; bindings regenerate via `cargo test`)
 get_cutter_library() -> Vec<Cutter>
+get_plinth_defaults() -> PlinthParams              // the measured profile IS the runtime default
 start_base_cut(job: BaseCutJob) -> Result<String /* job_id */>
 cancel_base_cut(job_id: String) -> Result<()>
 
@@ -302,11 +310,17 @@ Placement  = { cutter: CutterKind, x_mm, y_mm, rotation_deg,
 // settings gains: magnet_inventory: Vec<MagnetSpec> (seeded with common sizes)
 BaseCutJob = { landscape_path, placements: Vec<Placement>,
                plinth: PlinthParams, out_dir }
+// On the wire, job.rs injects per placement: "cut": CutterKind — the
+// top_face_of result. The script consumes it and never re-derives.
+
+// events: BaseCutStatus = Started | Validating | Validated | CutStarted
+//   | CutDone | CutFailed | Finished | Failed | Cancelled — a user cancel
+//   is Cancelled, never Failed.
 
 // script stdout protocol (one `TOKEN {json}` per line, parsed by job.rs —
 // same shape as render_mini.py's BATCH_* tokens; base_cut.py is the
 // source of truth for the payloads)
-VALIDATING | VALIDATED {…} | VALIDATION_FAILED {…}
+VALIDATING | VALIDATED {…} | VALIDATION_FAILED {…}   // FAILED kills the job pre-cutting
 CUT_START {"index":i} | CUT_DONE {"index":i,"out":…,"dims_mm":[…],"manifold":…}
 CUT_FAILED {"index":i,"reason":…} | JOB_DONE {"total":N,"ok":n}
 ```
