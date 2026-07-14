@@ -978,6 +978,13 @@ mod tests {
                 manifold: true,
             })
         );
+        // The script also reports the EFFECTIVE grid step (it may coarsen a
+        // too-fine request to fit the vertex budget); the parser must accept
+        // the extra field even though nothing consumes it yet.
+        assert!(parse_landscape_token(
+            r#"GENERATED {"out": "/l.stl", "dims_mm": [120.0, 80.0, 8.0], "verts": 100, "manifold": true, "resolution_mm": 0.245}"#
+        )
+        .is_some());
         assert_eq!(
             parse_landscape_token(r#"GENERATION_FAILED {"reason": "bad params"}"#),
             Some(LandscapeToken::GenerationFailed {

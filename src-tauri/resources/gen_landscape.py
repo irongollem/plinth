@@ -13,7 +13,9 @@
 #   "out": "/path/to/landscape.stl",
 #   "seed": 12345,
 #   "width_mm": 120.0, "depth_mm": 80.0,
-#   "resolution_mm": 0.75,      # grid step; floored to 0.4 (see MIN_RESOLUTION_MM)
+#   "resolution_mm": 0.75,      # grid step; floor 0.1 (resin-grade), and
+#                                # coarsened to fit MAX_GRID_VERTS on big
+#                                # plates — GENERATED reports the effective value
 #   "carrier_mm": 2.0,          # flat plate thickness under the sculpted relief
 #   "relief_mm": 6.0,           # sculpted height ABOVE the carrier (max - min)
 #   "layers": {
@@ -47,7 +49,8 @@
 #
 # stdout protocol (parsed by basecutter::generator):
 #   GENERATING {"seed":...}
-#   GENERATED {"out":..., "dims_mm":[x,y,z], "verts":N, "manifold":bool}
+#   GENERATED {"out":..., "dims_mm":[x,y,z], "verts":N, "manifold":bool,
+#              "resolution_mm":effective}
 #   GENERATION_FAILED {"reason":...}
 # Exit code: 0 on success; a caught generation error prints GENERATION_FAILED
 # then sys.exit(1); an uncaught exception (bad params JSON, missing "out",
@@ -64,12 +67,21 @@ import bmesh
 import bpy
 from mathutils import Vector, noise
 
-# Floor on the grid step (docs/BASECUTTER.md phase 6): below this the vertex
-# count explodes on a normal-sized plate for no visible print-quality gain —
-# FDM/resin layer lines are coarser than a 0.4mm grid.
-MIN_RESOLUTION_MM = 0.4
+# Floor on the grid step. 0.1mm is resin territory (resin XY resolution
+# ~0.05mm; FDM stops seeing lateral detail around a 0.4mm line width) —
+# the floor exists only to keep a typo like 0.01 from freezing the bake.
+# The REAL guard is MAX_GRID_VERTS below: cost is quadratic in the step,
+# so a fine step on a big plate is capped by area, not by a fixed number.
+MIN_RESOLUTION_MM = 0.1
 DEFAULT_RESOLUTION_MM = 0.75
 DEFAULT_CARRIER_MM = 2.0
+
+# Vertex budget for the displaced grid. ~2M verts bakes in tens of seconds
+# (pure-Python per-vertex layer evaluation is the bottleneck, not Blender)
+# and stays comfortable for the viewport and the boolean cutter. When the
+# requested step would exceed this on the requested plate, the step is
+# coarsened to fit and the GENERATED payload reports the effective value.
+MAX_GRID_VERTS = 2_000_000
 
 # Merge-by-distance / degenerate-face thresholds — same values as
 # base_cut.py's cleanup_and_check for the same reason (booleans aren't even
@@ -435,7 +447,15 @@ def cleanup_and_check(obj):
 def generate(params):
     width_mm = float(params["width_mm"])
     depth_mm = float(params["depth_mm"])
-    resolution_mm = max(MIN_RESOLUTION_MM, float(params.get("resolution_mm", DEFAULT_RESOLUTION_MM)))
+    requested_mm = max(
+        MIN_RESOLUTION_MM, float(params.get("resolution_mm", DEFAULT_RESOLUTION_MM))
+    )
+    # The guard is a vertex BUDGET, not the step itself: a 0.1mm step is
+    # legitimate resin detail on a small plate and a memory bomb on a huge
+    # one. verts ~= (w/res)*(d/res), so the finest step that fits the
+    # budget scales with sqrt(area).
+    fits_budget_mm = math.sqrt((width_mm * depth_mm) / MAX_GRID_VERTS)
+    resolution_mm = max(requested_mm, fits_budget_mm)
     carrier_mm = float(params.get("carrier_mm", DEFAULT_CARRIER_MM))
     relief_mm = float(params.get("relief_mm", 6.0))
     seed = int(params.get("seed", 0))
@@ -481,7 +501,7 @@ def generate(params):
     bpy.context.view_layer.objects.active = obj
     bpy.ops.wm.stl_export(filepath=out, export_selected_objects=True)
 
-    return out, dims, vert_count, manifold
+    return out, dims, vert_count, manifold, resolution_mm
 
 
 def main():
@@ -493,13 +513,24 @@ def main():
     seed = int(params.get("seed", 0))
     tok("GENERATING", {"seed": seed})
     try:
-        out, dims, verts, manifold = generate(params)
+        out, dims, verts, manifold, effective_res = generate(params)
     except Exception as e:  # noqa: BLE001 — reported as a token, not a crash
         traceback.print_exc()
         tok("GENERATION_FAILED", {"reason": str(e)})
         sys.exit(1)
 
-    tok("GENERATED", {"out": out, "dims_mm": dims, "verts": verts, "manifold": manifold})
+    # resolution_mm is the EFFECTIVE grid step — it differs from the request
+    # when the vertex budget coarsened it (see MAX_GRID_VERTS).
+    tok(
+        "GENERATED",
+        {
+            "out": out,
+            "dims_mm": dims,
+            "verts": verts,
+            "manifold": manifold,
+            "resolution_mm": round(effective_res, 3),
+        },
+    )
 
 
 main()

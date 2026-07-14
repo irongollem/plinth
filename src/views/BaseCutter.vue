@@ -47,8 +47,16 @@ const { blenderInfo, verdict, renderBlocked, managedVersion, openDialog } =
   useBlenderProvision();
 
 const landscapePath = ref("");
+/** Bumped whenever the landscape must reload even at an unchanged path —
+ * a regenerated bake overwrites its own file. */
+const landscapeReloadToken = ref(0);
 const landscapeBounds = ref<{ centerX: number; centerY: number } | null>(null);
-const outDir = ref("");
+
+/** Where cut STLs land — remembered across sessions (localStorage, like the
+ * theme: it only feeds the job payload, no backend round-trip needed). */
+const OUT_DIR_STORAGE_KEY = "plinth-basecutter-out-dir";
+const outDir = ref(localStorage.getItem(OUT_DIR_STORAGE_KEY) ?? "");
+watch(outDir, (dir) => localStorage.setItem(OUT_DIR_STORAGE_KEY, dir));
 
 const cutterLibrary = ref<Cutter[]>([]);
 
@@ -115,8 +123,8 @@ const genParams = reactive<GenParams>({
     },
     stones: {
       enabled: false,
-      cell_mm: 12.0,
-      gap_mm: 1.2,
+      cell_mm: 4.0,
+      gap_mm: 0.5,
       dome: 0.6,
       jitter: 0.15,
       amount: 1.0,
@@ -300,8 +308,13 @@ const onViewportError = (message: string) => {
  * generated one (below). Existing placements' coordinates belong to the
  * PREVIOUS landscape, so they're cleared rather than silently reinterpreted
  * against the new one. */
-const setLandscapePath = (newPath: string) => {
-  if (newPath === landscapePath.value) return; // re-picking the same file
+const setLandscapePath = (newPath: string, options?: { force?: boolean }) => {
+  // Re-picking the same FILE is a no-op — but a fresh bake OVERWRITES its
+  // file (preset+seed = stable filename), so generation passes force: the
+  // path may be identical while the terrain underneath is brand new. That
+  // was the "I generated 200x200 and still saw 120x80" bug: the viewport
+  // only reloads when something it watches changes.
+  if (newPath === landscapePath.value && !options?.force) return;
   if (placements.value.length) {
     placements.value = [];
     toastStore.addToast(
@@ -311,6 +324,7 @@ const setLandscapePath = (newPath: string) => {
   }
   selectedIndex.value = null;
   landscapePath.value = newPath;
+  landscapeReloadToken.value++;
 };
 
 const chooseLandscape = async () => {
@@ -386,7 +400,7 @@ const cancelGenerate = () => landscapeGen.cancel();
 // swap path the file picker uses, so stale placements get cleared too.
 watch(landscapeGen.finished, (finished) => {
   if (!finished) return;
-  setLandscapePath(finished.out_path);
+  setLandscapePath(finished.out_path, { force: true });
   const [w, d, h] = finished.dims_mm;
   toastStore.addToast(
     `Generated landscape (${w}×${d}×${h}mm)${finished.manifold ? "" : " — non-manifold"}`,
@@ -514,11 +528,14 @@ const resultName = (index: number) =>
               :min="10"
               v-model="genParams.depth_mm"
             />
+            <!-- 0.1mm is resin-grade; the script coarsens automatically if
+                 the step would blow the vertex budget on a big plate and
+                 reports the effective value back. -->
             <NumberInput
               id="gen-resolution"
-              label="Resolution (mm, floor 0.4)"
+              label="Resolution (mm, finest 0.1)"
               :step="0.05"
-              :min="0.4"
+              :min="0.1"
               v-model="genParams.resolution_mm"
             />
             <NumberInput
@@ -539,7 +556,7 @@ const resultName = (index: number) =>
             <div
               class="flex flex-col gap-2 border-t border-base-content/10 pt-2"
             >
-              <template>
+              <div class="flex flex-col gap-1">
                 <Switch
                   v-model="genParams.layers.noise.enabled"
                   label="Noise"
@@ -572,9 +589,9 @@ const resultName = (index: number) =>
                     v-model="genParams.layers.noise.amount"
                   />
                 </template>
-              </template>
+              </div>
 
-              <template>
+              <div class="flex flex-col gap-1">
                 <Switch
                   v-model="genParams.layers.ripples.enabled"
                   label="Ripples"
@@ -608,9 +625,9 @@ const resultName = (index: number) =>
                     v-model="genParams.layers.ripples.amount"
                   />
                 </template>
-              </template>
+              </div>
 
-              <template>
+              <div class="flex flex-col gap-1">
                 <Switch
                   v-model="genParams.layers.stones.enabled"
                   label="Stones"
@@ -653,9 +670,9 @@ const resultName = (index: number) =>
                     v-model="genParams.layers.stones.amount"
                   />
                 </template>
-              </template>
+              </div>
 
-              <template>
+              <div class="flex flex-col gap-1">
                 <Switch
                   v-model="genParams.layers.boulders.enabled"
                   label="Boulders"
@@ -690,9 +707,9 @@ const resultName = (index: number) =>
                     v-model="genParams.layers.boulders.amount"
                   />
                 </template>
-              </template>
+              </div>
 
-              <template>
+              <div class="flex flex-col gap-1">
                 <Switch v-model="genParams.layers.flow.enabled" label="Flow" />
                 <template v-if="genParams.layers.flow.enabled">
                   <NumberInput
@@ -724,9 +741,9 @@ const resultName = (index: number) =>
                     v-model="genParams.layers.flow.amount"
                   />
                 </template>
-              </template>
+              </div>
 
-              <template>
+              <div class="flex flex-col gap-1">
                 <Switch
                   v-model="genParams.layers.camber.enabled"
                   label="Camber"
@@ -739,7 +756,7 @@ const resultName = (index: number) =>
                   :min="0"
                   v-model="genParams.layers.camber.amount"
                 />
-              </template>
+              </div>
             </div>
           </div>
         </details>
@@ -1121,6 +1138,7 @@ const resultName = (index: number) =>
     <aside class="flex-1 min-w-0 relative">
       <LandscapeViewport
         :landscape-path="landscapePath"
+        :reload-token="landscapeReloadToken"
         :placements="placements"
         :plinth="plinth"
         :selected-index="selectedIndex"

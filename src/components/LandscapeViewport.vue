@@ -30,6 +30,10 @@ import { insetShrink, shrinkKind } from "../utils/cutFootprint";
 
 const props = defineProps<{
   landscapePath: string;
+  /** Bump to force a reload at an unchanged path — a regenerated bake
+   * overwrites its own file (preset + seed = stable filename), so the
+   * path alone can't signal "new terrain". */
+  reloadToken?: number;
   placements: Placement[];
   plinth: PlinthParams;
   selectedIndex: number | null;
@@ -289,7 +293,7 @@ const loadLandscape = async () => {
   }
 };
 
-watch(() => props.landscapePath, loadLandscape);
+watch(() => [props.landscapePath, props.reloadToken], loadLandscape);
 
 /** Local-space (unrotated, uncentered) polygon points for a cutter kind. */
 const footprintPoints = (kind: CutterKind): [number, number][] => {
