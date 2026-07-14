@@ -826,6 +826,31 @@ async cancelBaseCut(jobId: string) : Promise<Result<null, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async getLandscapePresets() : Promise<GeneratorPreset[]> {
+    return await TAURI_INVOKE("get_landscape_presets");
+},
+/**
+ * `preset_id` is the preset chip's id ("cobblestone-street", ...) when
+ * starting from a chip, None for a from-scratch custom bake — only used to
+ * name the output file (docs/BASECUTTER.md:
+ * "landscapes/<preset-or-custom>-<seed>.stl").
+ */
+async startLandscapeGeneration(params: LandscapeParams, presetId: string | null) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_landscape_generation", { params, presetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async cancelLandscapeGeneration(jobId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_landscape_generation", { jobId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -838,6 +863,7 @@ batchRenderStatus: BatchRenderStatus,
 blenderProvisionStatus: BlenderProvisionStatus,
 compressionStatus: CompressionStatus,
 duplicateStatus: DuplicateStatus,
+landscapeGenStatus: LandscapeGenStatus,
 minihoardStatus: MinihoardStatus,
 packStatus: PackStatus,
 renderStatus: RenderStatus,
@@ -848,6 +874,7 @@ batchRenderStatus: "batch-render-status",
 blenderProvisionStatus: "blender-provision-status",
 compressionStatus: "compression-status",
 duplicateStatus: "duplicate-status",
+landscapeGenStatus: "landscape-gen-status",
 minihoardStatus: "minihoard-status",
 packStatus: "pack-status",
 renderStatus: "render-status",
@@ -976,6 +1003,17 @@ export type BlenderProvisionStatus = { Started: ProvisionStartedStatus } | { Pro
  * disable rendering; Outdated is a suggestion the user may dismiss.
  */
 export type BlenderVerdict = "Missing" | "TooOld" | "Outdated" | "Ok"
+/**
+ * N seeded gaussian bumps — loose rock/rubble, combined by max (not sum)
+ * so overlapping boulders read as touching domes rather than a stacked
+ * tower (see gen_landscape.py's _boulders_layer docstring).
+ */
+export type BouldersLayer = { enabled?: boolean; count: number; min_mm: number; max_mm: number; amount?: number }
+/**
+ * Parabolic crown across the plate's width — cobblestone streets are
+ * highest at the centerline, sloping to the gutters at the edges.
+ */
+export type CamberLayer = { enabled?: boolean; amount?: number }
 export type CancelledStatus = { job_id: string }
 export type CatalogEntry = { dir_path: string; 
 /**
@@ -1167,6 +1205,24 @@ export type FilePose = { name: string; variant?: string | null; pose?: string | 
  */
 export type FileVariant = { path: string; dir_path: string; variant: string | null; pose: string | null; support_status: string | null }
 /**
+ * Lava/river channels: low-frequency noise, absolute-valued so its
+ * zero-crossings become winding channel centerlines and its peaks become
+ * raised crusted banks.
+ */
+export type FlowLayer = { enabled?: boolean; channel_width_mm: number; meander_scale: number; 
+/**
+ * Sharpens the channel-to-bank transition (a power curve), not an
+ * overall scale — `amount` is still the one knob every layer shares
+ * for that.
+ */
+bank_height: number; amount?: number }
+/**
+ * A named, ready-to-generate parameter set (docs/BASECUTTER.md: "Presets
+ * are parameter sets" — the cutter-library move again, a new terrain
+ * style is a new row here, not a new pipeline).
+ */
+export type GeneratorPreset = { id: string; label: string; params: LandscapeParams }
+/**
  * One (designer, release_name) origin among the models a group rename would
  * touch. group_renames is keyed purely on the scanner-derived group name —
  * no root/designer scoping — so a generic name ("Spear") reused by an
@@ -1193,6 +1249,39 @@ errors: string[];
  * Non-fatal notes, e.g. locally edited files kept aside as "(edited)".
  */
 warnings: string[] }
+export type LandscapeGenCancelledStatus = { job_id: string }
+export type LandscapeGenFailedStatus = { job_id: string; message: string; 
+/**
+ * Last ~10 lines of Blender stdout — a post-mortem when the failure
+ * wasn't a clean GENERATION_FAILED token (e.g. a crash before the
+ * script's own try/except, or an exit with no GENERATED at all).
+ */
+stdout_tail: string }
+export type LandscapeGenFinishedStatus = { job_id: string; out_path: string; dims_mm: [number, number, number]; manifold: boolean }
+export type LandscapeGenStartedStatus = { job_id: string; seed: number }
+/**
+ * Landscape generator job progress — see docs/BASECUTTER.md "The landscape
+ * generator (phase 6)". Deliberately its own stream, not folded into
+ * BaseCutStatus: generation and cutting are different activities (one
+ * bakes a heightfield, one cuts plugs from an existing one) that merely
+ * share the one Blender process slot, so they get separate single-job
+ * guards AND separate event families, same reasoning as BatchRenderStatus
+ * getting its own stream instead of piggybacking on RenderStatus.
+ */
+export type LandscapeGenStatus = { Started: LandscapeGenStartedStatus } | { Finished: LandscapeGenFinishedStatus } | { Failed: LandscapeGenFailedStatus } | { Cancelled: LandscapeGenCancelledStatus }
+/**
+ * All style layers, every one individually optional and summable. Field-
+ * level `#[serde(default)]` (each layer type's own `Default`, which sets
+ * `enabled: false`) means a preset JSON can omit whole layers outright.
+ */
+export type LandscapeLayers = { noise?: NoiseLayer; ripples?: RipplesLayer; stones?: StonesLayer; boulders?: BouldersLayer; flow?: FlowLayer; camber?: CamberLayer }
+/**
+ * The frontend-facing (and preset-carried) parameter set. Deliberately has
+ * no `out` field — `start_landscape_generation` derives the output path
+ * (app data dir) and injects it into the wire JSON the same way
+ * `job::job_json_with_cut_footprints` injects "cut" for base_cut.py.
+ */
+export type LandscapeParams = { seed: number; width_mm: number; depth_mm: number; resolution_mm?: number; carrier_mm?: number; relief_mm: number; layers?: LandscapeLayers }
 /**
  * A magnet as it will be pocketed into a plinth's boss. Drawn from the
  * user's magnet inventory (app settings), never from a hardcoded
@@ -1226,6 +1315,20 @@ export type ModelReference = { id: string; location: ModelLocation }
  * the catalog index to match.
  */
 export type MoveOperation = { from: string; to: string }
+/**
+ * Base terrain: stacked-octave noise, optionally ridged for sharp crests.
+ */
+export type NoiseLayer = { enabled?: boolean; 
+/**
+ * Frequency multiplier — bigger scale = smaller, more numerous
+ * features (matches Blender's own Noise Texture node convention).
+ */
+scale?: number; octaves?: number; 
+/**
+ * abs/1-abs transform per octave for sharp mountain crests instead of
+ * rolling hills.
+ */
+ridged?: boolean; amount?: number }
 /**
  * Everything the normalizer wants to do to ONE model group — shown to the
  * user as a reviewable diff before anything moves.
@@ -1418,6 +1521,12 @@ scale_reference?: boolean }
 export type RenderProgressStatus = { job_id: string; current_sample: number; total_samples: number; percent: number }
 export type RenderStartedStatus = { job_id: string; output_path: string }
 export type RenderStatus = { Started: RenderStartedStatus } | { Progress: RenderProgressStatus } | { Completed: RenderCompletedStatus } | { Failed: RenderFailedStatus } | { Cancelled: RenderCancelledStatus }
+/**
+ * Windswept sand: a directional sine wave, its phase distorted by a slow
+ * noise field when `waviness` > 0 so ripples meander instead of ruling
+ * dead-straight lines.
+ */
+export type RipplesLayer = { enabled?: boolean; wavelength_mm?: number; direction_deg?: number; amount?: number; waviness?: number }
 export type ScanCancelledStatus = { job_id: string }
 export type ScanCompletedStatus = { job_id: string; total_files: number; total_models: number; elapsed_seconds: number }
 export type ScanFailedStatus = { job_id: string; error: string }
@@ -1517,6 +1626,19 @@ base_round_mm?: string | null; base_square_mm?: string | null;
  * into file_variants on scan. Names are file basenames.
  */
 file_poses?: FilePose[] }
+/**
+ * Cobblestones: a hashed, jittered 2D Voronoi — domed stones separated by
+ * a recessed mortar gap.
+ */
+export type StonesLayer = { enabled?: boolean; cell_mm: number; gap_mm: number; 
+/**
+ * 0 = flat-topped setts, 1 = fully rounded cobbles.
+ */
+dome: number; 
+/**
+ * Per-stone height variance (0 = every stone the same height).
+ */
+jitter: number; amount?: number }
 export type TagCount = { tag: string; count: number }
 
 /** tauri-specta globals **/

@@ -9,18 +9,29 @@
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import type {
   BaseCutJob,
+  BouldersLayer,
+  CamberLayer,
   Cutter,
   CutterKind,
+  FlowLayer,
+  GeneratorPreset,
+  LandscapeParams,
   MagnetSpec,
+  NoiseLayer,
   Placement,
   PlinthParams,
+  RipplesLayer,
+  StonesLayer,
 } from "../bindings";
 import { commands } from "../bindings";
 import LandscapeViewport from "../components/LandscapeViewport.vue";
+import NumberInput from "../components/NumberInput.vue";
 import ProgressBar from "../components/ProgressBar.vue";
+import Switch from "../components/Switch.vue";
 import { useBaseCut } from "../composables/useBaseCut";
 import { useBlenderProvision } from "../composables/useBlenderProvision";
 import { selectDirectory, useFileSelect } from "../composables/useFileSelect";
+import { useLandscapeGen } from "../composables/useLandscapeGen";
 import { useReleasesStore } from "../stores/releasesStore";
 import { useToastStore } from "../stores/toastStore";
 
@@ -28,6 +39,7 @@ const toastStore = useToastStore();
 const releasesStore = useReleasesStore();
 const { selectFiles } = useFileSelect();
 const baseCut = useBaseCut();
+const landscapeGen = useLandscapeGen();
 // The cut path hard-requires Blender >= 4.2 (wm.stl_import/export), same as
 // Render.vue's gate — reuse that composable/verdict rather than inventing a
 // second Blender-detection mechanism.
@@ -54,13 +66,104 @@ const plinth = reactive<PlinthParams>({
   magnet_clearance_mm: 0.15,
 });
 
+// Generator state (docs/BASECUTTER.md "The landscape generator (phase 6)").
+// `genParams` is a plain literal, not yet a real preset, until onMounted's
+// commands.getLandscapePresets() resolves and selectPreset() overwrites it —
+// same "avoid a blank form flash" reasoning as `plinth` above.
+//
+// The bindings' LandscapeParams/*Layer types mark every layer field
+// optional (specta reflecting Rust's #[serde(default)], which is about
+// lenient DEserialization) even though Rust always SERIALIZES every field —
+// a preset from get_landscape_presets() or a hand-built literal here is
+// therefore always fully populated at runtime. GenParams asserts that in
+// the type system too, so the template's v-model bindings (Switch requires
+// a definite `boolean`, not `boolean | undefined`) don't need per-field
+// `?? false` scattered everywhere.
+type GenLayers = {
+  noise: Required<NoiseLayer>;
+  ripples: Required<RipplesLayer>;
+  stones: Required<StonesLayer>;
+  boulders: Required<BouldersLayer>;
+  flow: Required<FlowLayer>;
+  camber: Required<CamberLayer>;
+};
+type GenParams = Omit<LandscapeParams, "layers"> & { layers: GenLayers };
+
+const landscapePresets = ref<GeneratorPreset[]>([]);
+const selectedPresetId = ref<string | null>(null);
+const genParams = reactive<GenParams>({
+  seed: 1,
+  width_mm: 120,
+  depth_mm: 80,
+  resolution_mm: 0.75,
+  carrier_mm: 2.0,
+  relief_mm: 6.0,
+  layers: {
+    noise: {
+      enabled: false,
+      scale: 0.05,
+      octaves: 4,
+      ridged: false,
+      amount: 1.0,
+    },
+    ripples: {
+      enabled: false,
+      wavelength_mm: 8.0,
+      direction_deg: 0.0,
+      amount: 1.0,
+      waviness: 0.3,
+    },
+    stones: {
+      enabled: false,
+      cell_mm: 12.0,
+      gap_mm: 1.2,
+      dome: 0.6,
+      jitter: 0.15,
+      amount: 1.0,
+    },
+    boulders: {
+      enabled: false,
+      count: 6,
+      min_mm: 8.0,
+      max_mm: 20.0,
+      amount: 1.0,
+    },
+    flow: {
+      enabled: false,
+      channel_width_mm: 10.0,
+      meander_scale: 0.3,
+      bank_height: 1.0,
+      amount: 1.0,
+    },
+    camber: { enabled: false, amount: 1.0 },
+  },
+});
+
+/** Load a preset's params into the editable `genParams` (a deep copy — the
+ * preset table itself must never be mutated by editing). See GenParams'
+ * comment for why the cast is safe: the wire payload is always fully
+ * populated even though the generated type marks layer fields optional. */
+const selectPreset = (preset: GeneratorPreset) => {
+  selectedPresetId.value = preset.id;
+  Object.assign(genParams, structuredClone(preset.params) as GenParams);
+};
+
+/** Reroll to a fresh random seed, keeping the rest of the params (preset or
+ * hand-tweaked) as they are — a new roll of the same style, not a reset. */
+const rerollSeed = () => {
+  genParams.seed = Math.floor(Math.random() * 0xffffffff);
+};
+
 onMounted(async () => {
-  const [library, plinthDefaults] = await Promise.all([
+  const [library, plinthDefaults, presets] = await Promise.all([
     commands.getCutterLibrary(),
     commands.getPlinthDefaults(),
+    commands.getLandscapePresets(),
   ]);
   cutterLibrary.value = library;
   Object.assign(plinth, plinthDefaults);
+  landscapePresets.value = presets;
+  if (presets.length) selectPreset(presets[0]);
 });
 
 const rounds = computed(() =>
@@ -123,7 +226,12 @@ const nextName = (cutterId: string): string => {
 // Placement mutation is locked out while a job is running: the job already
 // took a snapshot (jobPlacementNames below) and mid-job add/delete would
 // desync indices between the live array and the in-flight cut list.
-const locked = computed(() => baseCut.isRunning.value);
+// Placement mutation is also locked while a landscape bake is in flight —
+// the bake may swap `landscapePath` out from under any in-progress edits
+// (see setLandscapePath's clear-on-swap logic).
+const locked = computed(
+  () => baseCut.isRunning.value || landscapeGen.isRunning.value,
+);
 
 const addPlacement = (cutter: Cutter) => {
   if (locked.value) return;
@@ -188,14 +296,11 @@ const onViewportError = (message: string) => {
   toastStore.addToast(message, "error", 0);
 };
 
-const chooseLandscape = async () => {
-  const files = await selectFiles({
-    accept: ".stl",
-    multiple: false,
-    title: "Choose landscape STL",
-  });
-  if (!files?.length) return;
-  const newPath = files[0].path;
+/** Swap in a different landscape STL — from the file picker OR a freshly
+ * generated one (below). Existing placements' coordinates belong to the
+ * PREVIOUS landscape, so they're cleared rather than silently reinterpreted
+ * against the new one. */
+const setLandscapePath = (newPath: string) => {
   if (newPath === landscapePath.value) return; // re-picking the same file
   if (placements.value.length) {
     placements.value = [];
@@ -208,6 +313,16 @@ const chooseLandscape = async () => {
   landscapePath.value = newPath;
 };
 
+const chooseLandscape = async () => {
+  const files = await selectFiles({
+    accept: ".stl",
+    multiple: false,
+    title: "Choose landscape STL",
+  });
+  if (!files?.length) return;
+  setLandscapePath(files[0].path);
+};
+
 const chooseOutDir = async () => {
   const dir = await selectDirectory({ title: "Choose output folder" });
   if (dir) outDir.value = dir;
@@ -218,7 +333,8 @@ const canCut = computed(
     !!landscapePath.value &&
     placements.value.length > 0 &&
     !!outDir.value &&
-    !baseCut.isRunning.value,
+    !baseCut.isRunning.value &&
+    !landscapeGen.isRunning.value, // generation and cutting share Blender — never both at once
 );
 
 // Names as they were when the job was submitted — progress/result labels
@@ -243,6 +359,48 @@ const startCut = async () => {
 };
 
 const cancelCut = () => baseCut.cancel();
+
+const canGenerate = computed(
+  () =>
+    genParams.width_mm > 0 &&
+    genParams.depth_mm > 0 &&
+    genParams.relief_mm >= 0 &&
+    !baseCut.isRunning.value && // generation and cutting share Blender — never both at once
+    !landscapeGen.isRunning.value,
+);
+
+const startGenerate = async () => {
+  if (!canGenerate.value) return;
+  const result = await landscapeGen.start(genParams, selectedPresetId.value);
+  if (result.status === "error") {
+    toastStore.reportError(
+      "Failed to start landscape generation",
+      result.error,
+    );
+  }
+};
+
+const cancelGenerate = () => landscapeGen.cancel();
+
+// On a finished bake, auto-load the fresh STL into the viewport — the same
+// swap path the file picker uses, so stale placements get cleared too.
+watch(landscapeGen.finished, (finished) => {
+  if (!finished) return;
+  setLandscapePath(finished.out_path);
+  const [w, d, h] = finished.dims_mm;
+  toastStore.addToast(
+    `Generated landscape (${w}×${d}×${h}mm)${finished.manifold ? "" : " — non-manifold"}`,
+    finished.manifold ? "success" : "warning",
+  );
+});
+watch(landscapeGen.failedMessage, (message) => {
+  if (!message) return;
+  toastStore.addToast(`Landscape generation failed: ${message}`, "error", 0);
+});
+watch(landscapeGen.cancelled, (isCancelled) => {
+  if (!isCancelled) return;
+  toastStore.addToast("Landscape generation cancelled", "info");
+});
 
 // Surface terminal states as toasts — the results list already shows the
 // per-cut detail, this is just the headline. Watching the composable's own
@@ -291,6 +449,332 @@ const resultName = (index: number) =>
     >
       <div class="flex items-baseline justify-between">
         <span class="font-bold text-[17px]">Base Cutter</span>
+      </div>
+
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          >GENERATE LANDSCAPE</span
+        >
+        <div class="flex flex-wrap gap-1">
+          <button
+            v-for="preset in landscapePresets"
+            :key="preset.id"
+            type="button"
+            class="btn btn-xs"
+            :class="preset.id === selectedPresetId ? 'btn-primary' : ''"
+            :disabled="landscapeGen.isRunning.value"
+            @click="selectPreset(preset)"
+          >
+            {{ preset.label }}
+          </button>
+        </div>
+        <div class="flex items-center gap-1.5">
+          <span class="text-[11px] text-base-content/50 shrink-0">Seed</span>
+          <input
+            type="number"
+            class="input input-xs flex-1 font-mono"
+            :disabled="landscapeGen.isRunning.value"
+            v-model.number="genParams.seed"
+          />
+          <button
+            type="button"
+            class="btn btn-xs"
+            title="Reroll seed"
+            :disabled="landscapeGen.isRunning.value"
+            @click="rerollSeed"
+          >
+            🎲
+          </button>
+        </div>
+
+        <details
+          class="collapse collapse-arrow border border-base-content/10 bg-base-200/20 rounded-box"
+        >
+          <summary
+            class="collapse-title min-h-0 py-2.5 px-3 flex items-center gap-2 cursor-pointer"
+          >
+            <span
+              class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+              >ADVANCED — TERRAIN LAYERS</span
+            >
+          </summary>
+          <div class="collapse-content flex flex-col gap-2.5 px-3">
+            <NumberInput
+              id="gen-width"
+              label="Width (mm)"
+              :step="1"
+              :min="10"
+              v-model="genParams.width_mm"
+            />
+            <NumberInput
+              id="gen-depth"
+              label="Depth (mm)"
+              :step="1"
+              :min="10"
+              v-model="genParams.depth_mm"
+            />
+            <NumberInput
+              id="gen-resolution"
+              label="Resolution (mm, floor 0.4)"
+              :step="0.05"
+              :min="0.4"
+              v-model="genParams.resolution_mm"
+            />
+            <NumberInput
+              id="gen-carrier"
+              label="Carrier (mm)"
+              :step="0.1"
+              :min="0"
+              v-model="genParams.carrier_mm"
+            />
+            <NumberInput
+              id="gen-relief"
+              label="Relief (mm)"
+              :step="0.1"
+              :min="0"
+              v-model="genParams.relief_mm"
+            />
+
+            <div
+              class="flex flex-col gap-2 border-t border-base-content/10 pt-2"
+            >
+              <template>
+                <Switch
+                  v-model="genParams.layers.noise.enabled"
+                  label="Noise"
+                />
+                <template v-if="genParams.layers.noise.enabled">
+                  <NumberInput
+                    id="gen-noise-scale"
+                    label="Scale"
+                    :step="0.01"
+                    :min="0"
+                    v-model="genParams.layers.noise.scale"
+                  />
+                  <NumberInput
+                    id="gen-noise-octaves"
+                    label="Octaves"
+                    :step="1"
+                    :min="1"
+                    :max="8"
+                    v-model="genParams.layers.noise.octaves"
+                  />
+                  <Switch
+                    v-model="genParams.layers.noise.ridged"
+                    label="Ridged (sharp crests)"
+                  />
+                  <NumberInput
+                    id="gen-noise-amount"
+                    label="Amount"
+                    :step="0.05"
+                    :min="0"
+                    v-model="genParams.layers.noise.amount"
+                  />
+                </template>
+              </template>
+
+              <template>
+                <Switch
+                  v-model="genParams.layers.ripples.enabled"
+                  label="Ripples"
+                />
+                <template v-if="genParams.layers.ripples.enabled">
+                  <NumberInput
+                    id="gen-ripples-wavelength"
+                    label="Wavelength (mm)"
+                    :step="0.5"
+                    :min="0.1"
+                    v-model="genParams.layers.ripples.wavelength_mm"
+                  />
+                  <NumberInput
+                    id="gen-ripples-direction"
+                    label="Direction (deg)"
+                    :step="5"
+                    v-model="genParams.layers.ripples.direction_deg"
+                  />
+                  <NumberInput
+                    id="gen-ripples-waviness"
+                    label="Waviness"
+                    :step="0.05"
+                    :min="0"
+                    v-model="genParams.layers.ripples.waviness"
+                  />
+                  <NumberInput
+                    id="gen-ripples-amount"
+                    label="Amount"
+                    :step="0.05"
+                    :min="0"
+                    v-model="genParams.layers.ripples.amount"
+                  />
+                </template>
+              </template>
+
+              <template>
+                <Switch
+                  v-model="genParams.layers.stones.enabled"
+                  label="Stones"
+                />
+                <template v-if="genParams.layers.stones.enabled">
+                  <NumberInput
+                    id="gen-stones-cell"
+                    label="Cell size (mm)"
+                    :step="0.5"
+                    :min="1"
+                    v-model="genParams.layers.stones.cell_mm"
+                  />
+                  <NumberInput
+                    id="gen-stones-gap"
+                    label="Gap / mortar (mm)"
+                    :step="0.1"
+                    :min="0"
+                    v-model="genParams.layers.stones.gap_mm"
+                  />
+                  <NumberInput
+                    id="gen-stones-dome"
+                    label="Dome (0-1)"
+                    :step="0.05"
+                    :min="0"
+                    :max="1"
+                    v-model="genParams.layers.stones.dome"
+                  />
+                  <NumberInput
+                    id="gen-stones-jitter"
+                    label="Height jitter"
+                    :step="0.05"
+                    :min="0"
+                    v-model="genParams.layers.stones.jitter"
+                  />
+                  <NumberInput
+                    id="gen-stones-amount"
+                    label="Amount"
+                    :step="0.05"
+                    :min="0"
+                    v-model="genParams.layers.stones.amount"
+                  />
+                </template>
+              </template>
+
+              <template>
+                <Switch
+                  v-model="genParams.layers.boulders.enabled"
+                  label="Boulders"
+                />
+                <template v-if="genParams.layers.boulders.enabled">
+                  <NumberInput
+                    id="gen-boulders-count"
+                    label="Count"
+                    :step="1"
+                    :min="0"
+                    v-model="genParams.layers.boulders.count"
+                  />
+                  <NumberInput
+                    id="gen-boulders-min"
+                    label="Min diameter (mm)"
+                    :step="1"
+                    :min="1"
+                    v-model="genParams.layers.boulders.min_mm"
+                  />
+                  <NumberInput
+                    id="gen-boulders-max"
+                    label="Max diameter (mm)"
+                    :step="1"
+                    :min="1"
+                    v-model="genParams.layers.boulders.max_mm"
+                  />
+                  <NumberInput
+                    id="gen-boulders-amount"
+                    label="Amount"
+                    :step="0.05"
+                    :min="0"
+                    v-model="genParams.layers.boulders.amount"
+                  />
+                </template>
+              </template>
+
+              <template>
+                <Switch v-model="genParams.layers.flow.enabled" label="Flow" />
+                <template v-if="genParams.layers.flow.enabled">
+                  <NumberInput
+                    id="gen-flow-width"
+                    label="Channel width (mm)"
+                    :step="0.5"
+                    :min="0.5"
+                    v-model="genParams.layers.flow.channel_width_mm"
+                  />
+                  <NumberInput
+                    id="gen-flow-meander"
+                    label="Meander scale"
+                    :step="0.05"
+                    :min="0.01"
+                    v-model="genParams.layers.flow.meander_scale"
+                  />
+                  <NumberInput
+                    id="gen-flow-bank"
+                    label="Bank height"
+                    :step="0.1"
+                    :min="0.05"
+                    v-model="genParams.layers.flow.bank_height"
+                  />
+                  <NumberInput
+                    id="gen-flow-amount"
+                    label="Amount"
+                    :step="0.05"
+                    :min="0"
+                    v-model="genParams.layers.flow.amount"
+                  />
+                </template>
+              </template>
+
+              <template>
+                <Switch
+                  v-model="genParams.layers.camber.enabled"
+                  label="Camber"
+                />
+                <NumberInput
+                  v-if="genParams.layers.camber.enabled"
+                  id="gen-camber-amount"
+                  label="Amount"
+                  :step="0.05"
+                  :min="0"
+                  v-model="genParams.layers.camber.amount"
+                />
+              </template>
+            </div>
+          </div>
+        </details>
+
+        <div class="flex items-center gap-3">
+          <button
+            class="btn btn-secondary btn-sm grow"
+            :disabled="!canGenerate"
+            @click="startGenerate"
+          >
+            <template v-if="landscapeGen.isRunning.value">
+              <span class="loading loading-spinner loading-xs"></span>
+              <span>Generating…</span>
+            </template>
+            <span v-else>Generate landscape</span>
+          </button>
+          <button
+            v-if="landscapeGen.isRunning.value"
+            class="btn btn-error btn-sm"
+            @click="cancelGenerate"
+          >
+            Cancel
+          </button>
+        </div>
+        <div
+          v-if="landscapeGen.failedMessage.value"
+          class="alert alert-error text-xs whitespace-pre-wrap flex-col items-start"
+        >
+          <span>{{ landscapeGen.failedMessage.value }}</span>
+          <pre
+            v-if="landscapeGen.failedStdoutTail.value"
+            class="font-mono text-[10px] opacity-70 whitespace-pre-wrap mt-1"
+            >{{ landscapeGen.failedStdoutTail.value }}</pre
+          >
+        </div>
       </div>
 
       <div class="flex flex-col gap-1">

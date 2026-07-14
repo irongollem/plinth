@@ -408,6 +408,50 @@ pub struct BaseCutCancelledStatus {
     pub job_id: String,
 }
 
+/// Landscape generator job progress — see docs/BASECUTTER.md "The landscape
+/// generator (phase 6)". Deliberately its own stream, not folded into
+/// BaseCutStatus: generation and cutting are different activities (one
+/// bakes a heightfield, one cuts plugs from an existing one) that merely
+/// share the one Blender process slot, so they get separate single-job
+/// guards AND separate event families, same reasoning as BatchRenderStatus
+/// getting its own stream instead of piggybacking on RenderStatus.
+#[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
+pub enum LandscapeGenStatus {
+    Started(LandscapeGenStartedStatus),
+    Finished(LandscapeGenFinishedStatus),
+    Failed(LandscapeGenFailedStatus),
+    Cancelled(LandscapeGenCancelledStatus),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct LandscapeGenStartedStatus {
+    pub job_id: String,
+    pub seed: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct LandscapeGenFinishedStatus {
+    pub job_id: String,
+    pub out_path: String,
+    pub dims_mm: [f64; 3],
+    pub manifold: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct LandscapeGenFailedStatus {
+    pub job_id: String,
+    pub message: String,
+    /// Last ~10 lines of Blender stdout — a post-mortem when the failure
+    /// wasn't a clean GENERATION_FAILED token (e.g. a crash before the
+    /// script's own try/except, or an exit with no GENERATED at all).
+    pub stdout_tail: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct LandscapeGenCancelledStatus {
+    pub job_id: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
 pub enum RenderStatus {
     Started(RenderStartedStatus),
