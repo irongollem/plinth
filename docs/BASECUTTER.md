@@ -66,7 +66,10 @@ in v1 may assume the kind enum is closed.
 
 ## The plinth
 
-The de-facto industry standard: **4 mm tall, tapered, and nominal size is the BOTTOM face**.
+The de-facto industry standard: **3.7 mm tall, tapered, and nominal size
+is the BOTTOM face**. Caliper-measured off a real 32 mm round (±0.2 mm):
+32 mm at the table, 30 mm on top, 3.7 mm tall, 1.2 mm wall — so the inset
+is 1.0 mm and the taper ~15°.
 A real base is widest at the table and slopes inward going up: a "25 mm
 square" measures 25 mm where it touches the table, and its top face is
 smaller by twice the taper inset. Ranked square bases touch — and tile
@@ -88,8 +91,8 @@ Consequences, all deliberate:
   (where the base will stand); the derived cut line can be shown as an
   inner stroke.
 
-Profile is parametric (`height: 4.0 mm`, `taper`), taper default measured
-off a real base during the spike.
+Profile is parametric (`height: 3.7 mm`, `taper: 15°`), defaults taken
+from that measurement.
 
 ### Hollow, with magnet mounts
 
@@ -125,7 +128,7 @@ a per-cut CLI, and per cut:
    surface — raycast a grid down inside the footprint — and sink the
    plug so that point sits exactly on the plinth's top plane. Trim
    everything below that plane (boolean with a half-space box), so the
-   finished base is 4 mm + terrain relief only. Side walls then show the
+   finished base is plinth height + terrain relief only. Side walls then show the
    terrain's height profile around the rim, like a hand-made scenic base.
 5. **Generate the plinth** (top face = derived cut footprint); **union**.
    The trim leaves the plug reaching ~0.2 mm *into* the top plate so the
@@ -134,9 +137,8 @@ a per-cut CLI, and per cut:
 6. **Cleanup**: merge-by-distance, recalc normals, manifold check.
 7. **Export STL**, print a machine-readable stdout token, next placement.
 
-Progress protocol clones batch render: `CUT_START <i>` / `CUT_DONE <i>
-<path>` / `CUT_FAILED <i> <reason>` / `JOB_DONE` on stdout, parsed by the
-Rust side into events; a stdout tail ring buffer for post-mortems, child
+Progress protocol clones batch render: `TOKEN {json}` lines on stdout
+(see the pinned interfaces below), parsed by the Rust side into events; a stdout tail ring buffer for post-mortems, child
 spawned with `kill_on_drop`, cancel by job id.
 
 An up-front **validation pass** in the same run gates the whole job:
@@ -149,7 +151,7 @@ sane scale (mm, Z-up). The validation rules double as the published
 New module `src-tauri/src/basecutter/`, mirroring `render/`:
 
 - `cutters.rs` — `CutterKind` (`Circle` / `Ellipse` / `Rect`, open for
-  extension), `Cutter`, `PlinthParams` (height: 4.0, taper), `Placement`
+  extension), `Cutter`, `PlinthParams` (height: 3.7, taper: 15), `Placement`
   (cutter + x/y mm + rotation deg), the seed library const, and
   `get_cutter_library`.
 - `job.rs` — job JSON serialisation, spawn via `render::engine`
@@ -233,7 +235,7 @@ CutterKind = Circle { diameter_mm } | Ellipse { major_mm, minor_mm }
            | Rect { width_mm, depth_mm }          // open — more kinds later
 Cutter     = { id, label, kind, magnet: Option<MagnetSpec> }  // dims are NOMINAL (bottom face)
 MagnetSpec = { diameter_mm, height_mm, count }    // suggested pairing, user-overridable
-PlinthParams = { height_mm: 4.0, taper_deg,       // taper default set in phase 1
+PlinthParams = { height_mm: 3.7, taper_deg: 15.0,  // from a measured real base
                  hollow: true, wall_mm, top_mm,
                  magnet: Option<MagnetSpec> }     // None = no pocket
 Placement  = { cutter: CutterKind, x_mm, y_mm, rotation_deg }
@@ -255,9 +257,9 @@ Blender CLI, same convention as `render_mini.py`), not as flags per cut.
 
 1. **Script spike** — hand-run `base_cut.py` against the local 5.1.2:
    Blender-generated test landscape + one placement → `base.stl`;
-   measure a real off-the-shelf base for the taper default. *Done when*: a printed
+   confirm the measured profile (3.7 mm, 15°). *Done when*: a printed
    base has a clean plug/plinth seam, correct nominal footprint at the
-   table, and total height = 4 mm + relief (seat logic proven).
+   table, and total height = 3.7 mm + relief (seat logic proven).
 2. **Cutter library** — `basecutter/cutters.rs`: types, seed table,
    `top_face_of`, `get_cutter_library`. *Done when*: unit tests pin the
    table and the nominal→cut derivation.
@@ -270,14 +272,20 @@ Blender CLI, same convention as `render_mini.py`), not as flags per cut.
    when*: one cut runs end-to-end from the UI with live progress.
 5. **Multi-cut + polish** — placement list, duplicate/overlap warnings,
    plinth options UI, validation surfacing, export-into-catalog.
-6. **Later**: custom cutter shapes (new `kind`s + editor), standard
+6. **Later**: placement generators — one click for a 5×2 regiment of one
+   cutter, or "N random bases of size X" auto-scattered without overlap
+   (pure frontend: the job already takes a placement list, and every
+   regiment member gets unique terrain because it's cut from a different
+   spot); custom cutter shapes (new `kind`s + editor), standard
    bases as scale reference in the Render tool (lift the plinth function
    into `render_mini.py`), magnet-hole recess, hollow plinth, rim
    texture, designer-facing landscape spec in CREATORS.md.
 
 ## Open questions
 
-- Exact taper angle (measure a real base — phase 1).
+- ~~Exact taper angle~~ answered: 15° from the measured 32 mm round
+  (32→30 mm over 3.7 mm). Spot-check one square base — rank-and-flank
+  rims may use a different bevel.
 - Where cut output lands by default: loose folder first; catalog
   integration once the normalizer settles?
 - Does the seam want a tiny plug inset (0.1–0.2 mm) for slicer
