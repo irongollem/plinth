@@ -91,6 +91,23 @@ Consequences, all deliberate:
 Profile is parametric (`height: 4.0 mm`, `taper`), taper default measured
 off a real base during the spike.
 
+### Hollow, with magnet mounts
+
+Plinths are **hollow by default** — an open-bottom shell (tapered wall +
+top plate), which is what real bases are, saves material, and prints
+without support (the "ceiling" is the top plate, bridged at the wall).
+Solid stays available as a flag.
+
+Magnet mounts are designed in from the start because hollowing dictates
+their shape: a cylindrical boss hanging from the top plate's underside,
+reaching the bottom plane, with a downward-opening pocket. The magnet
+glues in flush with the bottom rim — zero gap to the steel tray, maximum
+pull. Pocket = magnet diameter + fit clearance; bigger bases suggest
+bigger neodymium magnets. Suggested pairing lives in the cutter table
+(data again, user-overridable): small bases one 5×1 mm, mids 6×2 mm,
+large 10×2 mm, big ovals two pockets. Seed values — verify against the
+magnets people actually buy before freezing.
+
 ## The cut pipeline (one Blender run per job, N cuts per run)
 
 Blender cold-start costs seconds, so one run processes the whole
@@ -111,6 +128,9 @@ a per-cut CLI, and per cut:
    finished base is 4 mm + terrain relief only. Side walls then show the
    terrain's height profile around the rim, like a hand-made scenic base.
 5. **Generate the plinth** (top face = derived cut footprint); **union**.
+   The trim leaves the plug reaching ~0.2 mm *into* the top plate so the
+   union sees two overlapping solids — two solids merely kissing on a
+   shared plane can hand the exact solver a non-manifold seam.
 6. **Cleanup**: merge-by-distance, recalc normals, manifold check.
 7. **Export STL**, print a machine-readable stdout token, next placement.
 
@@ -211,16 +231,21 @@ cancel_base_cut(job_id: String) -> Result<()>
 // core types (basecutter/cutters.rs)
 CutterKind = Circle { diameter_mm } | Ellipse { major_mm, minor_mm }
            | Rect { width_mm, depth_mm }          // open — more kinds later
-Cutter     = { id, label, kind }                  // dims are NOMINAL (bottom face)
-PlinthParams = { height_mm: 4.0, taper_deg }      // taper default set in phase 1
+Cutter     = { id, label, kind, magnet: Option<MagnetSpec> }  // dims are NOMINAL (bottom face)
+MagnetSpec = { diameter_mm, height_mm, count }    // suggested pairing, user-overridable
+PlinthParams = { height_mm: 4.0, taper_deg,       // taper default set in phase 1
+                 hollow: true, wall_mm, top_mm,
+                 magnet: Option<MagnetSpec> }     // None = no pocket
 Placement  = { cutter: CutterKind, x_mm, y_mm, rotation_deg }
 BaseCutJob = { landscape_path, placements: Vec<Placement>,
                plinth: PlinthParams, out_dir }
 
-// script stdout protocol (one token per line, parsed by job.rs)
-VALIDATING | VALIDATION_FAILED <reason>
-CUT_START <i> | CUT_DONE <i> <path> | CUT_FAILED <i> <reason>
-JOB_DONE
+// script stdout protocol (one `TOKEN {json}` per line, parsed by job.rs —
+// same shape as render_mini.py's BATCH_* tokens; base_cut.py is the
+// source of truth for the payloads)
+VALIDATING | VALIDATED {…} | VALIDATION_FAILED {…}
+CUT_START {"index":i} | CUT_DONE {"index":i,"out":…,"dims_mm":[…],"manifold":…}
+CUT_FAILED {"index":i,"reason":…} | JOB_DONE {"total":N,"ok":n}
 ```
 
 The script receives the job as a JSON file (path after `--` in the
