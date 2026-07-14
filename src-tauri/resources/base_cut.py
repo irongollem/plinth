@@ -16,13 +16,15 @@
 #   "landscape": "/path/to/landscape.stl",
 #   "out_dir": "/dir",
 #   "plinth": { "height_mm": 3.7, "taper_deg": 15.0, "hollow": true,
-#               "wall_mm": 1.2, "top_mm": 1.2,
-#               "magnet": { "diameter_mm": 5.0, "height_mm": 1.0,
-#                           "clearance_mm": 0.15 } | null },
+#               "wall_mm": 1.2, "top_mm": 1.2, "magnet_clearance_mm": 0.15 },
 #   "placements": [ { "name": "round32",
 #                     "cutter": { "kind": "circle", "diameter_mm": 32.0 },
 #                     "x_mm": 0.0, "y_mm": 0.0, "rotation_deg": 0.0,
-#                     "magnet": true } ]
+#                     "magnet": { "diameter_mm": 5.0, "height_mm": 1.0 } } ]
+#
+# The magnet is per placement (chosen from the user's magnet inventory in
+# the app; null = no pocket); the clearance is per job because hole fit is
+# a printer/material property, not a magnet property.
 # }
 # kinds: circle { diameter_mm } | ellipse { major_mm, minor_mm }
 #      | rect { width_mm, depth_mm }   (sharp corners — unit blocks tile)
@@ -170,16 +172,17 @@ def cleanup_and_check(obj):
 
 # ---------------------------------------------------------------- the plinth
 
-def build_plinth(plinth, cutter, with_magnet):
+def build_plinth(plinth, cutter, magnet):
     """Hollow (or solid) tapered plinth at the origin: nominal footprint at
-    z=0, derived top face at z=height. Returns the finished object."""
+    z=0, derived top face at z=height. `magnet` is the placement's chosen
+    MagnetSpec dict, or None for no pocket."""
     h = plinth["height_mm"]
     inset = h * math.tan(math.radians(plinth["taper_deg"]))
     nominal = footprint_polygon(cutter)
     top = offset_inward(nominal, inset)
     body = loft_solid("plinth", [(0.0, nominal), (h, top)])
 
-    magnet = plinth.get("magnet") if with_magnet else None
+    clearance = plinth.get("magnet_clearance_mm", 0.15)
 
     if plinth.get("hollow", True):
         wall = plinth["wall_mm"]
@@ -198,7 +201,7 @@ def build_plinth(plinth, cutter, with_magnet):
         if magnet:
             # The boss survives the hollowing: a pillar from the ceiling to
             # the bottom plane that the pocket is later drilled into.
-            r_boss = magnet["diameter_mm"] / 2.0 + magnet["clearance_mm"] + plinth["wall_mm"]
+            r_boss = magnet["diameter_mm"] / 2.0 + clearance + plinth["wall_mm"]
             boss = loft_solid(
                 "boss",
                 [
@@ -212,7 +215,7 @@ def build_plinth(plinth, cutter, with_magnet):
         delete_object(cavity)
 
     if magnet:
-        r_pocket = magnet["diameter_mm"] / 2.0 + magnet["clearance_mm"]
+        r_pocket = magnet["diameter_mm"] / 2.0 + clearance
         pocket = loft_solid(
             "pocket",
             [
@@ -283,7 +286,7 @@ def cut_one(landscape_obj, placement, plinth, out_dir, index):
     apply_boolean(plug, trim, "DIFFERENCE")
     delete_object(trim)
 
-    base = build_plinth(plinth, cutter, placement.get("magnet", False))
+    base = build_plinth(plinth, cutter, placement.get("magnet"))
     apply_boolean(base, plug, "UNION")
     delete_object(plug)
 

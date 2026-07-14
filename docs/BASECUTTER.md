@@ -105,11 +105,18 @@ Magnet mounts are designed in from the start because hollowing dictates
 their shape: a cylindrical boss hanging from the top plate's underside,
 reaching the bottom plane, with a downward-opening pocket. The magnet
 glues in flush with the bottom rim — zero gap to the steel tray, maximum
-pull. Pocket = magnet diameter + fit clearance; bigger bases suggest
-bigger neodymium magnets. Suggested pairing lives in the cutter table
-(data again, user-overridable): small bases one 5×1 mm, mids 6×2 mm,
-large 10×2 mm, big ovals two pockets. Seed values — verify against the
-magnets people actually buy before freezing.
+pull. Pocket = magnet diameter + fit clearance, and clearance stays a
+user-visible setting: FDM prints holes 0.1–0.25 mm undersized, resin
+differs again, and every magnet brand has its own tolerance.
+
+The magnets themselves come from a **user-defined magnet inventory**
+(app settings): the user lists what they actually own (5×1, 6×2, 10×2,
+…), and the boss/pocket options per base are generated from that — the
+tool suggests the largest inventory magnet whose boss fits the base's
+top face, the user can override per placement. Ships with a starter
+inventory of the common hobby sizes so it works before anyone opens
+settings. No hardcoded base→magnet table anywhere: pairing is a rule
+over inventory, not data to maintain.
 
 ## The cut pipeline (one Blender run per job, N cuts per run)
 
@@ -233,12 +240,15 @@ cancel_base_cut(job_id: String) -> Result<()>
 // core types (basecutter/cutters.rs)
 CutterKind = Circle { diameter_mm } | Ellipse { major_mm, minor_mm }
            | Rect { width_mm, depth_mm }          // open — more kinds later
-Cutter     = { id, label, kind, magnet: Option<MagnetSpec> }  // dims are NOMINAL (bottom face)
-MagnetSpec = { diameter_mm, height_mm, count }    // suggested pairing, user-overridable
-PlinthParams = { height_mm: 3.7, taper_deg: 15.0,  // from a measured real base
+Cutter     = { id, label, kind }                  // dims are NOMINAL (bottom face)
+MagnetSpec = { diameter_mm, height_mm, count }    // from the user's magnet inventory
+PlinthParams = { height_mm: 3.7, taper_deg: 15.0, // from a measured real base
                  hollow: true, wall_mm, top_mm,
-                 magnet: Option<MagnetSpec> }     // None = no pocket
-Placement  = { cutter: CutterKind, x_mm, y_mm, rotation_deg }
+                 magnet_clearance_mm }            // printer/material dependent
+Placement  = { cutter: CutterKind, x_mm, y_mm, rotation_deg,
+               magnet: Option<MagnetSpec> }       // None = no pocket; suggested
+                                                  // from inventory, overridable
+// settings gains: magnet_inventory: Vec<MagnetSpec> (seeded with common sizes)
 BaseCutJob = { landscape_path, placements: Vec<Placement>,
                plinth: PlinthParams, out_dir }
 
@@ -271,7 +281,8 @@ Blender CLI, same convention as `render_mini.py`), not as flags per cut.
    `LandscapeViewport.vue` with single-placement drag/rotate. *Done
    when*: one cut runs end-to-end from the UI with live progress.
 5. **Multi-cut + polish** — placement list, duplicate/overlap warnings,
-   plinth options UI, validation surfacing, export-into-catalog.
+   plinth options UI, magnet inventory in settings + per-placement magnet
+   picker, validation surfacing, export-into-catalog.
 6. **Later**: placement generators — one click for a 5×2 regiment of one
    cutter, or "N random bases of size X" auto-scattered without overlap
    (pure frontend: the job already takes a placement list, and every
