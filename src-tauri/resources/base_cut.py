@@ -15,7 +15,7 @@
 # {
 #   "landscape": "/path/to/landscape.stl",
 #   "out_dir": "/dir",
-#   "plinth": { "height_mm": 4.0, "taper_deg": 25.0, "hollow": true,
+#   "plinth": { "height_mm": 3.7, "taper_deg": 15.0, "hollow": true,
 #               "wall_mm": 1.2, "top_mm": 1.2,
 #               "magnet": { "diameter_mm": 5.0, "height_mm": 1.0,
 #                           "clearance_mm": 0.15 } | null },
@@ -147,10 +147,16 @@ def delete_object(obj):
 
 
 def cleanup_and_check(obj):
-    """Merge stray verts, fix normals; return (manifold, dims_mm)."""
+    """Merge stray verts, fix normals; return (manifold, dims_mm).
+
+    dissolve_degenerate matters for the STL roundtrip: booleans can leave
+    near-zero-area slivers that are manifold here but collapse to exactly
+    zero area in float32 STL — the importer then drops them, leaving a
+    pinhole in the printed shell."""
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.001)
+    bmesh.ops.dissolve_degenerate(bm, edges=bm.edges, dist=0.001)
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     manifold = all(e.is_manifold for e in bm.edges)
     xs = [v.co.x for v in bm.verts]
