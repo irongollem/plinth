@@ -2,10 +2,17 @@ use crate::error::AppError;
 use crate::models::{BlenderInfo, RenderOptions};
 use crate::settings::SETTINGS_CACHE;
 use once_cell::sync::Lazy;
+use std::collections::VecDeque;
+use std::future::Future;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::pin::Pin;
+use std::process::{ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::Notify;
 
 /// The Blender script ships INSIDE the binary. As a bundled resource it was
 /// only re-copied next to the binary when the Rust code rebuilt, so pure
@@ -223,6 +230,208 @@ pub fn progress_args(version: &str) -> &'static [&'static str] {
     }
 }
 
+// --------------------------- shared Blender run harness --------------------
+
+/// A Blender child process that ran to completion (not cancelled, not
+/// aborted by `on_line`): its exit status plus the stdout/stderr tail ring
+/// buffers (last 10 lines each) for post-mortem error messages. Whether a
+/// given `status` counts as success is the caller's call — some callers
+/// additionally require an output file to exist, some fold the tails into
+/// their own error string, some don't need the tails at all.
+#[derive(Debug)]
+pub(crate) struct BlenderRun {
+    pub status: ExitStatus,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+}
+
+/// Why `run_blender_lines` did not reach a `BlenderRun`. Deliberately more
+/// granular than "spawn / io / cancelled": job.rs, run_blender, and
+/// run_batch_child each had their own exact wording per failure stage before
+/// this dedup, and this enum keeps each stage distinguishable so every
+/// caller can still produce its own exact text (see each call site's error
+/// mapping — the messages are unchanged from before the refactor).
+#[derive(Debug)]
+pub(crate) enum BlenderRunError {
+    /// `Command::spawn` itself failed (bad binary path, no exec perms, ...).
+    /// No process ever existed, so there is nothing to put in the tails.
+    SpawnFailed(std::io::Error),
+    /// `child.stdout` was `None` — the API returns an `Option` even though
+    /// we always request `Stdio::piped()`. No output was read yet either.
+    StdoutCaptureFailed,
+    /// A line read off Blender's stdout failed at the OS level.
+    ReadFailed {
+        source: std::io::Error,
+        stdout_tail: String,
+        stderr_tail: String,
+    },
+    /// `child.wait()` (after stdout closed) failed at the OS level.
+    WaitFailed {
+        source: std::io::Error,
+        stdout_tail: String,
+        stderr_tail: String,
+    },
+    /// `cancel`'s `Notify` fired mid-run: the child was killed WITHOUT
+    /// waiting for it — a killed process's exit status is noise, matching
+    /// every caller's pre-refactor cancel handling.
+    Cancelled {
+        stdout_tail: String,
+        stderr_tail: String,
+    },
+    /// `on_line` returned `ControlFlow::Break` — basecutter's
+    /// validation-failure gate is the only current user of this (the
+    /// validation pass must kill the child immediately rather than let it
+    /// keep cutting against a landscape it just rejected). Given the same
+    /// kill-without-waiting treatment as `Cancelled` but kept as a distinct
+    /// variant so a caller can give it its own error text.
+    AbortedByCaller {
+        stdout_tail: String,
+        stderr_tail: String,
+    },
+}
+
+/// The shared Blender child-process harness, extracted out of job.rs,
+/// render/commands.rs, and render/batch.rs, which each copy-pasted it
+/// verbatim: pipe stdout/stderr + `stdin(null)` + `kill_on_drop`, spawn, tee
+/// stderr into a 10-line ring buffer on a background task, read stdout
+/// line-by-line into another 10-line ring buffer while invoking `on_line`
+/// for each raw line, race that against `cancel` (if given) with
+/// kill-on-cancel, then `wait()` for the exit status.
+///
+/// `on_line` receives each stdout line exactly as read (untrimmed — callers
+/// already trim where they need to). Returning `ControlFlow::Break(())`
+/// asks for an immediate kill-and-stop (see `BlenderRunError::AbortedByCaller`);
+/// `Continue` keeps reading. `cancel` is optional so a caller with no
+/// cancellation source (there is none today, but the harness shouldn't
+/// assume one) can pass `None` and simply never race against it.
+///
+/// This is pure process plumbing. Per-line parsing/side-effects, success
+/// criteria (exit status, output-file checks, terminal-token bookkeeping),
+/// event emissions, and error text are ALL caller-side — see
+/// job.rs::spawn_and_parse, render/commands.rs::run_blender, and
+/// render/batch.rs::run_batch_child for how each keeps its own behavior.
+pub(crate) async fn run_blender_lines<'a>(
+    mut cmd: Command,
+    cancel: Option<&'a Notify>,
+    mut on_line: impl FnMut(&str) -> ControlFlow<()>,
+) -> Result<BlenderRun, BlenderRunError> {
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+
+    let mut child = cmd.spawn().map_err(BlenderRunError::SpawnFailed)?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or(BlenderRunError::StdoutCaptureFailed)?;
+    let stderr = child.stderr.take();
+
+    let stderr_tail: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
+    if let Some(stderr) = stderr {
+        let tail = Arc::clone(&stderr_tail);
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Ok(mut tail) = tail.lock() {
+                    if tail.len() >= 10 {
+                        tail.pop_front();
+                    }
+                    tail.push_back(line);
+                }
+            }
+        });
+    }
+
+    let mut stdout_lines = BufReader::new(stdout).lines();
+    let mut stdout_tail: VecDeque<String> = VecDeque::new();
+
+    let tail_snapshot = |stdout_tail: &VecDeque<String>| -> (String, String) {
+        let out = stdout_tail.iter().cloned().collect::<Vec<_>>().join("\n");
+        let err = stderr_tail
+            .lock()
+            .map(|t| t.iter().cloned().collect::<Vec<_>>().join("\n"))
+            .unwrap_or_default();
+        (out, err)
+    };
+
+    // Registered ONCE, right here, and kept alive across every loop
+    // iteration: a fresh `notified()` per iteration would drop a cancel that
+    // lands between iterations (notify_one()'s stored wake-up permit only
+    // helps a waiter that is ALREADY registered when it fires). Boxed rather
+    // than `tokio::pin!`-ed because `cancel` is optional: with no Notify to
+    // wait on we still need a future to race against, one that simply never
+    // resolves.
+    let mut cancelled: Pin<Box<dyn Future<Output = ()> + Send + 'a>> = match cancel {
+        Some(notify) => Box::pin(notify.notified()),
+        None => Box::pin(std::future::pending()),
+    };
+
+    loop {
+        tokio::select! {
+            _ = &mut cancelled => {
+                child.kill().await.ok();
+                let (stdout_tail, stderr_tail) = tail_snapshot(&stdout_tail);
+                return Err(BlenderRunError::Cancelled { stdout_tail, stderr_tail });
+            }
+            line = stdout_lines.next_line() => {
+                match line {
+                    Ok(Some(line)) => {
+                        if stdout_tail.len() >= 10 {
+                            stdout_tail.pop_front();
+                        }
+                        stdout_tail.push_back(line.clone());
+
+                        if on_line(&line).is_break() {
+                            child.kill().await.ok();
+                            let (stdout_tail, stderr_tail) = tail_snapshot(&stdout_tail);
+                            return Err(BlenderRunError::AbortedByCaller { stdout_tail, stderr_tail });
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        let (stdout_tail, stderr_tail) = tail_snapshot(&stdout_tail);
+                        return Err(BlenderRunError::ReadFailed { source: e, stdout_tail, stderr_tail });
+                    }
+                }
+            }
+        }
+    }
+
+    let status = child.wait().await.map_err(|e| {
+        let (stdout_tail, stderr_tail) = tail_snapshot(&stdout_tail);
+        BlenderRunError::WaitFailed { source: e, stdout_tail, stderr_tail }
+    })?;
+    let (stdout_tail, stderr_tail) = tail_snapshot(&stdout_tail);
+    Ok(BlenderRun { status, stdout_tail, stderr_tail })
+}
+
+/// The shared prefix every headless render_mini.py invocation starts with —
+/// `build_render_command` and `build_batch_render_command` were otherwise
+/// byte-for-byte identical up to their mode-specific flags. `--python-exit-code
+/// 1` makes an uncaught script exception exit Blender non-zero instead of
+/// Blender's default of exiting 0 after a Python traceback (the same gap
+/// `basecutter::job::build_base_cut_command` closed). For single-render this
+/// catches e.g. `import_join`'s "File not found"/"STL import produced no
+/// mesh" `SystemExit`s (previously only caught indirectly, by `run_blender`
+/// noticing no output file appeared). For batch mode it only matters for a
+/// crash BEFORE run_batch's per-entry `try/except` (a bad manifest file,
+/// ...) — a failure inside the loop is already caught there and reported as
+/// a machine-readable `BATCH_DONE {"ok":false}` line, so Blender still exits
+/// 0 (correctly) after a batch with individual failures.
+fn render_script_invocation(blender: &BlenderInfo, script: &Path) -> Command {
+    let mut cmd = new_command(Path::new(&blender.path));
+    cmd.args(progress_args(&blender.version));
+    cmd.arg("-b")
+        .arg("--python-exit-code")
+        .arg("1")
+        .arg("-P")
+        .arg(script)
+        .arg("--");
+    cmd
+}
+
 /// Assemble the full headless render invocation for render_mini.py.
 pub fn build_render_command(
     blender: &BlenderInfo,
@@ -231,9 +440,7 @@ pub fn build_render_command(
     options: &RenderOptions,
     output_path: &Path,
 ) -> Command {
-    let mut cmd = new_command(Path::new(&blender.path));
-    cmd.args(progress_args(&blender.version));
-    cmd.arg("-b").arg("-P").arg(script).arg("--");
+    let mut cmd = render_script_invocation(blender, script);
     for part in parts {
         cmd.arg(part);
     }
@@ -335,9 +542,7 @@ pub fn build_batch_render_command(
     script: &Path,
     manifest_path: &Path,
 ) -> Command {
-    let mut cmd = new_command(Path::new(&blender.path));
-    cmd.args(progress_args(&blender.version));
-    cmd.arg("-b").arg("-P").arg(script).arg("--");
+    let mut cmd = render_script_invocation(blender, script);
     cmd.arg("--batch").arg(manifest_path);
     cmd.arg("--look").arg("flat");
     cmd
@@ -491,6 +696,55 @@ mod tests {
         assert!(args.windows(2).any(|w| w[0] == "--batch" && w[1] == "/tmp/manifest.json"));
         assert!(!args.iter().any(|a| a.ends_with(".stl")), "no positional parts");
         assert!(args.iter().any(|a| a == "--log-level"), "5.x progress args present");
+        assert!(
+            args.windows(2).any(|w| w[0] == "--python-exit-code" && w[1] == "1"),
+            "batch mode needs the exit-code guard too (pre-loop crashes, e.g. a bad manifest)"
+        );
+    }
+
+    /// Same gap basecutter's build_base_cut_command closed: without this
+    /// flag Blender exits 0 even after an uncaught Python exception (e.g.
+    /// import_join's "File not found" SystemExit), so a pre-render crash
+    /// could only be caught indirectly via the missing-output-file check.
+    #[test]
+    fn render_command_has_python_exit_code_guard() {
+        let blender = BlenderInfo {
+            path: "/usr/bin/blender".into(),
+            version: "Blender 5.1.2".into(),
+        };
+        let options = RenderOptions {
+            rotate: (90.0, 0.0, 0.0),
+            color: None,
+            azimuth: None,
+            elevation: None,
+            zoom: None,
+            resolution: None,
+            samples: None,
+            look: None,
+            output_path: None,
+            overwrite: false,
+            align_parts: false,
+            look_config: None,
+            scale_reference: false,
+        };
+        let cmd = build_render_command(
+            &blender,
+            Path::new("render_mini.py"),
+            &["model.stl".to_string()],
+            &options,
+            Path::new("out.png"),
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|w| w[0] == "--python-exit-code" && w[1] == "1"));
+        // Must come before the script is invoked (a global Blender option,
+        // not a script argv flag after "--").
+        let exit_code_idx = args.iter().position(|a| a == "--python-exit-code").unwrap();
+        let separator_idx = args.iter().position(|a| a == "--").unwrap();
+        assert!(exit_code_idx < separator_idx);
     }
 
     #[test]
@@ -585,6 +839,74 @@ mod tests {
                 .any(|line| parse_sample_progress(line).is_some()),
             "no parseable Sample progress lines:\n{}",
             stdout
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Drives the actual shared harness (`run_blender_lines`), not just
+    /// command construction — the render pipeline had no fast integration
+    /// test exercising the refactored-out plumbing itself (spawn, stdout
+    /// piping, cancel-select loop, wait). `run_blender` in
+    /// render/commands.rs needs an `AppHandle` to test the same way, which
+    /// is impractical to construct headless; `run_blender_lines` needing
+    /// only a `Command` + closure is exactly the "factor the testable core"
+    /// escape hatch — it's the part worth testing against a real Blender
+    /// anyway, since render/commands.rs's `run_blender` is now a thin
+    /// wrapper (event emission + output-file check) around it.
+    /// Run with: cargo test -- --ignored
+    #[tokio::test]
+    #[ignore = "requires a local Blender install and ~30s"]
+    async fn run_blender_lines_end_to_end_with_real_blender() {
+        let blender = detect_blender()
+            .await
+            .expect("Blender not found — install it or set BLENDER_BIN");
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/render_mini.py");
+        let dir = std::env::temp_dir().join(format!("stlpack_run_lines_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stl = dir.join("tetra.stl");
+        write_test_stl(&stl);
+        let out = dir.join("tetra.png");
+
+        let options = RenderOptions {
+            rotate: (90.0, 0.0, 0.0),
+            color: None,
+            azimuth: None,
+            elevation: None,
+            zoom: None,
+            resolution: Some(128),
+            samples: Some(8),
+            look: Some("rich".to_string()),
+            output_path: None,
+            overwrite: true,
+            align_parts: false,
+            look_config: None,
+            scale_reference: false,
+        };
+        let cmd = build_render_command(
+            &blender,
+            &script,
+            &[stl.to_string_lossy().into_owned()],
+            &options,
+            &out,
+        );
+
+        let mut saw_progress = false;
+        let run = run_blender_lines(cmd, None, |line| {
+            if parse_sample_progress(line).is_some() {
+                saw_progress = true;
+            }
+            ControlFlow::Continue(())
+        })
+        .await
+        .unwrap_or_else(|e| panic!("run_blender_lines failed: {:?}", e));
+
+        assert!(run.status.success(), "blender exited with {}", run.status);
+        assert!(out.is_file(), "no output image written");
+        assert!(
+            saw_progress,
+            "no parseable Sample progress lines observed via on_line; stdout tail:\n{}",
+            run.stdout_tail
         );
 
         std::fs::remove_dir_all(&dir).ok();

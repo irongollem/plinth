@@ -11,11 +11,9 @@ use crate::error::AppError;
 use crate::models::BlenderInfo;
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::collections::VecDeque;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use tauri::AppHandle;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Notify;
 
 /// The Blender script ships INSIDE the binary — same always-overwrite
@@ -227,52 +225,14 @@ pub async fn spawn_and_parse<F>(
 where
     F: FnMut(&BaseCutToken),
 {
-    let mut cmd = build_base_cut_command(blender, script, job_path);
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| (AppError::IoError(format!("Failed to launch Blender: {}", e)), String::new()))?;
-
-    let stdout = child.stdout.take().ok_or_else(|| {
-        (
-            AppError::IoError("Failed to capture Blender stdout".to_string()),
-            String::new(),
-        )
-    })?;
-    let stderr = child.stderr.take();
-
-    let stderr_tail: std::sync::Arc<std::sync::Mutex<VecDeque<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(VecDeque::new()));
-    if let Some(stderr) = stderr {
-        let tail = std::sync::Arc::clone(&stderr_tail);
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if let Ok(mut tail) = tail.lock() {
-                    if tail.len() >= 10 {
-                        tail.pop_front();
-                    }
-                    tail.push_back(line);
-                }
-            }
-        });
-    }
-
-    let mut stdout_lines = BufReader::new(stdout).lines();
-    let mut stdout_tail: VecDeque<String> = VecDeque::new();
+    let cmd = build_base_cut_command(blender, script, job_path);
     let mut local_ok: u32 = 0;
     let mut job_done_ok: Option<u32> = None;
 
-    let tail_snapshot = |stdout_tail: &VecDeque<String>, stderr_tail: &std::sync::Mutex<VecDeque<String>>| {
-        let out = stdout_tail.iter().cloned().collect::<Vec<_>>().join("\n");
-        let err = stderr_tail
-            .lock()
-            .map(|t| t.iter().cloned().collect::<Vec<_>>().join("\n"))
-            .unwrap_or_default();
+    // Unlike run_blender/run_batch_child, every error path here carries a
+    // tail (the (AppError, String) return shape), so the merge happens once
+    // below rather than being baked into the harness.
+    let merge_tail = |out: String, err: String| {
         if err.is_empty() {
             out
         } else {
@@ -280,73 +240,72 @@ where
         }
     };
 
-    // Registered ONCE and kept alive across iterations. cancel_base_cut
-    // calls notify_one() rather than notify_waiters(): notify_one() stores
-    // a wake-up permit when no waiter is registered yet, so a cancel that
-    // lands before this notified() future exists (the lost-wakeup window
-    // between spawning the job task and reaching this loop) is still
-    // observed on the first poll instead of being silently dropped.
-    let cancelled = cancel_token.notified();
-    tokio::pin!(cancelled);
-
-    loop {
-        tokio::select! {
-            _ = &mut cancelled => {
-                child.kill().await.ok();
-                return Err((
-                    AppError::UserCancelled("Base cut job cancelled".to_string()),
-                    tail_snapshot(&stdout_tail, &stderr_tail),
-                ));
+    let run_result = crate::render::engine::run_blender_lines(cmd, Some(cancel_token), |line| {
+        if let Some(token) = parse_token(line) {
+            match &token {
+                BaseCutToken::CutDone { .. } => local_ok += 1,
+                BaseCutToken::JobDone { ok, .. } => job_done_ok = Some(*ok),
+                _ => {}
             }
-            line = stdout_lines.next_line() => {
-                match line {
-                    Ok(Some(line)) => {
-                        if stdout_tail.len() >= 10 {
-                            stdout_tail.pop_front();
-                        }
-                        stdout_tail.push_back(line.clone());
-
-                        if let Some(token) = parse_token(&line) {
-                            match &token {
-                                BaseCutToken::CutDone { .. } => local_ok += 1,
-                                BaseCutToken::JobDone { ok, .. } => job_done_ok = Some(*ok),
-                                _ => {}
-                            }
-                            let is_validation_failure = matches!(token, BaseCutToken::ValidationFailed(_));
-                            on_token(&token);
-                            if is_validation_failure {
-                                child.kill().await.ok();
-                                return Err((
-                                    AppError::FileProcessingError(
-                                        "Landscape failed validation".to_string(),
-                                    ),
-                                    tail_snapshot(&stdout_tail, &stderr_tail),
-                                ));
-                            }
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        return Err((
-                            AppError::IoError(format!("Failed reading Blender output: {}", e)),
-                            tail_snapshot(&stdout_tail, &stderr_tail),
-                        ))
-                    }
-                }
+            let is_validation_failure = matches!(token, BaseCutToken::ValidationFailed(_));
+            on_token(&token);
+            if is_validation_failure {
+                // The validation pass gates the whole job (see
+                // docs/BASECUTTER.md "The cut pipeline"): kill the child
+                // rather than let it keep cutting against a landscape it
+                // just rejected.
+                return ControlFlow::Break(());
             }
         }
-    }
+        ControlFlow::Continue(())
+    })
+    .await;
 
-    let status = child.wait().await.map_err(|e| {
-        (
-            AppError::IoError(format!("Failed waiting for Blender: {}", e)),
-            tail_snapshot(&stdout_tail, &stderr_tail),
-        )
-    })?;
-    if !status.success() {
+    use crate::render::engine::BlenderRunError::*;
+    let run = match run_result {
+        Ok(run) => run,
+        Err(SpawnFailed(e)) => {
+            return Err((
+                AppError::IoError(format!("Failed to launch Blender: {}", e)),
+                String::new(),
+            ))
+        }
+        Err(StdoutCaptureFailed) => {
+            return Err((
+                AppError::IoError("Failed to capture Blender stdout".to_string()),
+                String::new(),
+            ))
+        }
+        Err(ReadFailed { source, stdout_tail, stderr_tail }) => {
+            return Err((
+                AppError::IoError(format!("Failed reading Blender output: {}", source)),
+                merge_tail(stdout_tail, stderr_tail),
+            ))
+        }
+        Err(WaitFailed { source, stdout_tail, stderr_tail }) => {
+            return Err((
+                AppError::IoError(format!("Failed waiting for Blender: {}", source)),
+                merge_tail(stdout_tail, stderr_tail),
+            ))
+        }
+        Err(Cancelled { stdout_tail, stderr_tail }) => {
+            return Err((
+                AppError::UserCancelled("Base cut job cancelled".to_string()),
+                merge_tail(stdout_tail, stderr_tail),
+            ))
+        }
+        Err(AbortedByCaller { stdout_tail, stderr_tail }) => {
+            return Err((
+                AppError::FileProcessingError("Landscape failed validation".to_string()),
+                merge_tail(stdout_tail, stderr_tail),
+            ))
+        }
+    };
+
+    if !run.status.success() {
         return Err((
-            AppError::FileProcessingError(format!("Blender exited with {}", status)),
-            tail_snapshot(&stdout_tail, &stderr_tail),
+            AppError::FileProcessingError(format!("Blender exited with {}", run.status)),
+            merge_tail(run.stdout_tail, run.stderr_tail),
         ));
     }
 

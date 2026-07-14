@@ -6,13 +6,12 @@ use crate::models::events::{
 };
 use crate::models::{BlenderInfo, RenderOptions};
 use once_cell::sync::Lazy;
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tauri::AppHandle;
 use tauri_specta::Event;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -362,6 +361,27 @@ async fn run_render_job(
     }
 }
 
+/// Map the shared harness's error into run_blender's exact pre-refactor
+/// error texts. `AbortedByCaller` never happens here (the `on_line` closure
+/// below never returns `Break`) — kept in the match only because
+/// `BlenderRunError` must be matched exhaustively.
+fn map_run_error(e: engine::BlenderRunError) -> AppError {
+    use engine::BlenderRunError::*;
+    match e {
+        SpawnFailed(source) => AppError::IoError(format!("Failed to launch Blender: {}", source)),
+        StdoutCaptureFailed => AppError::IoError("Failed to capture Blender stdout".to_string()),
+        ReadFailed { source, .. } => {
+            AppError::IoError(format!("Failed reading Blender output: {}", source))
+        }
+        WaitFailed { source, .. } => {
+            AppError::IoError(format!("Failed waiting for Blender: {}", source))
+        }
+        Cancelled { .. } | AbortedByCaller { .. } => {
+            AppError::UserCancelled("Render cancelled".to_string())
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_blender(
     app_handle: &AppHandle,
@@ -373,101 +393,33 @@ async fn run_blender(
     output_path: &Path,
     cancel_token: &Notify,
 ) -> Result<(), AppError> {
-    let mut cmd = engine::build_render_command(blender, script, parts, options, output_path);
-
-    cmd.stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .kill_on_drop(true);
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| AppError::IoError(format!("Failed to launch Blender: {}", e)))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| AppError::IoError("Failed to capture Blender stdout".to_string()))?;
-    let stderr = child.stderr.take();
-
-    // Collect stderr in the background for error reporting
-    let stderr_tail: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
-    if let Some(stderr) = stderr {
-        let tail = Arc::clone(&stderr_tail);
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if let Ok(mut tail) = tail.lock() {
-                    if tail.len() >= 10 {
-                        tail.pop_front();
-                    }
-                    tail.push_back(line);
-                }
-            }
-        });
-    }
-
-    let mut stdout_lines = BufReader::new(stdout).lines();
-    let mut stdout_tail: VecDeque<String> = VecDeque::new();
+    let cmd = engine::build_render_command(blender, script, parts, options, output_path);
     let mut last_percent: u32 = 0;
 
-    // Register cancellation interest ONCE and keep the future alive across
-    // loop iterations: notify_waiters() stores no permit, so a fresh
-    // notified() per iteration would drop a cancel that lands while the
-    // loop body is processing a line.
-    let cancelled = cancel_token.notified();
-    tokio::pin!(cancelled);
-
-    loop {
-        tokio::select! {
-            _ = &mut cancelled => {
-                child.kill().await.ok();
-                return Err(AppError::UserCancelled("Render cancelled".to_string()));
-            }
-            line = stdout_lines.next_line() => {
-                match line {
-                    Ok(Some(line)) => {
-                        if stdout_tail.len() >= 10 {
-                            stdout_tail.pop_front();
-                        }
-                        stdout_tail.push_back(line.clone());
-
-                        if let Some((current, total)) = engine::parse_sample_progress(&line) {
-                            let percent = (current * 100) / total;
-                            if percent != last_percent {
-                                last_percent = percent;
-                                RenderStatus::Progress(RenderProgressStatus {
-                                    job_id: job_id.to_string(),
-                                    current_sample: current,
-                                    total_samples: total,
-                                    percent,
-                                })
-                                .emit(app_handle)
-                                .ok();
-                            }
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) => return Err(AppError::IoError(format!("Failed reading Blender output: {}", e))),
-                }
+    let run = engine::run_blender_lines(cmd, Some(cancel_token), |line| {
+        if let Some((current, total)) = engine::parse_sample_progress(line) {
+            let percent = (current * 100) / total;
+            if percent != last_percent {
+                last_percent = percent;
+                RenderStatus::Progress(RenderProgressStatus {
+                    job_id: job_id.to_string(),
+                    current_sample: current,
+                    total_samples: total,
+                    percent,
+                })
+                .emit(app_handle)
+                .ok();
             }
         }
-    }
+        ControlFlow::Continue(())
+    })
+    .await
+    .map_err(map_run_error)?;
 
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| AppError::IoError(format!("Failed waiting for Blender: {}", e)))?;
-
-    if !status.success() {
-        let stderr_lines = stderr_tail
-            .lock()
-            .map(|t| t.iter().cloned().collect::<Vec<_>>().join("\n"))
-            .unwrap_or_default();
-        let stdout_lines = stdout_tail.iter().cloned().collect::<Vec<_>>().join("\n");
+    if !run.status.success() {
         return Err(AppError::FileProcessingError(format!(
             "Blender exited with {}\n{}\n{}",
-            status, stdout_lines, stderr_lines
+            run.status, run.stdout_tail, run.stderr_tail
         )));
     }
 
