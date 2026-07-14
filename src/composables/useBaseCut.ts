@@ -6,6 +6,7 @@ import {
   commands,
   events,
 } from "../bindings";
+import { jobIdOf } from "../utils/events";
 
 /** One finished (or failed) cut, folded from CutDone/CutFailed events into a
  * single flat shape the results list can render without branching on which
@@ -38,28 +39,15 @@ export function useBaseCut() {
   onMounted(async () => {
     unlisten = await events.baseCutStatus.listen((event) => {
       const payload = event.payload;
-      const eventJobId =
-        "Started" in payload
-          ? payload.Started.job_id
-          : "Validating" in payload
-            ? payload.Validating.job_id
-            : "Validated" in payload
-              ? payload.Validated.job_id
-              : "CutStarted" in payload
-                ? payload.CutStarted.job_id
-                : "CutDone" in payload
-                  ? payload.CutDone.job_id
-                  : "CutFailed" in payload
-                    ? payload.CutFailed.job_id
-                    : "Finished" in payload
-                      ? payload.Finished.job_id
-                      : payload.Failed.job_id;
+      const eventJobId = jobIdOf(payload);
       // Once a job is in flight, ignore events from any other (a stale
       // listener from a previous run that hasn't unmounted yet, say).
       if (jobId.value && eventJobId !== jobId.value) return;
       status.value = payload;
 
       if ("Started" in payload) {
+        // Started owns `total` — the single source of truth for the job
+        // size (start() no longer guesses it from the placement list).
         total.value = payload.Started.total;
         results.value = [];
         validationWarning.value = null;
@@ -85,7 +73,11 @@ export function useBaseCut() {
           reason: failed.reason,
         });
       }
-      if ("Finished" in payload || "Failed" in payload) {
+      if (
+        "Finished" in payload ||
+        "Failed" in payload ||
+        "Cancelled" in payload
+      ) {
         jobId.value = "";
       }
     });
@@ -101,7 +93,8 @@ export function useBaseCut() {
       !!jobId.value ||
       (status.value !== null &&
         !("Finished" in status.value) &&
-        !("Failed" in status.value)),
+        !("Failed" in status.value) &&
+        !("Cancelled" in status.value)),
   );
 
   /** 0-based index of the cut currently in progress (best-effort — only
@@ -138,11 +131,24 @@ export function useBaseCut() {
     status.value && "Finished" in status.value ? status.value.Finished : null,
   );
 
-  const start = async (job: BaseCutJob) => {
+  /** True once a Cancelled event lands — the "user stopped this, it didn't
+   * break" case (see BaseCutStatus's doc comment). */
+  const cancelled = computed(
+    () => status.value !== null && "Cancelled" in status.value,
+  );
+
+  /** One place for the fields start() and reset() both clear, so the two
+   * can't drift out of sync on what counts as "no job". */
+  const resetState = () => {
     status.value = null;
+    jobId.value = "";
+    total.value = 0;
     results.value = [];
     validationWarning.value = null;
-    total.value = job.placements.length;
+  };
+
+  const start = async (job: BaseCutJob) => {
+    resetState();
     const result = await commands.startBaseCut(job);
     if (result.status === "ok") jobId.value = result.data;
     return result;
@@ -154,11 +160,7 @@ export function useBaseCut() {
   };
 
   const reset = () => {
-    status.value = null;
-    jobId.value = "";
-    total.value = 0;
-    results.value = [];
-    validationWarning.value = null;
+    resetState();
   };
 
   return {
@@ -172,6 +174,7 @@ export function useBaseCut() {
     failedMessage,
     failedStdoutTail,
     finishedSummary,
+    cancelled,
     start,
     cancel,
     reset,

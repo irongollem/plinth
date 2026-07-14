@@ -3,32 +3,40 @@
  * Top-down placement viewport for Base Cutter. A map view, not a 3D
  * preview: orthographic camera looking straight down -Z (+Y up on screen),
  * no tumbling. The landscape STL is decoded through the same worker
- * StlViewport uses (stlGeometry.worker.ts) so a multi-million-triangle
- * sculpt never freezes the UI, but — unlike StlViewport — the mesh is kept
- * in its native mm coordinates: placements' x_mm/y_mm are the landscape's
- * own STL coordinates, the same frame base_cut.py will cut in.
+ * StlViewport uses (stlGeometry.worker.ts, via the shared useStlDecode
+ * composable) so a multi-million-triangle sculpt never freezes the UI, but
+ * — unlike StlViewport — the mesh is kept in its native mm coordinates:
+ * placements' x_mm/y_mm are the landscape's own STL coordinates, the same
+ * frame base_cut.py will cut in.
  *
  * Placements are overlay outlines only (line loops just above the
  * landscape's max Z): a NOMINAL footprint (where the base stands) and a
- * smaller derived CUT footprint (nominal shrunk by the plinth taper inset),
- * per docs/BASECUTTER.md "The plinth". This component owns no placement
- * state — it raycasts drags into x/y and emits `update`, the view owns the
- * array.
+ * smaller derived CUT footprint (nominal shrunk by the plinth taper inset,
+ * via utils/cutFootprint — the same module a Rust top_face_of twin test
+ * pins), per docs/BASECUTTER.md "The plinth". This component owns no
+ * placement state — it raycasts drags into x/y and emits `update`, the view
+ * owns the array.
  */
 import { readFile } from "@tauri-apps/plugin-fs";
 import * as THREE from "three";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { CutterKind, Placement, PlinthParams } from "../bindings";
-import type {
-  StlDecodeResponse,
-  StlPartPayload,
-} from "../utils/stlGeometry.worker.ts";
+import {
+  SUPERSEDED,
+  toTransferableBuffer,
+  useStlDecode,
+} from "../composables/useStlDecode";
+import { insetShrink, shrinkKind } from "../utils/cutFootprint";
 
 const props = defineProps<{
   landscapePath: string;
   placements: Placement[];
   plinth: PlinthParams;
   selectedIndex: number | null;
+  /** Suppresses drag/rotate/delete while a cut job is running — the
+   * submitted job already snapshotted names/positions, mid-job edits would
+   * just desync the live view from what's actually being cut. */
+  locked: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -63,53 +71,16 @@ let landscapeGroup: THREE.Group | null = null;
 let landscapeMesh: THREE.Mesh | null = null;
 let landscapeMaterial: THREE.MeshStandardMaterial | null = null;
 let overlayGroup: THREE.Group | null = null;
+/** Overlay groups, one per placement, index-aligned with `props.placements`
+ * (see `syncOverlays`) — kept around across rebuilds so a drag only ever
+ * touches position/rotation instead of tearing down and re-creating
+ * geometry every frame. */
+let overlayGroups: THREE.Group[] = [];
 let resizeObserver: ResizeObserver | null = null;
 let loadToken = 0;
 
-/* ---- worker-side STL decoding (mirrors StlViewport; same worker file) ---- */
-let decodeWorker: Worker | null = null;
-let pendingDecode: {
-  id: number;
-  resolve: (parts: StlPartPayload[]) => void;
-  reject: (error: Error) => void;
-} | null = null;
-
-const SUPERSEDED = "superseded";
-
-const spawnWorker = () => {
-  const worker = new Worker(
-    new URL("../utils/stlGeometry.worker.ts", import.meta.url),
-    { type: "module" },
-  );
-  worker.addEventListener(
-    "message",
-    (event: MessageEvent<StlDecodeResponse>) => {
-      if (!pendingDecode || event.data.id !== pendingDecode.id) return;
-      const { resolve, reject } = pendingDecode;
-      pendingDecode = null;
-      if (event.data.error) reject(new Error(event.data.error));
-      else resolve(event.data.parts);
-    },
-  );
-  return worker;
-};
-
-const abortDecode = () => {
-  if (!pendingDecode) return;
-  decodeWorker?.terminate();
-  decodeWorker = null;
-  pendingDecode.reject(new Error(SUPERSEDED));
-  pendingDecode = null;
-};
-
-const decodeInWorker = (id: number, buffers: ArrayBuffer[]) => {
-  abortDecode();
-  decodeWorker ??= spawnWorker();
-  return new Promise<StlPartPayload[]>((resolve, reject) => {
-    pendingDecode = { id, resolve, reject };
-    decodeWorker?.postMessage({ id, buffers }, buffers);
-  });
-};
+/* ---- worker-side STL decoding (shared with StlViewport via useStlDecode) ---- */
+const stlDecode = useStlDecode();
 
 // ---- camera framing (ortho top-down: left/right/top/bottom + zoom) ----
 let baseHalfWidth = 100;
@@ -232,11 +203,8 @@ const loadLandscape = async () => {
   try {
     const bytes = await readFile(props.landscapePath);
     if (token !== loadToken) return;
-    const buffer = bytes.buffer.slice(
-      bytes.byteOffset,
-      bytes.byteOffset + bytes.byteLength,
-    ) as ArrayBuffer;
-    const [part] = await decodeInWorker(token, [buffer]);
+    const buffer = toTransferableBuffer(bytes);
+    const [part] = await stlDecode.decodeInWorker(token, [buffer]);
     if (token !== loadToken || !part) return;
 
     const geometry = new THREE.BufferGeometry();
@@ -262,7 +230,7 @@ const loadLandscape = async () => {
     const box = geometry.boundingBox as THREE.Box3;
     landscapeMaxZ = box.max.z;
     frameToLandscape(box.min.x, box.max.x, box.min.y, box.max.y);
-    rebuildOverlays();
+    syncOverlays();
     requestRender();
     emit("loaded", {
       centerX: (box.min.x + box.max.x) / 2,
@@ -282,35 +250,6 @@ const loadLandscape = async () => {
 };
 
 watch(() => props.landscapePath, loadLandscape);
-
-// ---- footprint geometry (mirrors basecutter::cutters::top_face_of) ----
-const insetShrink = () => {
-  const inset =
-    props.plinth.height_mm * Math.tan((props.plinth.taper_deg * Math.PI) / 180);
-  return 2 * inset;
-};
-
-const shrinkKind = (kind: CutterKind, shrink: number): CutterKind => {
-  switch (kind.kind) {
-    case "circle":
-      return {
-        kind: "circle",
-        diameter_mm: Math.max(0, kind.diameter_mm - shrink),
-      };
-    case "ellipse":
-      return {
-        kind: "ellipse",
-        major_mm: Math.max(0, kind.major_mm - shrink),
-        minor_mm: Math.max(0, kind.minor_mm - shrink),
-      };
-    case "rect":
-      return {
-        kind: "rect",
-        width_mm: Math.max(0, kind.width_mm - shrink),
-        depth_mm: Math.max(0, kind.depth_mm - shrink),
-      };
-  }
-};
 
 /** Local-space (unrotated, uncentered) polygon points for a cutter kind. */
 const footprintPoints = (kind: CutterKind): [number, number][] => {
@@ -360,44 +299,142 @@ const makeLoop = (
   return loop;
 };
 
-const rebuildOverlays = () => {
-  if (!overlayGroup || !scene) return;
-  for (const child of overlayGroup.children.slice()) {
-    overlayGroup.remove(child);
+/** Two-level walk (Group -> LineLoop): dispose a single overlay group's
+ * outer/inner line loops without removing the group itself. */
+const disposeOverlayGroup = (group: THREE.Group) => {
+  for (const child of group.children) {
     if (child instanceof THREE.LineLoop) {
       child.geometry.dispose();
       (child.material as THREE.Material).dispose();
     }
   }
-  const overlayZ =
-    landscapeMaxZ + Math.max(0.5, (baseHalfWidth + baseHalfHeight) * 0.001);
-  const shrink = insetShrink();
-  props.placements.forEach((placement, index) => {
-    const selected = index === props.selectedIndex;
-    const group = new THREE.Group();
-    group.position.set(placement.x_mm, placement.y_mm, overlayZ);
-    group.rotation.z = (placement.rotation_deg * Math.PI) / 180;
+};
 
-    const outer = makeLoop(
-      footprintPoints(placement.cutter),
-      selected ? OUTER_SELECTED_COLOR : OUTER_COLOR,
-      false,
-    );
-    const inner = makeLoop(
-      footprintPoints(shrinkKind(placement.cutter, shrink)),
-      selected ? INNER_SELECTED_COLOR : INNER_COLOR,
-      true,
-    );
-    group.add(outer, inner);
-    group.userData.placementIndex = index;
-    overlayGroup?.add(group);
+/** Full teardown: dispose every overlay group's geometry/material, remove
+ * them from the scene, and forget them. Used on unmount and whenever the
+ * placement list drops to zero. */
+const disposeOverlays = () => {
+  if (!overlayGroup) return;
+  for (const group of overlayGroups) {
+    overlayGroup.remove(group);
+    disposeOverlayGroup(group);
+  }
+  overlayGroups = [];
+};
+
+const overlayZ = () =>
+  landscapeMaxZ + Math.max(0.5, (baseHalfWidth + baseHalfHeight) * 0.001);
+
+/** Stable stringify of a cutter kind — cheap identity check for "did this
+ * placement's shape change" without a deep-equal. */
+const kindKeyOf = (kind: CutterKind): string => JSON.stringify(kind);
+/** Only the plinth fields that feed insetShrink affect the cut (inner)
+ * outline, so only they need to invalidate cached overlay geometry. */
+const plinthKeyOf = (plinth: PlinthParams): string =>
+  `${plinth.height_mm}:${plinth.taper_deg}`;
+
+const buildOverlayLoops = (
+  group: THREE.Group,
+  placement: Placement,
+  shrink: number,
+  selected: boolean,
+) => {
+  const outer = makeLoop(
+    footprintPoints(placement.cutter),
+    selected ? OUTER_SELECTED_COLOR : OUTER_COLOR,
+    false,
+  );
+  const inner = makeLoop(
+    footprintPoints(shrinkKind(placement.cutter, shrink)),
+    selected ? INNER_SELECTED_COLOR : INNER_COLOR,
+    true,
+  );
+  group.add(outer, inner);
+};
+
+/**
+ * Reconciles the overlay scene graph with `props.placements` instead of
+ * tearing everything down every time (the old rebuildOverlays did a full
+ * dispose+recreate on every position change, i.e. every frame of a drag).
+ * Index-aligned with the placement array: a group whose stored kindKey and
+ * plinthKey haven't changed just gets its transform updated (cheap, the
+ * drag-time hot path); a mismatch (different cutter, or a plinth taper
+ * edit) regenerates that group's geometry; extra trailing groups are
+ * disposed when the list shrinks.
+ */
+const syncOverlays = () => {
+  if (!overlayGroup) return;
+  const placements = props.placements;
+
+  if (placements.length === 0) {
+    disposeOverlays();
+    requestRender();
+    return;
+  }
+
+  while (overlayGroups.length > placements.length) {
+    const group = overlayGroups.pop();
+    if (!group) continue;
+    overlayGroup.remove(group);
+    disposeOverlayGroup(group);
+  }
+
+  const shrink = insetShrink(props.plinth);
+  const z = overlayZ();
+  const plinthKey = plinthKeyOf(props.plinth);
+
+  placements.forEach((placement, index) => {
+    const selected = index === props.selectedIndex;
+    const kindKey = kindKeyOf(placement.cutter);
+    let group = overlayGroups[index];
+
+    if (!group) {
+      group = new THREE.Group();
+      buildOverlayLoops(group, placement, shrink, selected);
+      overlayGroups[index] = group;
+      overlayGroup?.add(group);
+    } else if (
+      group.userData.kindKey !== kindKey ||
+      group.userData.plinthKey !== plinthKey
+    ) {
+      disposeOverlayGroup(group);
+      while (group.children.length) group.remove(group.children[0]);
+      buildOverlayLoops(group, placement, shrink, selected);
+    }
+
+    group.userData.index = index;
+    group.userData.kindKey = kindKey;
+    group.userData.plinthKey = plinthKey;
+    group.position.set(placement.x_mm, placement.y_mm, z);
+    group.rotation.z = (placement.rotation_deg * Math.PI) / 180;
+  });
+
+  requestRender();
+};
+
+/** Selection changed: recolor the outer/inner loops in place, no geometry
+ * work (see syncOverlays' doc comment). */
+const updateOverlayColors = () => {
+  overlayGroups.forEach((group, index) => {
+    const selected = index === props.selectedIndex;
+    const [outer, inner] = group.children as THREE.LineLoop[];
+    if (outer) {
+      (outer.material as THREE.LineBasicMaterial).color.setHex(
+        selected ? OUTER_SELECTED_COLOR : OUTER_COLOR,
+      );
+    }
+    if (inner) {
+      (inner.material as THREE.LineDashedMaterial).color.setHex(
+        selected ? INNER_SELECTED_COLOR : INNER_COLOR,
+      );
+    }
   });
   requestRender();
 };
 
-watch(() => props.placements, rebuildOverlays, { deep: true });
-watch(() => props.plinth, rebuildOverlays, { deep: true });
-watch(() => props.selectedIndex, rebuildOverlays);
+watch(() => props.placements, syncOverlays, { deep: true });
+watch(() => props.plinth, syncOverlays, { deep: true });
+watch(() => props.selectedIndex, updateOverlayColors);
 
 // ---- pointer interaction ----
 const raycaster = new THREE.Raycaster();
@@ -479,9 +516,13 @@ const onPointerDown = (e: PointerEvent) => {
     const world = pointerWorld(e);
     const hit = world ? hitTestPlacement(world) : null;
     if (hit !== null && world) {
-      dragIndex = hit;
       const p = props.placements[hit];
-      dragOffset.set(world.x - p.x_mm, world.y - p.y_mm);
+      // Selecting stays allowed while locked (viewing which cut is which);
+      // only starting a drag is suppressed.
+      if (!props.locked) {
+        dragIndex = hit;
+        dragOffset.set(world.x - p.x_mm, world.y - p.y_mm);
+      }
       if (hit !== props.selectedIndex) emit("select", hit);
     } else {
       dragIndex = null;
@@ -534,6 +575,7 @@ const onWheel = (e: WheelEvent) => {
 };
 
 const onKeydown = (e: KeyboardEvent) => {
+  if (props.locked) return;
   if (props.selectedIndex === null) return;
   const p = props.placements[props.selectedIndex];
   if (!p) return;
@@ -565,23 +607,10 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   loadToken++;
-  abortDecode();
-  decodeWorker?.terminate();
-  decodeWorker = null;
+  stlDecode.dispose();
   resizeObserver?.disconnect();
   disposeLandscape();
-  if (overlayGroup) {
-    for (const child of overlayGroup.children.slice()) {
-      if (child instanceof THREE.Group) {
-        for (const line of child.children) {
-          if (line instanceof THREE.LineLoop) {
-            line.geometry.dispose();
-            (line.material as THREE.Material).dispose();
-          }
-        }
-      }
-    }
-  }
+  disposeOverlays();
   landscapeMaterial?.dispose();
   renderer?.dispose();
   renderer?.domElement.remove();

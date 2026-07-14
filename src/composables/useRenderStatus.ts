@@ -6,6 +6,7 @@ import {
   type RenderStatus,
   commands,
 } from "../bindings";
+import { jobIdOf } from "../utils/events";
 
 /**
  * Tracks the lifecycle of a Blender render job driven by the Rust render
@@ -19,16 +20,7 @@ export function useRenderStatus() {
   onMounted(async () => {
     unlisten = await events.renderStatus.listen((event) => {
       const payload = event.payload;
-      const jobId =
-        "Started" in payload
-          ? payload.Started.job_id
-          : "Progress" in payload
-            ? payload.Progress.job_id
-            : "Completed" in payload
-              ? payload.Completed.job_id
-              : "Failed" in payload
-                ? payload.Failed.job_id
-                : payload.Cancelled.job_id;
+      const jobId = jobIdOf(payload);
       if (activeJobId.value && jobId !== activeJobId.value) return;
       status.value = payload;
       if (

@@ -21,10 +21,11 @@ import {
   type SpaceMouseMotion,
   useSpaceMouse,
 } from "../composables/useSpaceMouse.ts";
-import type {
-  StlDecodeResponse,
-  StlPartPayload,
-} from "../utils/stlGeometry.worker.ts";
+import {
+  SUPERSEDED,
+  toTransferableBuffer,
+  useStlDecode,
+} from "../composables/useStlDecode.ts";
 
 const props = defineProps<{
   parts: string[];
@@ -60,55 +61,13 @@ let material: THREE.MeshStandardMaterial | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let loadToken = 0;
 
-/* ---- worker-side STL decoding ----
+/* ---- worker-side STL decoding (shared with LandscapeViewport via
+   useStlDecode) ----
    Parsing + mergeVertices run in a Web Worker so million-triangle minis
    never freeze the UI. One worker per viewport; a superseded decode is
    aborted by terminating the worker (the only way to stop CPU-bound JS),
    which rejects its pending promise and a fresh worker takes over. */
-let decodeWorker: Worker | null = null;
-let pendingDecode: {
-  id: number;
-  resolve: (parts: StlPartPayload[]) => void;
-  reject: (error: Error) => void;
-} | null = null;
-
-const SUPERSEDED = "superseded";
-
-const spawnWorker = () => {
-  const worker = new Worker(
-    new URL("../utils/stlGeometry.worker.ts", import.meta.url),
-    { type: "module" },
-  );
-  worker.addEventListener(
-    "message",
-    (event: MessageEvent<StlDecodeResponse>) => {
-      if (!pendingDecode || event.data.id !== pendingDecode.id) return;
-      const { resolve, reject } = pendingDecode;
-      pendingDecode = null;
-      if (event.data.error) reject(new Error(event.data.error));
-      else resolve(event.data.parts);
-    },
-  );
-  return worker;
-};
-
-const abortDecode = () => {
-  if (!pendingDecode) return;
-  decodeWorker?.terminate();
-  decodeWorker = null;
-  pendingDecode.reject(new Error(SUPERSEDED));
-  pendingDecode = null;
-};
-
-const decodeInWorker = (id: number, buffers: ArrayBuffer[]) => {
-  abortDecode();
-  decodeWorker ??= spawnWorker();
-  return new Promise<StlPartPayload[]>((resolve, reject) => {
-    pendingDecode = { id, resolve, reject };
-    // buffers transfer, not copy — the worker owns them from here
-    decodeWorker?.postMessage({ id, buffers }, buffers);
-  });
-};
+const stlDecode = useStlDecode();
 
 // Camera parametrization identical to render_mini.py
 const view = {
@@ -763,14 +722,8 @@ const loadParts = async () => {
 
     // Parse + mergeVertices in the worker: seconds of CPU on big minis,
     // and the UI stays fully interactive while it runs
-    const buffers = byteArrays.map(
-      (bytes) =>
-        bytes.buffer.slice(
-          bytes.byteOffset,
-          bytes.byteOffset + bytes.byteLength,
-        ) as ArrayBuffer,
-    );
-    const payloads = await decodeInWorker(token, buffers);
+    const buffers = byteArrays.map((bytes) => toTransferableBuffer(bytes));
+    const payloads = await stlDecode.decodeInWorker(token, buffers);
     if (token !== loadToken) return;
 
     const geometries: THREE.BufferGeometry[] = payloads.map((part) => {
@@ -850,9 +803,7 @@ onBeforeUnmount(() => {
   loadToken++;
   spaceMouse.stop();
   if (smSettle) clearTimeout(smSettle);
-  abortDecode();
-  decodeWorker?.terminate();
-  decodeWorker = null;
+  stlDecode.dispose();
   resizeObserver?.disconnect();
   disposeModel();
   for (const mesh of [...gizmoRings, ...Object.values(visibleRings)]) {
