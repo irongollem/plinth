@@ -182,20 +182,38 @@ def _cell_center(seed, cell_mm, ix, iy):
     return Vector(((ix + 0.5 + jx * 0.7) * cell_mm, (iy + 0.5 + jy * 0.7) * cell_mm))
 
 
-def _stones_layer(seed, params):
+def _smoothstep(t):
+    t = min(1.0, max(0.0, t))
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _stones_layer(seed, params, resolution_mm):
     """2D Voronoi by brute-force nearest/second-nearest search over a
     jittered 3x3 neighborhood of cell centers (no scipy available inside
     Blender's python) — see docs/BASECUTTER.md's stones layer. Each stone
-    domes up from its cell center; within `gap_mm` of the cell border (i.e.
-    where the distance to the 2nd-nearest center is within gap_mm of the
-    distance to the nearest) the surface drops to a recessed mortar floor
-    instead."""
-    cell_mm = max(0.5, params.get("cell_mm", 12.0))
-    gap_mm = max(0.0, params.get("gap_mm", 1.2))
+    domes up from its cell center and drops to a recessed mortar floor at
+    the cell border.
+
+    The stone->mortar transition is a smoothstep band, never a hard cliff,
+    and the band is sized to the GRID (>= ~2 grid steps): a height jump
+    narrower than the sampling resolution can only render as a staircase
+    along diagonal borders — the aliasing that made the first cut bases
+    look pixelated. Softening in the heightfield is the fix; refining the
+    grid alone just shrinks the pixels."""
+    cell_mm = max(0.5, params.get("cell_mm", 4.0))
+    gap_mm = max(0.0, params.get("gap_mm", 0.5))
     dome = min(1.0, max(0.0, params.get("dome", 0.6)))
     jitter = params.get("jitter", 0.15)
     amount = params.get("amount", 1.0)
-    radius = max(0.05, cell_mm * 0.5 - gap_mm * 0.5)
+    # Distance from the Voronoi border where the stone reaches full height:
+    # half the mortar gap is mortar floor, then a resolution-scaled shoulder.
+    # The shoulder must clear ~1 grid step to kill aliasing but stay small
+    # against the stone radius — at 2x resolution a 4mm cobble was ALL
+    # shoulder and read as dimples, not setts.
+    edge = gap_mm * 0.5
+    shoulder = max(0.25, resolution_mm * 1.25)
+    radius = max(0.05, cell_mm * 0.5 - edge)
+    mortar = -0.3
 
     def fn(x, y):
         ix0 = math.floor(x / cell_mm)
@@ -213,14 +231,15 @@ def _stones_layer(seed, params):
                     best_d, best_ix, best_iy = d, ix, iy
                 elif d < second_d:
                     second_d = d
-        if (second_d - best_d) < gap_mm:
-            return -0.3 * amount  # recessed mortar between stones
+        # ~distance to the Voronoi border between nearest and 2nd-nearest.
+        border = (second_d - best_d) * 0.5
         t = min(1.0, best_d / radius)
-        flat_top = 1.0
         rounded = math.sqrt(max(0.0, 1.0 - t * t))
-        shape = flat_top * (1.0 - dome) + rounded * dome
+        shape = (1.0 - dome) + rounded * dome
         height_scale = 1.0 + jitter * (_hash01(seed, best_ix, best_iy, 3) * 2.0 - 1.0)
-        return shape * height_scale * amount
+        stone = shape * height_scale
+        rise = _smoothstep((border - edge) / shoulder)
+        return (mortar + (stone - mortar) * rise) * amount
 
     return fn
 
@@ -299,18 +318,20 @@ def _camber_layer(width_mm, params):
     return fn
 
 
-def build_layer_fns(seed, width_mm, depth_mm, layers):
+def build_layer_fns(seed, width_mm, depth_mm, layers, resolution_mm):
     """One f(x, y) -> contribution callable per ENABLED layer, in a fixed
     order — the order only affects summation float rounding, never the
     seed-derived randomness each layer draws (every layer's RNG/offset is
-    salted independently, see the module docstring)."""
+    salted independently, see the module docstring). `resolution_mm` lets
+    layers with hard height transitions (stones) size their smoothing band
+    to the grid so edges never alias into staircases."""
     fns = []
     if layers.get("noise", {}).get("enabled"):
         fns.append(_noise_layer(seed, layers["noise"]))
     if layers.get("ripples", {}).get("enabled"):
         fns.append(_ripples_layer(seed, layers["ripples"]))
     if layers.get("stones", {}).get("enabled"):
-        fns.append(_stones_layer(seed, layers["stones"]))
+        fns.append(_stones_layer(seed, layers["stones"], resolution_mm))
     if layers.get("boulders", {}).get("enabled"):
         fns.append(_boulders_layer(seed, width_mm, depth_mm, layers["boulders"]))
     if layers.get("flow", {}).get("enabled"):
@@ -426,7 +447,7 @@ def generate(params):
     xs = [-width_mm / 2.0 + i * (width_mm / (nx - 1)) for i in range(nx)]
     ys = [-depth_mm / 2.0 + j * (depth_mm / (ny - 1)) for j in range(ny)]
 
-    layer_fns = build_layer_fns(seed, width_mm, depth_mm, layers)
+    layer_fns = build_layer_fns(seed, width_mm, depth_mm, layers, resolution_mm)
 
     raw = [[0.0] * nx for _ in range(ny)]
     h_min, h_max = math.inf, -math.inf

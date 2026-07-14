@@ -125,8 +125,10 @@ impl Default for StonesLayer {
     fn default() -> Self {
         Self {
             enabled: false,
-            cell_mm: 12.0,
-            gap_mm: 1.2,
+            // Minis are ~1:56: a 4mm cell is a ~22cm cobble. The first
+            // 12mm tuning read as two giant flagstones on a 25mm base.
+            cell_mm: 4.0,
+            gap_mm: 0.5,
             dome: 0.6,
             jitter: 0.15,
             amount: 1.0,
@@ -260,9 +262,11 @@ pub struct GeneratorPreset {
 /// bake (see the phase's verification renders) — not just numbers that
 /// happened to compile.
 ///
-/// - **cobblestone-street**: stones (12mm cells, tight 1.2mm mortar) +
-///   camber (the street crown) + a little base noise so the plate isn't
-///   perfectly flat between stones.
+/// - **cobblestone-street**: stones (4mm cells / 0.5mm mortar — at ~1:56
+///   that's a 22cm cobble; sized against a cut 25mm base, not the bare
+///   plate) + camber (the street crown) + a little base noise so the
+///   plate isn't perfectly flat between stones. Baked at 0.4mm grid so
+///   the joints resolve.
 /// - **sandy**: directional ripples (windswept dune ridges) over soft,
 ///   low-amplitude rolling noise (the dune body itself).
 /// - **rocky**: ridged noise (fine jagged detail) + a handful of chunky
@@ -284,16 +288,24 @@ pub fn seed_presets() -> Vec<GeneratorPreset> {
                 seed: 1,
                 width_mm: 120.0,
                 depth_mm: 80.0,
-                resolution_mm: 0.75,
+                // Finer than the default grid: 4mm cobbles with 0.5mm
+                // mortar need ~0.4mm sampling or the joints alias.
+                resolution_mm: 0.4,
                 carrier_mm: 2.0,
-                relief_mm: 3.0,
+                relief_mm: 1.6,
                 layers: LandscapeLayers {
+                    // Scale check: minis are ~1:56, so a 4mm cell is a
+                    // ~22cm cobble — reads as cobbles on a 25mm base
+                    // (~6 across), not the two giant flagstones the first
+                    // 12mm tuning produced (caught by the first GUI cut).
+                    // Low dome = flat-topped setts; high dome at this cell
+                    // size read as golf-ball dimples.
                     stones: StonesLayer {
                         enabled: true,
-                        cell_mm: 12.0,
-                        gap_mm: 1.2,
-                        dome: 0.6,
-                        jitter: 0.2,
+                        cell_mm: 4.0,
+                        gap_mm: 0.5,
+                        dome: 0.35,
+                        jitter: 0.25,
                         amount: 1.0,
                     },
                     camber: CamberLayer {
