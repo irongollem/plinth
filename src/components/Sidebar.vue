@@ -203,6 +203,31 @@ const stepState = (step: ReleaseStep) => {
       Render studio
     </button>
 
+    <button
+      type="button"
+      class="flex items-center gap-2.5 px-4.5 py-2.25 font-semibold text-[13px] cursor-pointer border-l-2 text-left"
+      :class="
+        releasesStore.activeTab === 'basecutter'
+          ? 'bg-base-content/5 border-primary'
+          : 'border-transparent text-base-content/60 hover:text-base-content'
+      "
+      @click="releasesStore.setActiveTab('basecutter')"
+    >
+      <svg
+        width="15"
+        height="15"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+      >
+        <!-- a round cutter stamped through a slab — the base-cut plug -->
+        <circle cx="12" cy="9" r="6"></circle>
+        <path d="M6 9v9a6 6 0 0 0 12 0V9"></path>
+      </svg>
+      Base Cutter
+    </button>
+
     <!-- easter egg: only exists when the sibling minihoard CLI is installed -->
     <button
       v-if="minihoardInfo"

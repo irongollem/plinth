@@ -1,0 +1,631 @@
+<script setup lang="ts">
+/**
+ * Top-down placement viewport for Base Cutter. A map view, not a 3D
+ * preview: orthographic camera looking straight down -Z (+Y up on screen),
+ * no tumbling. The landscape STL is decoded through the same worker
+ * StlViewport uses (stlGeometry.worker.ts) so a multi-million-triangle
+ * sculpt never freezes the UI, but — unlike StlViewport — the mesh is kept
+ * in its native mm coordinates: placements' x_mm/y_mm are the landscape's
+ * own STL coordinates, the same frame base_cut.py will cut in.
+ *
+ * Placements are overlay outlines only (line loops just above the
+ * landscape's max Z): a NOMINAL footprint (where the base stands) and a
+ * smaller derived CUT footprint (nominal shrunk by the plinth taper inset),
+ * per docs/BASECUTTER.md "The plinth". This component owns no placement
+ * state — it raycasts drags into x/y and emits `update`, the view owns the
+ * array.
+ */
+import { readFile } from "@tauri-apps/plugin-fs";
+import * as THREE from "three";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import type { CutterKind, Placement, PlinthParams } from "../bindings";
+import type {
+  StlDecodeResponse,
+  StlPartPayload,
+} from "../utils/stlGeometry.worker.ts";
+
+const props = defineProps<{
+  landscapePath: string;
+  placements: Placement[];
+  plinth: PlinthParams;
+  selectedIndex: number | null;
+}>();
+
+const emit = defineEmits<{
+  select: [index: number | null];
+  update: [index: number, patch: Partial<Placement>];
+  delete: [index: number];
+  /** Landscape (re)loaded — its XY bounds, for "add at landscape center". */
+  loaded: [
+    bounds: {
+      centerX: number;
+      centerY: number;
+      minX: number;
+      maxX: number;
+      minY: number;
+      maxY: number;
+    },
+  ];
+  error: [message: string];
+}>();
+
+const container = ref<HTMLDivElement | null>(null);
+const isLoading = ref(false);
+
+const CIRCLE_SEGMENTS = 96; // matches base_cut.py's CIRCLE_SEGMENTS
+const ROTATE_STEP_DEG = 5;
+const ROTATE_STEP_FAST_DEG = 15;
+
+let renderer: THREE.WebGLRenderer | null = null;
+let scene: THREE.Scene | null = null;
+let camera: THREE.OrthographicCamera | null = null;
+let landscapeGroup: THREE.Group | null = null;
+let landscapeMesh: THREE.Mesh | null = null;
+let landscapeMaterial: THREE.MeshStandardMaterial | null = null;
+let overlayGroup: THREE.Group | null = null;
+let resizeObserver: ResizeObserver | null = null;
+let loadToken = 0;
+
+/* ---- worker-side STL decoding (mirrors StlViewport; same worker file) ---- */
+let decodeWorker: Worker | null = null;
+let pendingDecode: {
+  id: number;
+  resolve: (parts: StlPartPayload[]) => void;
+  reject: (error: Error) => void;
+} | null = null;
+
+const SUPERSEDED = "superseded";
+
+const spawnWorker = () => {
+  const worker = new Worker(
+    new URL("../utils/stlGeometry.worker.ts", import.meta.url),
+    { type: "module" },
+  );
+  worker.addEventListener(
+    "message",
+    (event: MessageEvent<StlDecodeResponse>) => {
+      if (!pendingDecode || event.data.id !== pendingDecode.id) return;
+      const { resolve, reject } = pendingDecode;
+      pendingDecode = null;
+      if (event.data.error) reject(new Error(event.data.error));
+      else resolve(event.data.parts);
+    },
+  );
+  return worker;
+};
+
+const abortDecode = () => {
+  if (!pendingDecode) return;
+  decodeWorker?.terminate();
+  decodeWorker = null;
+  pendingDecode.reject(new Error(SUPERSEDED));
+  pendingDecode = null;
+};
+
+const decodeInWorker = (id: number, buffers: ArrayBuffer[]) => {
+  abortDecode();
+  decodeWorker ??= spawnWorker();
+  return new Promise<StlPartPayload[]>((resolve, reject) => {
+    pendingDecode = { id, resolve, reject };
+    decodeWorker?.postMessage({ id, buffers }, buffers);
+  });
+};
+
+// ---- camera framing (ortho top-down: left/right/top/bottom + zoom) ----
+let baseHalfWidth = 100;
+let baseHalfHeight = 100;
+let camX = 0;
+let camY = 0;
+let camZoom = 1;
+let landscapeMaxZ = 0;
+
+const setupScene = (el: HTMLDivElement) => {
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(el.clientWidth, el.clientHeight);
+  el.appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x1a1a1a);
+
+  camera = new THREE.OrthographicCamera(-100, 100, 100, -100, 0.01, 1e6);
+  camera.up.set(0, 1, 0);
+
+  const key = new THREE.DirectionalLight(0xffffff, 2.2);
+  key.position.set(0.4, -0.3, 1);
+  scene.add(key);
+  const fill = new THREE.DirectionalLight(0xbfd4ff, 0.5);
+  fill.position.set(-0.5, 0.4, 0.6);
+  scene.add(fill);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+
+  landscapeGroup = new THREE.Group();
+  scene.add(landscapeGroup);
+
+  overlayGroup = new THREE.Group();
+  scene.add(overlayGroup);
+
+  landscapeMaterial = new THREE.MeshStandardMaterial({
+    color: 0x8a8f86,
+    roughness: 0.85,
+    metalness: 0,
+  });
+
+  applyCamera();
+};
+
+let renderQueued = false;
+const requestRender = () => {
+  if (renderQueued || !renderer) return;
+  renderQueued = true;
+  requestAnimationFrame(() => {
+    renderQueued = false;
+    if (renderer && scene && camera) renderer.render(scene, camera);
+  });
+};
+
+const applyCamera = () => {
+  if (!camera || !container.value) return;
+  const { clientWidth, clientHeight } = container.value;
+  const aspect = clientWidth && clientHeight ? clientWidth / clientHeight : 1;
+  // Fit the landscape bbox (with margin already baked into base half-extents)
+  // inside the viewport regardless of aspect ratio.
+  let halfW = baseHalfWidth;
+  let halfH = baseHalfHeight;
+  const boxAspect = halfW / halfH || 1;
+  if (boxAspect > aspect) {
+    halfH = halfW / aspect;
+  } else {
+    halfW = halfH * aspect;
+  }
+  camera.left = -halfW;
+  camera.right = halfW;
+  camera.top = halfH;
+  camera.bottom = -halfH;
+  camera.zoom = camZoom;
+  camera.position.set(
+    camX,
+    camY,
+    landscapeMaxZ + Math.max(halfW, halfH, 10) * 4 + 100,
+  );
+  camera.up.set(0, 1, 0);
+  camera.lookAt(camX, camY, landscapeMaxZ);
+  camera.updateProjectionMatrix();
+  requestRender();
+};
+
+const frameToLandscape = (
+  minX: number,
+  maxX: number,
+  minY: number,
+  maxY: number,
+) => {
+  const margin = 1.15;
+  const sizeX = Math.max(maxX - minX, 1);
+  const sizeY = Math.max(maxY - minY, 1);
+  baseHalfWidth = (sizeX / 2) * margin;
+  baseHalfHeight = (sizeY / 2) * margin;
+  camX = (minX + maxX) / 2;
+  camY = (minY + maxY) / 2;
+  camZoom = 1;
+  applyCamera();
+};
+
+// ---- landscape loading ----
+const disposeLandscape = () => {
+  if (!landscapeGroup) return;
+  if (landscapeMesh) {
+    landscapeGroup.remove(landscapeMesh);
+    landscapeMesh.geometry.dispose();
+    landscapeMesh = null;
+  }
+};
+
+const loadLandscape = async () => {
+  const token = ++loadToken;
+  disposeLandscape();
+  if (!props.landscapePath) {
+    requestRender();
+    return;
+  }
+  isLoading.value = true;
+  try {
+    const bytes = await readFile(props.landscapePath);
+    if (token !== loadToken) return;
+    const buffer = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ) as ArrayBuffer;
+    const [part] = await decodeInWorker(token, [buffer]);
+    if (token !== loadToken || !part) return;
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      "position",
+      new THREE.BufferAttribute(part.position, 3),
+    );
+    if (part.normal) {
+      geometry.setAttribute(
+        "normal",
+        new THREE.BufferAttribute(part.normal, 3),
+      );
+    } else {
+      geometry.computeVertexNormals();
+    }
+    if (part.index) geometry.setIndex(new THREE.BufferAttribute(part.index, 1));
+    geometry.computeBoundingBox();
+
+    if (!landscapeMaterial || !landscapeGroup) return;
+    landscapeMesh = new THREE.Mesh(geometry, landscapeMaterial);
+    landscapeGroup.add(landscapeMesh);
+
+    const box = geometry.boundingBox as THREE.Box3;
+    landscapeMaxZ = box.max.z;
+    frameToLandscape(box.min.x, box.max.x, box.min.y, box.max.y);
+    rebuildOverlays();
+    requestRender();
+    emit("loaded", {
+      centerX: (box.min.x + box.max.x) / 2,
+      centerY: (box.min.y + box.max.y) / 2,
+      minX: box.min.x,
+      maxX: box.max.x,
+      minY: box.min.y,
+      maxY: box.max.y,
+    });
+  } catch (error) {
+    if (!(error instanceof Error && error.message === SUPERSEDED)) {
+      emit("error", `Failed to load landscape: ${error}`);
+    }
+  } finally {
+    if (token === loadToken) isLoading.value = false;
+  }
+};
+
+watch(() => props.landscapePath, loadLandscape);
+
+// ---- footprint geometry (mirrors basecutter::cutters::top_face_of) ----
+const insetShrink = () => {
+  const inset =
+    props.plinth.height_mm * Math.tan((props.plinth.taper_deg * Math.PI) / 180);
+  return 2 * inset;
+};
+
+const shrinkKind = (kind: CutterKind, shrink: number): CutterKind => {
+  switch (kind.kind) {
+    case "circle":
+      return {
+        kind: "circle",
+        diameter_mm: Math.max(0, kind.diameter_mm - shrink),
+      };
+    case "ellipse":
+      return {
+        kind: "ellipse",
+        major_mm: Math.max(0, kind.major_mm - shrink),
+        minor_mm: Math.max(0, kind.minor_mm - shrink),
+      };
+    case "rect":
+      return {
+        kind: "rect",
+        width_mm: Math.max(0, kind.width_mm - shrink),
+        depth_mm: Math.max(0, kind.depth_mm - shrink),
+      };
+  }
+};
+
+/** Local-space (unrotated, uncentered) polygon points for a cutter kind. */
+const footprintPoints = (kind: CutterKind): [number, number][] => {
+  if (kind.kind === "rect") {
+    const hw = kind.width_mm / 2;
+    const hd = kind.depth_mm / 2;
+    return [
+      [-hw, -hd],
+      [hw, -hd],
+      [hw, hd],
+      [-hw, hd],
+    ];
+  }
+  const rx = kind.kind === "circle" ? kind.diameter_mm / 2 : kind.major_mm / 2;
+  const ry = kind.kind === "circle" ? kind.diameter_mm / 2 : kind.minor_mm / 2;
+  const pts: [number, number][] = [];
+  for (let i = 0; i < CIRCLE_SEGMENTS; i++) {
+    const a = (i / CIRCLE_SEGMENTS) * Math.PI * 2;
+    pts.push([Math.cos(a) * rx, Math.sin(a) * ry]);
+  }
+  return pts;
+};
+
+const OUTER_COLOR = 0x9ad1ff;
+const OUTER_SELECTED_COLOR = 0xffcc55;
+const INNER_COLOR = 0x5a8fc0;
+const INNER_SELECTED_COLOR = 0xcf9a3a;
+
+const makeLoop = (
+  points: [number, number][],
+  color: number,
+  dashed: boolean,
+) => {
+  const positions = new Float32Array(points.length * 3);
+  points.forEach(([x, y], i) => {
+    positions[i * 3] = x;
+    positions[i * 3 + 1] = y;
+    positions[i * 3 + 2] = 0;
+  });
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  const material = dashed
+    ? new THREE.LineDashedMaterial({ color, dashSize: 1.5, gapSize: 1 })
+    : new THREE.LineBasicMaterial({ color });
+  const loop = new THREE.LineLoop(geometry, material);
+  if (dashed) loop.computeLineDistances();
+  return loop;
+};
+
+const rebuildOverlays = () => {
+  if (!overlayGroup || !scene) return;
+  for (const child of overlayGroup.children.slice()) {
+    overlayGroup.remove(child);
+    if (child instanceof THREE.LineLoop) {
+      child.geometry.dispose();
+      (child.material as THREE.Material).dispose();
+    }
+  }
+  const overlayZ =
+    landscapeMaxZ + Math.max(0.5, (baseHalfWidth + baseHalfHeight) * 0.001);
+  const shrink = insetShrink();
+  props.placements.forEach((placement, index) => {
+    const selected = index === props.selectedIndex;
+    const group = new THREE.Group();
+    group.position.set(placement.x_mm, placement.y_mm, overlayZ);
+    group.rotation.z = (placement.rotation_deg * Math.PI) / 180;
+
+    const outer = makeLoop(
+      footprintPoints(placement.cutter),
+      selected ? OUTER_SELECTED_COLOR : OUTER_COLOR,
+      false,
+    );
+    const inner = makeLoop(
+      footprintPoints(shrinkKind(placement.cutter, shrink)),
+      selected ? INNER_SELECTED_COLOR : INNER_COLOR,
+      true,
+    );
+    group.add(outer, inner);
+    group.userData.placementIndex = index;
+    overlayGroup?.add(group);
+  });
+  requestRender();
+};
+
+watch(() => props.placements, rebuildOverlays, { deep: true });
+watch(() => props.plinth, rebuildOverlays, { deep: true });
+watch(() => props.selectedIndex, rebuildOverlays);
+
+// ---- pointer interaction ----
+const raycaster = new THREE.Raycaster();
+const groundPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+
+const pointerNdc = (e: PointerEvent) => {
+  const el = container.value;
+  if (!el) return new THREE.Vector2();
+  const rect = el.getBoundingClientRect();
+  return new THREE.Vector2(
+    ((e.clientX - rect.left) / rect.width) * 2 - 1,
+    -((e.clientY - rect.top) / rect.height) * 2 + 1,
+  );
+};
+
+/** World XY under the pointer, via a vertical ray through the ortho camera
+ * intersected with the landscape's own horizontal plane — same X/Y at any
+ * Z since the camera looks straight down. */
+const pointerWorld = (e: PointerEvent): THREE.Vector2 | null => {
+  if (!camera) return null;
+  raycaster.setFromCamera(pointerNdc(e), camera);
+  groundPlane.constant = -landscapeMaxZ;
+  const hit = new THREE.Vector3();
+  if (!raycaster.ray.intersectPlane(groundPlane, hit)) return null;
+  return new THREE.Vector2(hit.x, hit.y);
+};
+
+/** Hit-test placements (topmost/last first) against their NOMINAL footprint
+ * (the bigger, easier-to-grab outline). */
+const hitTestPlacement = (world: THREE.Vector2): number | null => {
+  for (let i = props.placements.length - 1; i >= 0; i--) {
+    const p = props.placements[i];
+    const dx = world.x - p.x_mm;
+    const dy = world.y - p.y_mm;
+    const rad = (-p.rotation_deg * Math.PI) / 180;
+    const lx = dx * Math.cos(rad) - dy * Math.sin(rad);
+    const ly = dx * Math.sin(rad) + dy * Math.cos(rad);
+    const kind = p.cutter;
+    if (kind.kind === "rect") {
+      if (
+        Math.abs(lx) <= kind.width_mm / 2 &&
+        Math.abs(ly) <= kind.depth_mm / 2
+      ) {
+        return i;
+      }
+    } else {
+      const rx =
+        kind.kind === "circle" ? kind.diameter_mm / 2 : kind.major_mm / 2;
+      const ry =
+        kind.kind === "circle" ? kind.diameter_mm / 2 : kind.minor_mm / 2;
+      if ((lx / rx) ** 2 + (ly / ry) ** 2 <= 1) return i;
+    }
+  }
+  return null;
+};
+
+let dragButton: number | null = null;
+let isPanning = false;
+let dragIndex: number | null = null;
+let dragOffset = new THREE.Vector2();
+let lastX = 0;
+let lastY = 0;
+
+const onPointerDown = (e: PointerEvent) => {
+  container.value?.focus();
+  dragButton = e.button;
+  lastX = e.clientX;
+  lastY = e.clientY;
+  (e.target as HTMLElement).setPointerCapture(e.pointerId);
+
+  if (e.button === 1 || e.button === 2) {
+    isPanning = true;
+    dragIndex = null;
+    return;
+  }
+  isPanning = false;
+
+  if (e.button === 0) {
+    const world = pointerWorld(e);
+    const hit = world ? hitTestPlacement(world) : null;
+    if (hit !== null && world) {
+      dragIndex = hit;
+      const p = props.placements[hit];
+      dragOffset.set(world.x - p.x_mm, world.y - p.y_mm);
+      if (hit !== props.selectedIndex) emit("select", hit);
+    } else {
+      dragIndex = null;
+      if (props.selectedIndex !== null) emit("select", null);
+    }
+  }
+};
+
+const onPointerMove = (e: PointerEvent) => {
+  if (dragButton === null) return;
+  const dx = e.clientX - lastX;
+  const dy = e.clientY - lastY;
+  lastX = e.clientX;
+  lastY = e.clientY;
+
+  if (isPanning) {
+    if (!camera || !container.value) return;
+    const { clientWidth, clientHeight } = container.value;
+    const worldPerPixelX =
+      (camera.right - camera.left) / camera.zoom / (clientWidth || 1);
+    const worldPerPixelY =
+      (camera.top - camera.bottom) / camera.zoom / (clientHeight || 1);
+    camX -= dx * worldPerPixelX;
+    camY += dy * worldPerPixelY;
+    applyCamera();
+    return;
+  }
+
+  if (dragIndex !== null) {
+    const world = pointerWorld(e);
+    if (!world) return;
+    emit("update", dragIndex, {
+      x_mm: world.x - dragOffset.x,
+      y_mm: world.y - dragOffset.y,
+    });
+  }
+};
+
+const onPointerUp = (e: PointerEvent) => {
+  dragButton = null;
+  isPanning = false;
+  dragIndex = null;
+  (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+};
+
+const onWheel = (e: WheelEvent) => {
+  e.preventDefault();
+  camZoom = Math.min(20, Math.max(0.1, camZoom * (1 - e.deltaY * 0.001)));
+  applyCamera();
+};
+
+const onKeydown = (e: KeyboardEvent) => {
+  if (props.selectedIndex === null) return;
+  const p = props.placements[props.selectedIndex];
+  if (!p) return;
+  if (e.key === "[" || e.key === "]") {
+    e.preventDefault();
+    const step = e.shiftKey ? ROTATE_STEP_FAST_DEG : ROTATE_STEP_DEG;
+    const delta = e.key === "[" ? -step : step;
+    const next = (((p.rotation_deg + delta) % 360) + 360) % 360;
+    emit("update", props.selectedIndex, { rotation_deg: next });
+  } else if (e.key === "Delete" || e.key === "Backspace") {
+    e.preventDefault();
+    emit("delete", props.selectedIndex);
+  }
+};
+
+onMounted(() => {
+  if (!container.value) return;
+  setupScene(container.value);
+  resizeObserver = new ResizeObserver(() => {
+    if (!renderer || !container.value) return;
+    const { clientWidth, clientHeight } = container.value;
+    if (!clientWidth || !clientHeight) return;
+    renderer.setSize(clientWidth, clientHeight);
+    applyCamera();
+  });
+  resizeObserver.observe(container.value);
+  loadLandscape();
+});
+
+onBeforeUnmount(() => {
+  loadToken++;
+  abortDecode();
+  decodeWorker?.terminate();
+  decodeWorker = null;
+  resizeObserver?.disconnect();
+  disposeLandscape();
+  if (overlayGroup) {
+    for (const child of overlayGroup.children.slice()) {
+      if (child instanceof THREE.Group) {
+        for (const line of child.children) {
+          if (line instanceof THREE.LineLoop) {
+            line.geometry.dispose();
+            (line.material as THREE.Material).dispose();
+          }
+        }
+      }
+    }
+  }
+  landscapeMaterial?.dispose();
+  renderer?.dispose();
+  renderer?.domElement.remove();
+  renderer = null;
+  scene = null;
+  camera = null;
+  landscapeGroup = null;
+  overlayGroup = null;
+});
+</script>
+
+<template>
+  <div class="relative w-full h-full min-h-64">
+    <div
+      ref="container"
+      tabindex="0"
+      class="w-full h-full rounded-box overflow-hidden outline-none cursor-grab active:cursor-grabbing"
+      @pointerdown="onPointerDown"
+      @pointermove="onPointerMove"
+      @pointerup="onPointerUp"
+      @pointercancel="onPointerUp"
+      @wheel="onWheel"
+      @keydown="onKeydown"
+      @contextmenu.prevent
+    ></div>
+    <div
+      v-if="isLoading"
+      class="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/50 rounded-box"
+    >
+      <span class="loading loading-spinner loading-lg"></span>
+      <span class="text-sm opacity-70">Loading landscape…</span>
+    </div>
+    <div
+      v-if="!landscapePath"
+      class="absolute inset-0 flex items-center justify-center text-base-content/40 pointer-events-none"
+    >
+      Select a landscape STL to place cutters
+    </div>
+    <div
+      v-else
+      class="absolute bottom-2 left-2 text-xs text-base-content/40 pointer-events-none"
+    >
+      drag: move selected · click: select · [ / ]: rotate (shift: 15°) · delete:
+      remove · middle/right-drag: pan · wheel: zoom
+    </div>
+  </div>
+</template>

@@ -6,6 +6,7 @@ import Sidebar from "./components/Sidebar.vue";
 import ToastContainer from "./components/ToastContainer.vue";
 import { use3DPackageHandler } from "./composables/use3DPackageHandler";
 import { useReleasesStore } from "./stores/releasesStore";
+import BaseCutter from "./views/BaseCutter.vue";
 import Catalog from "./views/Catalog.vue";
 import Minihoard from "./views/Minihoard.vue";
 import Releases from "./views/Releases.vue";
@@ -24,6 +25,8 @@ const currentTabComponent = computed(() => {
       return Releases;
     case "render":
       return Render;
+    case "basecutter":
+      return BaseCutter;
     case "minihoard":
       return Minihoard;
     case "settings":
