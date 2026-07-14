@@ -1638,7 +1638,18 @@ dome: number;
 /**
  * Per-stone height variance (0 = every stone the same height).
  */
-jitter: number; amount?: number }
+jitter: number; 
+/**
+ * 0 = even cobbles; towards 1, a slow field drowns low cells into open
+ * lakes and fuses gaps between strongly-crusted neighbors — uneven
+ * crust masses (the lava look) instead of a tiled street.
+ */
+cluster?: number; 
+/**
+ * 0 = clean Voronoi edges; towards 1, ~1-2mm wobble makes plate
+ * outlines ragged/broken (needs a fine enough grid to resolve).
+ */
+rough?: number; amount?: number }
 export type TagCount = { tag: string; count: number }
 
 /** tauri-specta globals **/

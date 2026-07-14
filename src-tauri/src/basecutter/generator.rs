@@ -117,6 +117,15 @@ pub struct StonesLayer {
     pub dome: f64,
     /// Per-stone height variance (0 = every stone the same height).
     pub jitter: f64,
+    /// 0 = even cobbles; towards 1, a slow field drowns low cells into open
+    /// lakes and fuses gaps between strongly-crusted neighbors — uneven
+    /// crust masses (the lava look) instead of a tiled street.
+    #[serde(default)]
+    pub cluster: f64,
+    /// 0 = clean Voronoi edges; towards 1, ~1-2mm wobble makes plate
+    /// outlines ragged/broken (needs a fine enough grid to resolve).
+    #[serde(default)]
+    pub rough: f64,
     #[serde(default = "default_amount")]
     pub amount: f64,
 }
@@ -131,6 +140,8 @@ impl Default for StonesLayer {
             gap_mm: 0.5,
             dome: 0.6,
             jitter: 0.15,
+            cluster: 0.0,
+            rough: 0.0,
             amount: 1.0,
         }
     }
@@ -306,6 +317,8 @@ pub fn seed_presets() -> Vec<GeneratorPreset> {
                         gap_mm: 0.5,
                         dome: 0.35,
                         jitter: 0.25,
+                        cluster: 0.0,
+                        rough: 0.0,
                         amount: 1.0,
                     },
                     camber: CamberLayer {
@@ -334,19 +347,22 @@ pub fn seed_presets() -> Vec<GeneratorPreset> {
                 carrier_mm: 2.0,
                 relief_mm: 4.0,
                 layers: LandscapeLayers {
+                    // Dunes dominate, ripples are surface texture riding
+                    // them — inverted from the first tuning, which read as
+                    // uniform corduroy (ripples 2x the dune amplitude).
                     ripples: RipplesLayer {
                         enabled: true,
-                        wavelength_mm: 9.0,
+                        wavelength_mm: 6.0,
                         direction_deg: 20.0,
-                        amount: 1.0,
-                        waviness: 0.5,
+                        amount: 0.5,
+                        waviness: 0.9,
                     },
                     noise: NoiseLayer {
                         enabled: true,
-                        scale: 0.025,
-                        octaves: 3,
+                        scale: 0.03,
+                        octaves: 2,
                         ridged: false,
-                        amount: 0.5,
+                        amount: 1.4,
                     },
                     ..Default::default()
                 },
@@ -388,23 +404,41 @@ pub fn seed_presets() -> Vec<GeneratorPreset> {
                 seed: 4,
                 width_mm: 120.0,
                 depth_mm: 80.0,
-                resolution_mm: 0.75,
+                resolution_mm: 0.4,
                 carrier_mm: 2.0,
-                relief_mm: 8.0,
+                relief_mm: 4.5,
                 layers: LandscapeLayers {
-                    flow: FlowLayer {
+                    // The lava-base look (per the reference boards): chunky
+                    // raised CRUST ISLANDS with wide, deep channels between
+                    // them — the channels are where painters put the glow.
+                    // That's the Voronoi layer with inverted proportions:
+                    // big plates, 4.5mm channel gaps instead of mortar
+                    // lines, hard flat-ish tops, strong per-plate height
+                    // jitter so the crust reads broken, not tiled. The
+                    // smooth-flow layer alone read as mud tongues.
+                    stones: StonesLayer {
                         enabled: true,
-                        channel_width_mm: 14.0,
-                        meander_scale: 0.35,
-                        bank_height: 1.6,
+                        cell_mm: 16.0,
+                        gap_mm: 4.0,
+                        dome: 0.15,
+                        jitter: 0.5,
+                        // The two knobs that stop it reading as cobbles:
+                        // clustering drowns whole cells into lakes and
+                        // fuses crusted neighbors into large masses;
+                        // roughness breaks the plate outlines ragged.
+                        cluster: 0.8,
+                        rough: 0.75,
                         amount: 1.0,
                     },
+                    // Ridged roughness: crust texture on the plates, faint
+                    // flow ripple in the channels (summed everywhere, kept
+                    // small so the channels still read liquid).
                     noise: NoiseLayer {
                         enabled: true,
-                        scale: 0.09,
+                        scale: 0.14,
                         octaves: 3,
                         ridged: true,
-                        amount: 0.25,
+                        amount: 0.3,
                     },
                     ..Default::default()
                 },
@@ -944,13 +978,19 @@ mod tests {
         assert!(preset.params.layers.boulders.enabled);
     }
 
+    /// Lava is CLUSTERED, ROUGH crust plates — not the smooth flow field
+    /// (which read as mud tongues) and not an even Voronoi (which read as
+    /// cobbles). Pins the two knobs that make it lava; exact values are
+    /// tuning, the non-zero-ness is design.
     #[test]
-    fn lava_flow_preset_enables_flow() {
+    fn lava_flow_preset_is_clustered_ragged_crust() {
         let preset = seed_presets()
             .into_iter()
             .find(|p| p.id == "lava-flow")
             .unwrap();
-        assert!(preset.params.layers.flow.enabled);
+        assert!(preset.params.layers.stones.enabled);
+        assert!(preset.params.layers.stones.cluster > 0.5);
+        assert!(preset.params.layers.stones.rough > 0.5);
     }
 
     #[test]

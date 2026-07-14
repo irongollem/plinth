@@ -23,8 +23,9 @@
 #                   "ridged": false, "amount": 1.0 },
 #     "ripples":  { "enabled": false, "wavelength_mm": 8.0, "direction_deg": 0.0,
 #                   "amount": 1.0, "waviness": 0.3 },
-#     "stones":   { "enabled": false, "cell_mm": 12.0, "gap_mm": 1.2,
-#                   "dome": 0.6, "jitter": 0.15, "amount": 1.0 },
+#     "stones":   { "enabled": false, "cell_mm": 4.0, "gap_mm": 0.5,
+#                   "dome": 0.6, "jitter": 0.15, "cluster": 0.0,
+#                   "rough": 0.0, "amount": 1.0 },
 #     "boulders": { "enabled": false, "count": 6, "min_mm": 8.0, "max_mm": 20.0,
 #                   "amount": 1.0 },
 #     "flow":     { "enabled": false, "channel_width_mm": 10.0,
@@ -96,6 +97,8 @@ _SALT_NOISE = 0x1
 _SALT_RIPPLES = 0x2
 _SALT_FLOW = 0x3
 _SALT_BOULDERS = 0x4
+_SALT_CLUSTER = 0x5
+_SALT_EDGE = 0x6
 
 
 def tok(name, payload=None):
@@ -163,9 +166,12 @@ def _noise_layer(seed, params):
 
 
 def _ripples_layer(seed, params):
-    """Windswept sand: a sine wave along `direction_deg`, its phase distorted
-    by a slow noise field when `waviness` > 0 so the ripples meander rather
-    than ruling dead-straight lines."""
+    """Windswept sand: a sine wave along `direction_deg`, phase-distorted by
+    a slow noise field so the crests meander, and amplitude-modulated by a
+    second slow field so ripples strengthen and fade in patches. Both are
+    what real sand does — a constant-amplitude, near-straight sine reads as
+    machined corduroy, not dunes (the first sandy bake did exactly that:
+    ±0.5π of wobble across a 9mm wavelength is visually a ruled line)."""
     offset = _seed_offset(seed, _SALT_RIPPLES)
     wavelength = max(0.05, params.get("wavelength_mm", 8.0))
     direction = math.radians(params.get("direction_deg", 0.0))
@@ -177,8 +183,11 @@ def _ripples_layer(seed, params):
         phase = 2.0 * math.pi * (x * dx + y * dy) / wavelength
         if waviness:
             p = Vector((x * 0.03 + offset.x, y * 0.03 + offset.y, offset.z))
-            phase += waviness * noise.noise(p) * math.pi
-        return math.sin(phase) * amount
+            phase += waviness * noise.noise(p) * 2.0 * math.pi
+        # Patchy strength: never fully dead (floor 0.25), never uniform.
+        m = Vector((x * 0.02 + offset.y, y * 0.02 + offset.z, offset.x))
+        patch = 0.625 + 0.375 * noise.noise(m)
+        return math.sin(phase) * patch * amount
 
     return fn
 
@@ -217,6 +226,21 @@ def _stones_layer(seed, params, resolution_mm):
     dome = min(1.0, max(0.0, params.get("dome", 0.6)))
     jitter = params.get("jitter", 0.15)
     amount = params.get("amount", 1.0)
+    # cluster (0..1): 0 = every cell is a stone with uniform gaps (cobbles);
+    # towards 1, a slow coherence field decides per cell — low cells drown
+    # to the floor entirely (open lakes) and the gap between two strongly-
+    # crusted neighbors closes up, fusing them into one large mass. This is
+    # what separates "lava crust" from "cobblestone street": the same
+    # Voronoi, unevenly distributed.
+    cluster = min(1.0, max(0.0, params.get("cluster", 0.0)))
+    # rough (0..1): high-frequency wobble on the border distance — ragged,
+    # broken plate outlines instead of clean Voronoi edges. Feature size is
+    # ~1-2mm, so it only resolves when the grid is fine enough (which is
+    # exactly the behavior wanted: raggedness is a resolution-permitting
+    # detail, never aliasing).
+    rough = min(1.0, max(0.0, params.get("rough", 0.0)))
+    cluster_offset = _seed_offset(seed, _SALT_CLUSTER)
+    edge_offset = _seed_offset(seed, _SALT_EDGE)
     # Distance from the Voronoi border where the stone reaches full height:
     # half the mortar gap is mortar floor, then a resolution-scaled shoulder.
     # The shoulder must clear ~1 grid step to kill aliasing but stay small
@@ -227,6 +251,17 @@ def _stones_layer(seed, params, resolution_mm):
     radius = max(0.05, cell_mm * 0.5 - edge)
     mortar = -0.3
 
+    def crustiness(ix, iy):
+        """Slow coherent field sampled at the CELL CENTER — neighbors get
+        correlated values, so crust survives in patches, not salt-and-pepper."""
+        c = _cell_center(seed, cell_mm, ix, iy)
+        p = Vector((
+            c.x * 0.02 + cluster_offset.x,
+            c.y * 0.02 + cluster_offset.y,
+            cluster_offset.z,
+        ))
+        return 0.5 + 0.5 * noise.noise(p)
+
     def fn(x, y):
         ix0 = math.floor(x / cell_mm)
         iy0 = math.floor(y / cell_mm)
@@ -234,23 +269,45 @@ def _stones_layer(seed, params, resolution_mm):
         best_d = math.inf
         second_d = math.inf
         best_ix = best_iy = 0
+        second_ix = second_iy = 0
         for dj in (-1, 0, 1):
             for di in (-1, 0, 1):
                 ix, iy = ix0 + di, iy0 + dj
                 d = (p - _cell_center(seed, cell_mm, ix, iy)).length
                 if d < best_d:
                     second_d = best_d
+                    second_ix, second_iy = best_ix, best_iy
                     best_d, best_ix, best_iy = d, ix, iy
                 elif d < second_d:
                     second_d = d
+                    second_ix, second_iy = ix, iy
         # ~distance to the Voronoi border between nearest and 2nd-nearest.
         border = (second_d - best_d) * 0.5
+        gap_eff = edge
+        if cluster > 0.0:
+            c1 = crustiness(best_ix, best_iy)
+            if c1 < cluster * 0.55:
+                return mortar * amount  # this whole cell drowned — open lake
+            c2 = crustiness(second_ix, second_iy)
+            # Both neighbors solidly crusted -> the border between them
+            # heals shut and they read as one mass. Ramp starts just above
+            # the drown threshold so surviving neighborhoods actually fuse
+            # instead of staying a polite tiled street.
+            fuse = _smoothstep((min(c1, c2) - 0.45) / 0.25)
+            gap_eff = edge * (1.0 - 0.9 * fuse * cluster)
+        if rough > 0.0:
+            e = Vector((
+                x * 0.8 + edge_offset.x,
+                y * 0.8 + edge_offset.y,
+                edge_offset.z,
+            ))
+            border += rough * cell_mm * 0.12 * noise.noise(e)
         t = min(1.0, best_d / radius)
         rounded = math.sqrt(max(0.0, 1.0 - t * t))
         shape = (1.0 - dome) + rounded * dome
         height_scale = 1.0 + jitter * (_hash01(seed, best_ix, best_iy, 3) * 2.0 - 1.0)
         stone = shape * height_scale
-        rise = _smoothstep((border - edge) / shoulder)
+        rise = _smoothstep((border - gap_eff) / shoulder)
         return (mortar + (stone - mortar) * rise) * amount
 
     return fn
