@@ -158,28 +158,41 @@ const applyCamera = () => {
   camera.top = halfH;
   camera.bottom = -halfH;
   camera.zoom = camZoom;
-  // Tilt pitches the camera around the view center's screen-horizontal
-  // axis (a transient "peek" — cuts are always vertical, so the resting
-  // pose stays a true top-down map). At tilt 0 this reduces exactly to
-  // the original straight-down pose. Interactions stay correct while
-  // tilted because pointerWorld raycasts against the maxZ plane rather
-  // than assuming a vertical view ray.
+  // The peek pose: pitch (tilt) around the view center's screen-horizontal
+  // axis + spin around the vertical Z axis through the same center — a
+  // transient orbit; cuts are always vertical, so the resting pose stays a
+  // true top-down map. At tilt=spin=0 this reduces exactly to the original
+  // straight-down pose. Interactions stay correct while peeking because
+  // pointerWorld raycasts against the maxZ plane rather than assuming a
+  // vertical view ray.
   const dist = Math.max(halfW, halfH, 10) * 4 + 100;
-  const rad = (tiltDeg * Math.PI) / 180;
-  camera.position.set(
-    camX,
-    camY - Math.sin(rad) * dist,
-    landscapeMaxZ + Math.cos(rad) * dist,
+  const radT = (tiltDeg * Math.PI) / 180;
+  const zAxis = new THREE.Vector3(0, 0, 1);
+  const radS = (spinDeg * Math.PI) / 180;
+  const offset = new THREE.Vector3(
+    0,
+    -Math.sin(radT) * dist,
+    Math.cos(radT) * dist,
+  ).applyAxisAngle(zAxis, radS);
+  const up = new THREE.Vector3(0, Math.cos(radT), Math.sin(radT)).applyAxisAngle(
+    zAxis,
+    radS,
   );
-  camera.up.set(0, Math.cos(rad), Math.sin(rad));
+  camera.position.set(
+    camX + offset.x,
+    camY + offset.y,
+    landscapeMaxZ + offset.z,
+  );
+  camera.up.copy(up);
   camera.lookAt(camX, camY, landscapeMaxZ);
   camera.updateProjectionMatrix();
   requestRender();
 };
 
-// ---- tilt peek (right-drag pitches the view; snaps back on release) ----
+// ---- peek (right-drag: dy pitches, dx spins; snaps back on release) ----
 const TILT_MAX_DEG = 60;
 let tiltDeg = 0;
+let spinDeg = 0;
 let tiltAnimation: number | null = null;
 
 const cancelTiltSnapBack = () => {
@@ -191,9 +204,11 @@ const cancelTiltSnapBack = () => {
 
 const snapTiltBack = () => {
   cancelTiltSnapBack();
-  const from = tiltDeg;
-  if (from <= 0.01) {
+  const fromTilt = tiltDeg;
+  const fromSpin = spinDeg;
+  if (Math.abs(fromTilt) <= 0.01 && Math.abs(fromSpin) <= 0.01) {
     tiltDeg = 0;
+    spinDeg = 0;
     applyCamera();
     return;
   }
@@ -202,7 +217,8 @@ const snapTiltBack = () => {
   const step = (now: number) => {
     const t = Math.min(1, (now - started) / durationMs);
     const eased = 1 - (1 - t) ** 3; // ease-out cubic
-    tiltDeg = from * (1 - eased);
+    tiltDeg = fromTilt * (1 - eased);
+    spinDeg = fromSpin * (1 - eased);
     applyCamera();
     tiltAnimation = t < 1 ? requestAnimationFrame(step) : null;
   };
@@ -377,6 +393,26 @@ const kindKeyOf = (kind: CutterKind): string => JSON.stringify(kind);
 const plinthKeyOf = (plinth: PlinthParams): string =>
   `${plinth.height_mm}:${plinth.taper_deg}`;
 
+/** Local +X half-extent of a footprint — where the rotation handle sits
+ * (along the shape's own major axis, so it rotates with the placement). */
+const plusXExtent = (kind: CutterKind): number => {
+  switch (kind.kind) {
+    case "circle":
+      return kind.diameter_mm / 2;
+    case "ellipse":
+      return kind.major_mm / 2;
+    case "rect":
+      return kind.width_mm / 2;
+  }
+};
+
+const HANDLE_STEM_MM = 3;
+const HANDLE_RADIUS_MM = 1.4;
+
+/** Distance from the placement center to the rotation handle's center. */
+const handleDist = (kind: CutterKind): number =>
+  plusXExtent(kind) + HANDLE_STEM_MM + HANDLE_RADIUS_MM;
+
 const buildOverlayLoops = (
   group: THREE.Group,
   placement: Placement,
@@ -393,7 +429,48 @@ const buildOverlayLoops = (
     selected ? INNER_SELECTED_COLOR : INNER_COLOR,
     true,
   );
-  group.add(outer, inner);
+  // Rotation handle: a stem out of the footprint's local +X plus a small
+  // circle to grab — lives in the group, so the placement's own rotation
+  // carries it. Only shown on the selected placement (and pointless for
+  // circles, whose rotation is invisible).
+  const xEdge = plusXExtent(placement.cutter);
+  const stem = makeLoop(
+    [
+      [xEdge, 0],
+      [xEdge + HANDLE_STEM_MM, 0],
+    ],
+    OUTER_SELECTED_COLOR,
+    false,
+  );
+  const knob = makeLoop(
+    Array.from({ length: 24 }, (_, i): [number, number] => {
+      const a = (i / 24) * Math.PI * 2;
+      return [
+        xEdge + HANDLE_STEM_MM + HANDLE_RADIUS_MM + Math.cos(a) * HANDLE_RADIUS_MM,
+        Math.sin(a) * HANDLE_RADIUS_MM,
+      ];
+    }),
+    OUTER_SELECTED_COLOR,
+    false,
+  );
+  stem.visible = knob.visible =
+    selected && placement.cutter.kind !== "circle" && !props.locked;
+  group.add(outer, inner, stem, knob);
+};
+
+/** Show the rotation handle only on the selected, rotatable placement. */
+const syncHandleVisibility = () => {
+  overlayGroups.forEach((group, index) => {
+    const [, , stem, knob] = group.children;
+    const p = props.placements[index];
+    const show =
+      index === props.selectedIndex &&
+      p !== undefined &&
+      p.cutter.kind !== "circle" &&
+      !props.locked;
+    if (stem) stem.visible = show;
+    if (knob) knob.visible = show;
+  });
 };
 
 /**
@@ -453,6 +530,9 @@ const syncOverlays = () => {
     group.rotation.z = (placement.rotation_deg * Math.PI) / 180;
   });
 
+  // Transform-only updates skip buildOverlayLoops, so after deletes shift
+  // indices the handle could linger on the wrong placement.
+  syncHandleVisibility();
   requestRender();
 };
 
@@ -473,12 +553,14 @@ const updateOverlayColors = () => {
       );
     }
   });
+  syncHandleVisibility();
   requestRender();
 };
 
 watch(() => props.placements, syncOverlays, { deep: true });
 watch(() => props.plinth, syncOverlays, { deep: true });
 watch(() => props.selectedIndex, updateOverlayColors);
+watch(() => props.locked, updateOverlayColors);
 
 // ---- pointer interaction ----
 const raycaster = new THREE.Raycaster();
@@ -538,6 +620,7 @@ const hitTestPlacement = (world: THREE.Vector2): number | null => {
 let dragButton: number | null = null;
 let isPanning = false;
 let isTilting = false;
+let rotateIndex: number | null = null;
 let dragIndex: number | null = null;
 let dragOffset = new THREE.Vector2();
 let lastX = 0;
@@ -567,6 +650,33 @@ const onPointerDown = (e: PointerEvent) => {
 
   if (e.button === 0) {
     const world = pointerWorld(e);
+
+    // The rotation handle of the selected placement wins over footprint
+    // hit-testing — it sits outside the outline, so there's no overlap in
+    // practice, but a neighboring placement underneath must not steal it.
+    if (world && props.selectedIndex !== null && !props.locked) {
+      const p = props.placements[props.selectedIndex];
+      if (p && p.cutter.kind !== "circle") {
+        const rad = (p.rotation_deg * Math.PI) / 180;
+        const d = handleDist(p.cutter);
+        const hx = p.x_mm + Math.cos(rad) * d;
+        const hy = p.y_mm + Math.sin(rad) * d;
+        // Grab tolerance: the knob itself plus a few screen pixels so it
+        // stays grabbable when zoomed out.
+        const worldPerPixel = camera
+          ? (camera.right - camera.left) /
+            camera.zoom /
+            (container.value?.clientWidth || 1)
+          : 0.5;
+        const tol = Math.max(HANDLE_RADIUS_MM * 1.8, 6 * worldPerPixel);
+        if (Math.hypot(world.x - hx, world.y - hy) <= tol) {
+          rotateIndex = props.selectedIndex;
+          dragIndex = null;
+          return;
+        }
+      }
+    }
+
     const hit = world ? hitTestPlacement(world) : null;
     if (hit !== null && world) {
       const p = props.placements[hit];
@@ -593,6 +703,9 @@ const onPointerMove = (e: PointerEvent) => {
 
   if (isTilting) {
     tiltDeg = Math.min(TILT_MAX_DEG, Math.max(0, tiltDeg + dy * 0.4));
+    spinDeg = (((spinDeg + dx * 0.4) % 360) + 360) % 360;
+    // Snap back the short way around: keep spin in (-180, 180].
+    if (spinDeg > 180) spinDeg -= 360;
     applyCamera();
     return;
   }
@@ -610,6 +723,19 @@ const onPointerMove = (e: PointerEvent) => {
     return;
   }
 
+  if (rotateIndex !== null) {
+    const world = pointerWorld(e);
+    const p = props.placements[rotateIndex];
+    if (!world || !p) return;
+    // The handle rides local +X, so the pointer's bearing from the center
+    // IS the rotation. Shift snaps to 15° for rank-and-flank neatness.
+    let deg =
+      (Math.atan2(world.y - p.y_mm, world.x - p.x_mm) * 180) / Math.PI;
+    if (e.shiftKey) deg = Math.round(deg / 15) * 15;
+    emit("update", rotateIndex, { rotation_deg: Math.round(deg * 10) / 10 });
+    return;
+  }
+
   if (dragIndex !== null) {
     const world = pointerWorld(e);
     if (!world) return;
@@ -624,6 +750,7 @@ const onPointerUp = (e: PointerEvent) => {
   dragButton = null;
   isPanning = false;
   dragIndex = null;
+  rotateIndex = null;
   if (isTilting) {
     isTilting = false;
     snapTiltBack();
@@ -717,8 +844,8 @@ onBeforeUnmount(() => {
       v-else
       class="absolute bottom-2 left-2 text-xs text-base-content/40 pointer-events-none"
     >
-      drag: move selected · click: select · [ / ]: rotate (shift: 15°) · delete:
-      remove · middle-drag: pan · right-drag: tilt peek · wheel: zoom
+      drag: move · handle: rotate (shift snaps 15°) · [ / ]: rotate · delete:
+      remove · middle-drag: pan · right-drag: tilt/rotate peek · wheel: zoom
     </div>
   </div>
 </template>

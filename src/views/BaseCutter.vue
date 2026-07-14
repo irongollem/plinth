@@ -34,6 +34,7 @@ import { selectDirectory, useFileSelect } from "../composables/useFileSelect";
 import { useLandscapeGen } from "../composables/useLandscapeGen";
 import { useReleasesStore } from "../stores/releasesStore";
 import { useToastStore } from "../stores/toastStore";
+import { cloneRaw } from "../utils/cloneRaw";
 
 const toastStore = useToastStore();
 const releasesStore = useReleasesStore();
@@ -127,6 +128,8 @@ const genParams = reactive<GenParams>({
       gap_mm: 0.5,
       dome: 0.6,
       jitter: 0.15,
+      cluster: 0.0,
+      rough: 0.0,
       amount: 1.0,
     },
     boulders: {
@@ -152,8 +155,14 @@ const genParams = reactive<GenParams>({
  * comment for why the cast is safe: the wire payload is always fully
  * populated even though the generated type marks layer fields optional. */
 const selectPreset = (preset: GeneratorPreset) => {
+  // cloneRaw, NOT bare structuredClone: presets clicked in the template
+  // are reactive Proxies (they live in a ref), and structuredClone throws
+  // DataCloneError on Proxies — the params copy silently died in Vue's
+  // error handler while the chip highlighted, so every bake kept the
+  // first-loaded preset's terrain. The id is set only after the copy
+  // succeeds so the highlight can never desync from the actual params.
+  Object.assign(genParams, cloneRaw(preset.params) as GenParams);
   selectedPresetId.value = preset.id;
-  Object.assign(genParams, structuredClone(preset.params) as GenParams);
 };
 
 /** Reroll to a fresh random seed, keeping the rest of the params (preset or
@@ -661,6 +670,22 @@ const resultName = (index: number) =>
                     :step="0.05"
                     :min="0"
                     v-model="genParams.layers.stones.jitter"
+                  />
+                  <NumberInput
+                    id="gen-stones-cluster"
+                    label="Cluster (0-1, lava crust)"
+                    :step="0.05"
+                    :min="0"
+                    :max="1"
+                    v-model="genParams.layers.stones.cluster"
+                  />
+                  <NumberInput
+                    id="gen-stones-rough"
+                    label="Edge roughness (0-1)"
+                    :step="0.05"
+                    :min="0"
+                    :max="1"
+                    v-model="genParams.layers.stones.rough"
                   />
                   <NumberInput
                     id="gen-stones-amount"
