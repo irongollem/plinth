@@ -1324,6 +1324,51 @@ mod tests {
     }
 
     #[test]
+    fn plinth_bases_export_layout_scans_as_six_separate_models() {
+        // Mirrors basecutter::commands::export_cuts's on-disk layout for a
+        // six-base Base Cutter "Add to catalog" export, one cut per folder:
+        // {root}/Plinth Bases/{YYYY-MM group}/{cut stem}/{cut stem}.stl
+        // with a minimal {name, designer: "Plinth Bases"} model.json per
+        // per-cut folder. Confirms the general rule this bug turned on: a
+        // sidecar'd folder is its own model — a name-suffix heuristic like
+        // "foo-1, foo-2, ..." never gets a chance to merge them, because
+        // metadata models skip folder inference (`inferred` stays None)
+        // entirely and take group_name straight from the sidecar's name.
+        // (The actual "one model, six parts" bug the user hit was a
+        // DIFFERENT bug one layer up, in export_cuts itself — see
+        // basecutter::commands::tests::
+        // distinct_bases_sharing_a_default_stem_scan_as_separate_models.)
+        let root =
+            std::env::temp_dir().join(format!("stlpack_plinth_layout_{}", std::process::id()));
+        let release_dir = root.join("Plinth Bases").join("2026-07 Sunday Batch");
+        for n in 1..=6 {
+            let stem = format!("round285-{n}");
+            let dir = release_dir.join(&stem);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(format!("{stem}.stl")), b"solid fake").unwrap();
+            fs::write(
+                dir.join("model.json"),
+                format!(r#"{{"name":"{stem}","designer":"Plinth Bases"}}"#),
+            )
+            .unwrap();
+        }
+
+        let cancel = AtomicBool::new(false);
+        let outcome = scan(&root, &cancel, &[], |_, _| {}).unwrap();
+
+        assert_eq!(outcome.models.len(), 6, "each per-cut folder is its own model");
+        for model in &outcome.models {
+            assert_eq!(model.file_count, 1);
+            assert_eq!(model.source, "metadata");
+            // group_name must stay per-model, not collapse "round285-1" ..
+            // "round285-6" onto a shared "round285" group
+            assert_eq!(model.group_name.as_deref(), Some(model.name.as_str()));
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn date_from_segment_handles_both_orders_and_junk() {
         assert_eq!(
             date_from_segment("dungeon_classics-05-2026").as_deref(),

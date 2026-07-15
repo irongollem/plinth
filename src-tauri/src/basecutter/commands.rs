@@ -412,6 +412,17 @@ fn current_year_month_utc() -> (i64, u32) {
 /// function only ever copies into a configured catalog root and has no path
 /// into file::commands' release/share pipeline.
 ///
+/// The per-cut folder is keyed on the cut's file stem, but the stem alone
+/// is not a reliable identity: base_cut.py names an unnamed placement off
+/// its index within ONE job's out_dir (unique_out_path), so two SEPARATE
+/// job runs each independently start back at the same bare stem (a
+/// 28.5mm round cutter cut in two different sessions is "round285.stl"
+/// both times). Landing both in the same folder would silently merge two
+/// unrelated bases into one catalog model with the second read as an
+/// extra PART of the first — see `cut_dest_dir`, which only reuses an
+/// existing per-cut folder when it already holds this exact cut (a true
+/// re-export), and gives any other stem collision its own folder instead.
+///
 /// Each per-cut model folder also gets a minimal `model.json` sidecar naming
 /// PLINTH_DESIGNER (see `write_export_model_json`): the scanner's designer
 /// resolution is model.json designer -> release.json designer -> a
@@ -497,14 +508,18 @@ pub fn export_cuts(
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "cut".to_string());
-        let dest_dir = crate::catalog::layout::model_dir(
-            root_path,
-            PLINTH_DESIGNER,
-            Some(group_name),
-            Some(&date),
-            &stem,
-        );
+        let dest_dir = cut_dest_dir(root_path, group_name, &date, &stem, source);
         std::fs::create_dir_all(&dest_dir)?;
+        // The sidecar's name must match the folder THIS cut actually landed
+        // in, not the raw stem: cut_dest_dir may have pushed a stem-collided
+        // cut to "{stem} 2" to keep it a separate model, and naming it
+        // "{stem}" there would hand it the same group_name as the folder it
+        // was disambiguated away from, undoing the split at the metadata
+        // layer.
+        let dir_stem = dest_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| stem.clone());
         let file_name = source
             .file_name()
             .map(PathBuf::from)
@@ -518,12 +533,56 @@ pub fn export_cuts(
                 e
             ))
         })?;
-        write_export_model_json(&dest_dir, &stem)?;
+        write_export_model_json(&dest_dir, &dir_stem)?;
     }
 
     let release_dir =
         crate::catalog::layout::release_dir(root_path, PLINTH_DESIGNER, group_name, Some(&date));
     Ok(release_dir.to_string_lossy().into_owned())
+}
+
+/// The per-cut model folder for `source`, disambiguated against a stem
+/// collision with an UNRELATED cut (see export_cuts's doc comment for why
+/// that's a real scenario, not a hypothetical one). A folder is reused
+/// only when it already holds a model file byte-identical to `source` —
+/// the genuine re-export/versioning case (`export_suffixes_instead_of_
+/// overwriting_on_a_second_export`). Anything else occupying the stem is a
+/// different base and gets pushed to "{stem} 2", "{stem} 3", ... until a
+/// free or matching folder is found — mirroring normalize::numbered_name's
+/// pattern, but at the folder tier instead of the file tier.
+fn cut_dest_dir(root_path: &Path, group_name: &str, date: &str, stem: &str, source: &Path) -> PathBuf {
+    let mut candidate_stem = stem.to_string();
+    for n in 2.. {
+        let dir = crate::catalog::layout::model_dir(
+            root_path,
+            PLINTH_DESIGNER,
+            Some(group_name),
+            Some(date),
+            &candidate_stem,
+        );
+        if !dir.is_dir() || dir_holds_the_same_cut(&dir, source) {
+            return dir;
+        }
+        candidate_stem = format!("{stem} {n}");
+    }
+    unreachable!("ran out of integers before a landing spot")
+}
+
+/// Whether `dir` already contains a model file with the exact bytes of
+/// `source` — the signal that this folder is a re-export of the SAME cut
+/// rather than a different one that happens to share a stem.
+fn dir_holds_the_same_cut(dir: &Path, source: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        path.is_file()
+            && path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("stl"))
+            && crate::catalog::normalize::same_content(&path, source)
+    })
 }
 
 /// Write a minimal `model.json` naming PLINTH_DESIGNER into a per-cut model
@@ -897,6 +956,74 @@ mod tests {
             model_dir.join("round32-1.stl").is_file(),
             "the second export must land beside the first, not over it"
         );
+    }
+
+    /// Two DIFFERENT bases that happen to land on the same default stem
+    /// ("round285" from a 28.5mm round cutter, cut in two separate job
+    /// runs — each run's own out_dir independently starts base_cut.py's
+    /// unique_out_path numbering back at the bare name) must NOT collapse
+    /// into one catalog model. Before the fix, export_cuts keyed the
+    /// per-cut folder on stem alone and reused it on any name collision,
+    /// and write_export_model_json's never-clobber guard then froze the
+    /// FIRST cut's sidecar over the folder — so the scanner read the
+    /// second (unrelated) cut as a second FILE of the first cut's model,
+    /// producing one card with the two bases as overlapping "parts"
+    /// instead of two cards. Distinguishing content (not the byte-for-byte
+    /// stub `export_suffixes_instead_of_overwriting_on_a_second_export`
+    /// uses) is what makes this a genuinely different base, not a re-export.
+    #[test]
+    fn distinct_bases_sharing_a_default_stem_scan_as_separate_models() {
+        let root = TempRoot::new("stem_collision");
+        let roots = vec![root.path().to_string_lossy().into_owned()];
+
+        let src1 = TempRoot::new("stem_collision_src1");
+        let first = src1.path().join("round285.stl");
+        std::fs::write(&first, b"solid base one\nendsolid base one\n").unwrap();
+        export_cuts(
+            &[first.to_string_lossy().into_owned()],
+            &root.path().to_string_lossy(),
+            "Sunday Batch",
+            &roots,
+            (2026, 7),
+        )
+        .expect("first export should succeed");
+
+        // A second, later job run: a DIFFERENT base, but base_cut.py's
+        // per-job unique_out_path independently starts back at the bare
+        // "round285.stl" name in this run's own out_dir.
+        let src2 = TempRoot::new("stem_collision_src2");
+        let second = src2.path().join("round285.stl");
+        std::fs::write(&second, b"solid base two, totally different geometry\nendsolid base two\n")
+            .unwrap();
+        export_cuts(
+            &[second.to_string_lossy().into_owned()],
+            &root.path().to_string_lossy(),
+            "Sunday Batch",
+            &roots,
+            (2026, 7),
+        )
+        .expect("second export should succeed");
+
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let outcome =
+            crate::catalog::scanner::scan(root.path(), &cancel, &[], |_, _| {}).unwrap();
+
+        assert_eq!(
+            outcome.models.len(),
+            2,
+            "two unrelated bases must scan as two models, not one multi-part model: {:?}",
+            outcome
+                .models
+                .iter()
+                .map(|m| (m.dir_path.clone(), m.file_count))
+                .collect::<Vec<_>>()
+        );
+        for model in &outcome.models {
+            assert_eq!(
+                model.file_count, 1,
+                "each base must own its files, not absorb a sibling cut's file"
+            );
+        }
     }
 
     /// A second export into an already-sidecar'd folder must not clobber a
