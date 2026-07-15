@@ -543,6 +543,41 @@ def new_object(name, bm):
     return obj
 
 
+def _split_quad(bm, v00, v10, v11, v01):
+    """Triangulate one grid quad along whichever 3D diagonal is SHORTER,
+    after displacement — not a fixed corner-to-corner convention.
+
+    Leaving the quad as a single bmesh face and letting Blender's STL
+    exporter tessellate it on export always splits the same way (fan from
+    the face's first vertex, i.e. always the v00-v11 diagonal). On a flat
+    plate that's invisible; on a displaced heightfield every quad slashes
+    in the same fixed direction regardless of which way the surface
+    actually curves, so curved features (cobble domes, dune ridges) pick up
+    a uniform diagonal crease pattern that catches light as a "woven"
+    faceting artifact — the fix reported by zoomed cobblestone renders.
+
+    Comparing the two diagonals (v00-v11 vs v10-v01) and following the
+    shorter one instead makes the triangulation follow curvature: the split
+    lands across whichever pair of opposite corners is actually closer
+    together post-displacement, which is where a curved quad wants its
+    crease to fall to best approximate the surface. This is a pure function
+    of (already seed-deterministic) vertex heights, so it adds no
+    randomness — same seed still bakes the same mesh, triangle-for-triangle.
+
+    Winding doesn't need to be tracked here: bmesh.ops.recalc_face_normals
+    (called once over the whole mesh after building it) makes the final
+    orientation authoritative regardless of how each triangle was wound.
+    """
+    d_ac = (v00.co - v11.co).length_squared
+    d_bd = (v10.co - v01.co).length_squared
+    if d_ac <= d_bd:
+        bm.faces.new((v00, v10, v11))
+        bm.faces.new((v00, v11, v01))
+    else:
+        bm.faces.new((v00, v10, v01))
+        bm.faces.new((v10, v11, v01))
+
+
 def build_heightfield(xs, ys, heights):
     """Displaced grid + boundary skirt + bottom cap, watertight by
     construction (docs/BASECUTTER.md phase 6). `heights[j][i]` is the
@@ -560,12 +595,16 @@ def build_heightfield(xs, ys, heights):
 
     top = [[bm.verts.new((xs[i], ys[j], heights[j][i])) for i in range(nx)] for j in range(ny)]
 
-    # Top surface: one quad per grid cell. (v00, v10, v11, v01) winds CCW
-    # when viewed from +Z for increasing (x, y) — recalc_face_normals below
-    # makes the final orientation authoritative regardless.
+    # Top surface: two triangles per grid cell, split along the shorter of
+    # the quad's two 3D diagonals (see _split_quad) — this is the surface
+    # the STL exporter would otherwise auto-triangulate with a fixed
+    # diagonal, which is exactly the faceting artifact this fixes. The
+    # skirt and bottom cap below stay quads/n-gon: they're flat or
+    # near-flat by construction (a vertical wall, a z=0 plane), so a fixed
+    # split there is invisible.
     for j in range(ny - 1):
         for i in range(nx - 1):
-            bm.faces.new((top[j][i], top[j][i + 1], top[j + 1][i + 1], top[j + 1][i]))
+            _split_quad(bm, top[j][i], top[j][i + 1], top[j + 1][i + 1], top[j + 1][i])
 
     # Perimeter loop, CCW: bottom edge (i: 0->nx-1 @ j=0), right edge
     # (j: 1->ny-1 @ i=nx-1), top edge (i: nx-2->0 @ j=ny-1), left edge
