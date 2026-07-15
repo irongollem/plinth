@@ -736,7 +736,21 @@ const addPlacement = (cutter: Cutter) => {
   if (locked.value || !landscapeBounds.value) return;
   pushUndoSnapshot();
   placements.value.push({
-    cutter: cutter.kind,
+    // cloneRaw, NOT `cutter.kind` bare: `cutter` is a chip clicked straight
+    // out of the template's `v-for="c in paletteCutters"` — a reactive
+    // Proxy (paletteCutters derives from cutterLibrary, a ref) — and
+    // `.kind` reads a nested object through that Proxy, which Vue wraps in
+    // its OWN Proxy on the way out. Storing that nested Proxy verbatim
+    // poisons this placement for the rest of the session: `cloneRaw's
+    // toRaw()` on `placements.value` only unwraps the array's own top-level
+    // Proxy, so this un-toRaw'd `cutter` field still throws DataCloneError
+    // out of `structuredClone` the next time ANY placement mutation calls
+    // pushUndoSnapshot (setMagnetSize, rotatePlacement, deletePlacement,
+    // ...) — the handler throws before its own state change runs, so
+    // e.g. the magnet buttons silently no-op after the first placement.
+    // Same trap selectPreset's own cloneRaw comment documents, one level
+    // deeper (a nested field this time, not the whole clicked object).
+    cutter: cloneRaw(cutter.kind),
     x_mm: landscapeBounds.value.centerX,
     y_mm: landscapeBounds.value.centerY,
     rotation_deg: 0,
@@ -850,7 +864,12 @@ const placeRegiment = () => {
     return;
   }
   pushUndoSnapshot();
-  const cutter = generatorCutter.value;
+  // cloneRaw: generatorCutter is a computed over cutterLibrary.value.find(),
+  // so its `.value` is the same kind of reactive Proxy addPlacement's own
+  // cloneRaw comment (above) describes — regimentPlacements below spreads
+  // `cutter.kind` straight into the generated placements, which would
+  // otherwise poison pushUndoSnapshot the same way.
+  const cutter = cloneRaw(generatorCutter.value);
   const b = landscapeBounds.value;
   const generated = regimentPlacements(
     cutter,
@@ -878,7 +897,8 @@ const runScatter = () => {
   if (!canScatter.value || !generatorCutter.value || !landscapeBounds.value)
     return;
   pushUndoSnapshot();
-  const cutter = generatorCutter.value;
+  // cloneRaw: see placeRegiment's identical unwrap, just above.
+  const cutter = cloneRaw(generatorCutter.value);
   const requested = Math.min(scatterCount.value, MAX_SCATTER_COUNT);
   const generated = scatterPlacements(
     cutter,
