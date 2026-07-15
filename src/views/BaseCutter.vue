@@ -110,6 +110,22 @@ const landscapeBounds = ref<LandscapeBounds | null>(null);
  * theme: it only feeds the job payload, no backend round-trip needed). */
 const OUT_DIR_STORAGE_KEY = "plinth-basecutter-out-dir";
 const outDir = ref(localStorage.getItem(OUT_DIR_STORAGE_KEY) ?? "");
+/** The out_dir-inside-a-catalog-root foot-gun: raw job output has no
+ * per-model folders or sidecars, so a scan reads the whole folder as ONE
+ * many-part junk model (found in the field: out_dir = <root>/bases gave
+ * one "bases" model with 7 parts). Warn, don't block — cutting there
+ * still works, it just pollutes the next scan. Case-insensitive compare
+ * because the userbase mostly runs Windows filesystems. */
+const outDirInsideCatalog = computed(() => {
+  if (!outDir.value) return false;
+  const dir = outDir.value.replace(/[\\/]+$/, "").toLowerCase();
+  return catalogRoots.value.some((r) => {
+    const root = r.root.replace(/[\\/]+$/, "").toLowerCase();
+    return (
+      dir === root || dir.startsWith(`${root}/`) || dir.startsWith(`${root}\\`)
+    );
+  });
+});
 watch(outDir, (dir) => localStorage.setItem(OUT_DIR_STORAGE_KEY, dir));
 
 const cutterLibrary = ref<Cutter[]>([]);
@@ -3427,6 +3443,11 @@ watch(baseCut.finishedSummary, (summary) => {
               />
               <button class="btn btn-sm" @click="chooseOutDir">Choose…</button>
             </div>
+            <p v-if="outDirInsideCatalog" class="text-[10.5px] text-warning">
+              This folder is inside a catalog folder — every scan will read the
+              raw cuts here as one junk "model". Pick a folder outside the
+              catalog, then use Add to catalog for the keepers.
+            </p>
           </div>
 
           <div class="flex items-center gap-3">
