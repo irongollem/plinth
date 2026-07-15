@@ -15,6 +15,7 @@ use basecutter::cutters::{get_cutter_library, get_plinth_defaults};
 use basecutter::generator::{
     cancel_landscape_generation, get_landscape_presets, start_landscape_generation,
 };
+use basecutter::scatter::{cancel_scatter, get_scatter_assets, start_scatter};
 use catalog::commands::{
     add_catalog_root, add_catalog_tag, add_group_tag, apply_normalize, assign_files_to_pose,
     batch_move_models, cancel_catalog_job, cleanup_ephemeral_files, clear_file_pose,
@@ -36,7 +37,7 @@ use file::commands::{
 use minihoard::{cancel_minihoard, detect_minihoard, run_minihoard, MinihoardStatus};
 use models::events::{
     BaseCutStatus, BatchRenderStatus, BlenderProvisionStatus, CompressionStatus, DuplicateStatus,
-    LandscapeGenStatus, PackStatus, RenderStatus, ScanStatus,
+    LandscapeGenStatus, PackStatus, RenderStatus, ScanStatus, ScatterStatus,
 };
 use render::batch::start_batch_render;
 use render::commands::{
@@ -151,6 +152,9 @@ fn create_specta_builder() -> Builder {
             get_landscape_presets,
             start_landscape_generation,
             cancel_landscape_generation,
+            get_scatter_assets,
+            start_scatter,
+            cancel_scatter,
         ])
         .events(collect_events![
             CompressionStatus,
@@ -163,6 +167,7 @@ fn create_specta_builder() -> Builder {
             MinihoardStatus,
             BaseCutStatus,
             LandscapeGenStatus,
+            ScatterStatus,
         ])
 }
 

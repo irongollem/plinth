@@ -859,6 +859,36 @@ async cancelLandscapeGeneration(jobId: string) : Promise<Result<null, AppError>>
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Bundled scatter asset set — S4 work (docs/SCATTER.md "Execution phases":
+ * curation from the scout list, manifold vetting, embedding, credits
+ * panel). Returns an empty list for now so the frontend's piece picker can
+ * wire up against the real command/return shape today (generated kinds
+ * still work standalone) and light up automatically once curated assets
+ * land, with no signature change needed.
+ * 
+ * `scan_scatter_library` (the user-library counterpart) is ALSO S4 and is
+ * deliberately not stubbed here at all — see docs/SCATTER.md's phase list.
+ */
+async getScatterAssets() : Promise<ScatterAsset[]> {
+    return await TAURI_INVOKE("get_scatter_assets");
+},
+async startScatter(job: ScatterJob) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_scatter", { job }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async cancelScatter(jobId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_scatter", { jobId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -875,7 +905,8 @@ landscapeGenStatus: LandscapeGenStatus,
 minihoardStatus: MinihoardStatus,
 packStatus: PackStatus,
 renderStatus: RenderStatus,
-scanStatus: ScanStatus
+scanStatus: ScanStatus,
+scatterStatus: ScatterStatus
 }>({
 baseCutStatus: "base-cut-status",
 batchRenderStatus: "batch-render-status",
@@ -886,7 +917,8 @@ landscapeGenStatus: "landscape-gen-status",
 minihoardStatus: "minihoard-status",
 packStatus: "pack-status",
 renderStatus: "render-status",
-scanStatus: "scan-status"
+scanStatus: "scan-status",
+scatterStatus: "scatter-status"
 })
 
 /** user-defined constants **/
@@ -1228,6 +1260,13 @@ export type FlowLayer = { enabled?: boolean; channel_width_mm: number; meander_s
  */
 bank_height: number; amount?: number }
 /**
+ * A generated piece kind — the only source scatter can actually place
+ * today (docs/SCATTER.md "Execution phases": bundled/user assets are S4).
+ * Serializes lowercase ("pebble"/"rock") to match
+ * scatter_landscape.py's `CANONICAL_MM` keys exactly.
+ */
+export type GeneratedPieceKind = "pebble" | "rock"
+/**
  * A named, ready-to-generate parameter set (docs/BASECUTTER.md: "Presets
  * are parameter sets" — the cutter-library move again, a new terrain
  * style is a new row here, not a new pipeline).
@@ -1423,6 +1462,13 @@ is_update: boolean;
  */
 blocked: string | null; components: ComponentStatus[] }
 /**
+ * One entry in `ScatterParams.pieces`: a piece source plus its relative
+ * pick weight (`scatter_landscape.py::pick_piece_kind` draws by weight from
+ * the accepted, non-zero-weight entries). `weight` defaults to 1.0 when
+ * omitted, mirroring the script's own `entry.get("weight", 1.0)`.
+ */
+export type PieceChoice = { piece: ScatterPieceSource; weight?: number }
+/**
  * One cut instance: a cutter positioned on the landscape. Mirrors a job's
  * `placements[]` entry (see base_cut.py's docstring) — `name` is a
  * user-facing label echoed back in the script's `CUT_*` tokens so progress
@@ -1562,6 +1608,68 @@ export type ScanFailedStatus = { job_id: string; error: string }
 export type ScanProgressStatus = { job_id: string; files_indexed: number; current_dir: string }
 export type ScanStartedStatus = { job_id: string; root: string }
 export type ScanStatus = { Started: ScanStartedStatus } | { Progress: ScanProgressStatus } | { Completed: ScanCompletedStatus } | { Failed: ScanFailedStatus } | { Cancelled: ScanCancelledStatus }
+export type ScatterAsset = { id: string; label: string; source: ScatterAssetSource; path: string; footprint_mm: number; height_mm: number }
+/**
+ * Where a bundled/user-library scatter asset lives, at scan time
+ * (docs/SCATTER.md "Bundled assets" / "Scale anchor"). `footprint_mm` and
+ * `height_mm` are measured once at curation/scan, not user input.
+ */
+export type ScatterAssetSource = "bundled" | "user"
+export type ScatterCancelledStatus = { job_id: string }
+export type ScatterFailedStatus = { job_id: string; message: string; 
+/**
+ * Last ~10 lines of Blender stdout — a post-mortem when the failure
+ * wasn't a clean SCATTER_FAILED token (e.g. a crash before the
+ * script's own try/except, or an exit with no SCATTER_DONE at all).
+ */
+stdout_tail: string }
+export type ScatterFinishedStatus = { job_id: string; out_path: string; placed: number; manifold: boolean }
+/**
+ * A scatter job, as sent from the frontend and forwarded to
+ * scatter_landscape.py verbatim — unlike `BaseCutJob`, no field is renamed:
+ * the script reads `job["landscape_path"]`, `job["out_path"]`,
+ * `job["params"]` directly (see its module docstring's job JSON example).
+ */
+export type ScatterJob = { landscape_path: string; out_path: string; params: ScatterParams }
+/**
+ * Scatter placement parameters — see docs/SCATTER.md "Pinned interfaces"
+ * and "Scale anchor: 28-32mm heroic". Defaults mirror
+ * scatter_landscape.py's `scatter()`'s own `params.get(key, default)`
+ * fallbacks exactly, so a partial JSON (from a preset or an older UI build)
+ * behaves identically whether the default is applied here or in the
+ * script. `seed`, `density_per_dm2`, and `pieces` have no script-side
+ * default (missing keys raise `KeyError`/`ValueError` there), so they stay
+ * required here too.
+ */
+export type ScatterParams = { seed: number; density_per_dm2: number; scale?: [number, number]; scale_factor?: number; sink_mm?: [number, number]; align_to_surface?: boolean; max_slope_deg?: number; edge_margin_mm?: number; pieces: PieceChoice[] }
+/**
+ * One piece's source — externally tagged with NO `#[serde(tag = ...)]`
+ * (Rust's default enum-with-struct-variants shape), matching
+ * docs/SCATTER.md's pinned `PieceChoice.piece` shape verbatim:
+ * `{"Generated": {"kind": "pebble"|"rock"}}` or `{"Asset": {"id": "..."}}`.
+ * scatter_landscape.py's `validate_pieces` docstring calls this out by
+ * name: "matches Rust's default serde derive (no #[serde(tag=...)])".
+ * `Asset` is a recognized, well-formed part of the shape today even though
+ * the script fails it gracefully (S4 not implemented yet) — see
+ * `validate_pieces` in scatter_landscape.py.
+ */
+export type ScatterPieceSource = { Generated: { kind: GeneratedPieceKind } } | { Asset: { id: string } }
+export type ScatterProgressStatus = { job_id: string; placed: number; total: number }
+export type ScatterStartedStatus = { job_id: string }
+/**
+ * Scatter job progress — see docs/SCATTER.md "Pinned interfaces" and
+ * scatter_landscape.py's own docstring for the stdout token protocol this
+ * mirrors (SCATTER_START / SCATTER_PROGRESS / SCATTER_DONE /
+ * SCATTER_FAILED). Deliberately its own stream, not folded into
+ * BaseCutStatus or LandscapeGenStatus: scatter is a third distinct activity
+ * (docs/SCATTER.md "The architectural call: scatter is a LANDSCAPE
+ * TRANSFORMER") that happens to share the one Blender process slot, same
+ * reasoning as LandscapeGenStatus getting its own stream instead of
+ * piggybacking on BaseCutStatus. Cancellation gets its own variant rather
+ * than flowing through Failed — a user-initiated stop is Cancelled, never
+ * Failed, matching BaseCutStatus/LandscapeGenStatus's convention.
+ */
+export type ScatterStatus = { Started: ScatterStartedStatus } | { Progress: ScatterProgressStatus } | { Finished: ScatterFinishedStatus } | { Failed: ScatterFailedStatus } | { Cancelled: ScatterCancelledStatus }
 export type Settings = { scratch_dir: string | null; target_dir: string | null; compression_type: CompressionType | null; chunk_size: number | null; max_compression_threads: number | null; blender_path: string | null; 
 /**
  * Legacy single catalog folder. Read-only compatibility: it seeds

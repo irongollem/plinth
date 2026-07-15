@@ -452,6 +452,61 @@ pub struct LandscapeGenCancelledStatus {
     pub job_id: String,
 }
 
+/// Scatter job progress — see docs/SCATTER.md "Pinned interfaces" and
+/// scatter_landscape.py's own docstring for the stdout token protocol this
+/// mirrors (SCATTER_START / SCATTER_PROGRESS / SCATTER_DONE /
+/// SCATTER_FAILED). Deliberately its own stream, not folded into
+/// BaseCutStatus or LandscapeGenStatus: scatter is a third distinct activity
+/// (docs/SCATTER.md "The architectural call: scatter is a LANDSCAPE
+/// TRANSFORMER") that happens to share the one Blender process slot, same
+/// reasoning as LandscapeGenStatus getting its own stream instead of
+/// piggybacking on BaseCutStatus. Cancellation gets its own variant rather
+/// than flowing through Failed — a user-initiated stop is Cancelled, never
+/// Failed, matching BaseCutStatus/LandscapeGenStatus's convention.
+#[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
+pub enum ScatterStatus {
+    Started(ScatterStartedStatus),
+    Progress(ScatterProgressStatus),
+    Finished(ScatterFinishedStatus),
+    Failed(ScatterFailedStatus),
+    Cancelled(ScatterCancelledStatus),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ScatterStartedStatus {
+    pub job_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ScatterProgressStatus {
+    pub job_id: String,
+    pub placed: u32,
+    pub total: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ScatterFinishedStatus {
+    pub job_id: String,
+    pub out_path: String,
+    pub placed: u32,
+    pub manifold: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ScatterFailedStatus {
+    pub job_id: String,
+    pub message: String,
+    /// Last ~10 lines of Blender stdout — a post-mortem when the failure
+    /// wasn't a clean SCATTER_FAILED token (e.g. a crash before the
+    /// script's own try/except, or an exit with no SCATTER_DONE at all).
+    pub stdout_tail: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct ScatterCancelledStatus {
+    pub job_id: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Type, Event)]
 pub enum RenderStatus {
     Started(RenderStartedStatus),
