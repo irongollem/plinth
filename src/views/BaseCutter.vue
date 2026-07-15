@@ -34,6 +34,7 @@ import type {
   ScatterAsset,
   ScatterJob,
   ScatterParams,
+  ScatterRim,
   StonesLayer,
 } from "../bindings";
 import { commands } from "../bindings";
@@ -67,7 +68,12 @@ import {
   renameMember,
   rotateGroup,
 } from "../utils/placementGroups";
-import { validatePlacementName } from "../utils/placementName";
+import {
+  mintNames,
+  placementNamePrefix,
+  validatePlacementName,
+  validatePlacementNamePrefix,
+} from "../utils/placementName";
 import { popLast, pushBounded } from "../utils/placementUndo";
 
 const toastStore = useToastStore();
@@ -251,13 +257,63 @@ type ScatterMixEntry = {
   enabled: boolean;
   weight: number;
 };
-/** Generated kinds only — get_scatter_assets() is called on mount but
- * currently returns [] until S4 curation lands (docs/SCATTER.md "Execution
- * phases"), so there is no asset row to seed here yet. */
+/** The two GENERATED kinds (docs/SCATTER.md "Placement algorithm") — always
+ * offered, independent of what's loaded from the backend. See
+ * `bundledPieces`/`userLibraryPieces` below for the other two PIECE MIX
+ * groups (docs/SCATTER.md "UI (BaseCutter view)": "generated kinds first,
+ * then bundled, then user library"). */
 const debrisPieces = reactive<ScatterMixEntry[]>([
   { kind: "pebble", enabled: true, weight: 1 },
   { kind: "rock", enabled: true, weight: 1 },
 ]);
+
+/** One row per available piece from a non-generated source (BUNDLED or USER
+ * LIBRARY) — checkbox + weight, same shape either way. Off by default:
+ * unlike the two generated kinds (always-on debris), opting a specific
+ * skull/bone/user piece into the mix is a deliberate pick, not "everything
+ * on by default". */
+type AssetMixEntry = { asset: ScatterAsset; enabled: boolean; weight: number };
+
+/** The bundled museum set (S4 curation, docs/SCATTER.md "Bundled assets") —
+ * built once `getScatterAssets()` resolves in onMounted below. */
+const bundledPieces = ref<AssetMixEntry[]>([]);
+
+/** The user's own scatter folder (Settings.vue writes
+ * settings.scatter_library_dir) — read-only here, this view only scans it.
+ * `null` until settings load or when never configured. */
+const scatterLibraryDir = ref<string | null>(null);
+/** Rows from the last `scanScatterLibrary` call — empty until a folder is
+ * configured AND scanned (auto-scanned once on mount when already
+ * configured; the PIECE MIX — USER LIBRARY group's own "rescan" button
+ * re-runs it). */
+const userLibraryPieces = ref<AssetMixEntry[]>([]);
+const userLibraryScanning = ref(false);
+
+/** Re-scans `scatterLibraryDir` (docs/SCATTER.md "User library"), keeping
+ * each surviving id's enabled/weight so re-scanning a folder you've already
+ * picked from doesn't silently reset the mix — only ids that disappeared
+ * from the folder drop out, and new ones join unchecked like any fresh
+ * asset row. */
+const rescanUserLibrary = async () => {
+  const dir = scatterLibraryDir.value;
+  if (!dir) return;
+  userLibraryScanning.value = true;
+  const result = await commands.scanScatterLibrary(dir);
+  userLibraryScanning.value = false;
+  if (result.status === "error") {
+    toastStore.reportError("Failed to scan scatter library", result.error);
+    return;
+  }
+  const previous = new Map(userLibraryPieces.value.map((p) => [p.asset.id, p]));
+  userLibraryPieces.value = result.data.map((asset) => {
+    const prior = previous.get(asset.id);
+    return {
+      asset,
+      enabled: prior?.enabled ?? false,
+      weight: prior?.weight ?? 1,
+    };
+  });
+};
 
 type DebrisParams = {
   seed: number;
@@ -286,12 +342,18 @@ const debrisParams = reactive<DebrisParams>({
 
 /** Preset mixes as chips (docs/SCATTER.md UI spec) — a local literal, the
  * cutter-library move: a new mix is a new row here, not a new pipeline.
- * Weights are relative (PieceChoice.weight), not fractions. */
+ * Weights are relative (PieceChoice.weight), not fractions.
+ * `assetWeights` is optional and keys BUNDLED asset ids only (the bundled
+ * set ships with the app, so a preset can safely reference its ids by name
+ * — see `scatter_assets::BUNDLED_ASSETS` for the id table); a preset never
+ * touches USER LIBRARY rows, which are specific to whatever the user
+ * happens to have in their own folder. */
 type ScatterPreset = {
   id: string;
   label: string;
   density_per_dm2: number;
   weights: { pebble: number; rock: number };
+  assetWeights?: Record<string, number>;
 };
 const SCATTER_PRESETS: ScatterPreset[] = [
   {
@@ -312,6 +374,27 @@ const SCATTER_PRESETS: ScatterPreset[] = [
     density_per_dm2: 18,
     weights: { pebble: 1, rock: 1 },
   },
+  {
+    id: "boneyard",
+    label: "Boneyard",
+    density_per_dm2: 6,
+    // Pebbles stay in as light filler; rock is left out entirely (weight 0
+    // is filtered the same as unchecked — see buildScatterParams).
+    weights: { pebble: 1, rock: 0 },
+    assetWeights: {
+      "skull-hesperocyon": 3,
+      "skull-pseudocynodictis": 3,
+      "skull-leptophoca-seal": 3,
+      "skull-deer": 3,
+      "skull-diplocaulus": 3,
+      "bone-deer-mandible": 3,
+      "bone-deer-forelimb": 3,
+      // The whale mandible is the bundled set's own "statement piece"
+      // (docs/SCATTER.md "Scale anchor") — kept rarer than the rest so it
+      // reads as a centerpiece, not wallpaper.
+      "bone-pilot-whale-mandible": 1,
+    },
+  },
 ];
 const selectedScatterPresetId = ref<string | null>(null);
 
@@ -320,6 +403,15 @@ const selectScatterPreset = (preset: ScatterPreset) => {
   for (const piece of debrisPieces) {
     piece.enabled = true;
     piece.weight = preset.weights[piece.kind];
+  }
+  // A preset fully redefines the bundled slice of the mix too — any
+  // bundled id not in this preset's assetWeights turns off, exactly like
+  // the generated pieces above always get an explicit weight rather than
+  // partial carry-over from whatever was picked before.
+  for (const bundled of bundledPieces.value) {
+    const weight = preset.assetWeights?.[bundled.asset.id];
+    bundled.enabled = weight !== undefined;
+    if (weight !== undefined) bundled.weight = weight;
   }
   selectedScatterPresetId.value = preset.id;
 };
@@ -330,6 +422,14 @@ const rerollDebrisSeed = () => {
   debrisParams.seed = Math.floor(Math.random() * 0xffffffff);
 };
 
+/** Shared "counts toward the mix" predicate — a piece must be checked AND
+ * carry a positive weight (a preset like Boneyard leaves rock checked at
+ * weight 0 rather than unchecking it, see SCATTER_PRESETS). Used both to
+ * gate the run button and to filter buildScatterParams' pieces[], so the
+ * two can never disagree about what's actually "on". */
+const isMixed = (p: { enabled: boolean; weight: number }): boolean =>
+  p.enabled && p.weight > 0;
+
 /** Why the scatter section is disabled — the palette's own
  * disabled-with-tooltip convention, never click-then-toast. */
 const debrisScatterBlockedReason = computed(() => {
@@ -337,9 +437,11 @@ const debrisScatterBlockedReason = computed(() => {
     return "Locked while a job is running";
   }
   if (!landscapeBounds.value) return "Load or generate a landscape first";
-  if (!debrisPieces.some((p) => p.enabled && p.weight > 0)) {
-    return "Enable at least one piece";
-  }
+  const anyPieceEnabled =
+    debrisPieces.some(isMixed) ||
+    bundledPieces.value.some(isMixed) ||
+    userLibraryPieces.value.some(isMixed);
+  if (!anyPieceEnabled) return "Enable at least one piece";
   return "";
 });
 const canRunDebrisScatter = computed(() => !debrisScatterBlockedReason.value);
@@ -369,6 +471,19 @@ const deriveScatterOutPath = (sourcePath: string): string => {
   return `${dir}${stem}-scattered.stl`;
 };
 
+// Both non-generated groups map to the same wire shape — {Asset:{id}} — the
+// id being exactly what scan_scatter_library/get_scatter_assets handed back
+// as ScatterAsset.id. That's deliberate, not a coincidence:
+// scatter_assets::resolve_asset_path resolves a piece's id against the
+// BUNDLED table first, then (id == file stem) a non-recursive search of the
+// configured user-library folder — the same identity
+// scan_scatter_library_dir minted the id FROM in the first place, so this
+// round-trips without any extra "source" tag riding along in the job JSON.
+const assetPieceChoice = (p: AssetMixEntry) => ({
+  piece: { Asset: { id: p.asset.id } },
+  weight: p.weight,
+});
+
 const buildScatterParams = (): ScatterParams => ({
   seed: debrisParams.seed,
   density_per_dm2: debrisParams.density_per_dm2,
@@ -378,9 +493,14 @@ const buildScatterParams = (): ScatterParams => ({
   align_to_surface: debrisParams.align_to_surface,
   max_slope_deg: debrisParams.max_slope_deg,
   edge_margin_mm: debrisParams.edge_margin_mm,
-  pieces: debrisPieces
-    .filter((p) => p.enabled && p.weight > 0)
-    .map((p) => ({ piece: { Generated: { kind: p.kind } }, weight: p.weight })),
+  pieces: [
+    ...debrisPieces.filter(isMixed).map((p) => ({
+      piece: { Generated: { kind: p.kind } },
+      weight: p.weight,
+    })),
+    ...bundledPieces.value.filter(isMixed).map(assetPieceChoice),
+    ...userLibraryPieces.value.filter(isMixed).map(assetPieceChoice),
+  ],
 });
 
 /** Runs (or re-runs) scatter FROM the tracked source, never from the
@@ -462,6 +582,11 @@ onMounted(async () => {
   cutterLibrary.value = library;
   if (assetsResult.status === "ok") {
     scatterAssets.value = assetsResult.data;
+    bundledPieces.value = assetsResult.data.map((asset) => ({
+      asset,
+      enabled: false,
+      weight: 1,
+    }));
   } else {
     toastStore.reportError(
       "Failed to load bundled scatter pieces",
@@ -476,6 +601,8 @@ onMounted(async () => {
   // config gets, gaslighting a user whose data simply failed to load.
   if (settingsResult.status === "ok") {
     magnetInventory.value = settingsResult.data.magnet_inventory ?? [];
+    scatterLibraryDir.value = settingsResult.data.scatter_library_dir ?? null;
+    if (scatterLibraryDir.value) await rescanUserLibrary();
   } else {
     toastStore.reportError(
       "Failed to load settings — magnet inventory unavailable",
@@ -570,30 +697,48 @@ const cutterLabel = (kind: CutterKind): string => {
   return `${sizeLabel(kind)} mm ${noun}`;
 };
 
-/** "round32-1", "square25-2" — cutter id (dashes stripped) + 1-past the
- * highest numeric suffix currently in use for that slug. Deliberately not a
- * count of survivors: delete round32-2 out of {1,2,3} and a naive count
- * (now 2 survivors) would hand the next placement "round32-2" again — same
- * name as a still-live placement, so the job silently overwrites one
- * output STL with another. Taking 1 + max(existing suffixes) instead never
- * reuses a name that's still on the list. */
-const nextNames = (cutterId: string, count: number): string[] => {
-  const slug = cutterId.replace(/-/g, "");
-  const prefix = `${slug}-`;
-  let maxSuffix = 0;
-  for (const p of placements.value) {
-    if (!p.name?.startsWith(prefix)) continue;
-    const suffix = Number(p.name.slice(prefix.length));
-    if (Number.isFinite(suffix)) maxSuffix = Math.max(maxSuffix, suffix);
-  }
+/** LAYOUT step's optional name-prefix field: when set, minted placement
+ * names become "<prefix>-<size>mm-<n>" (e.g. "donkey-28.5mm-1") instead of
+ * the cutter-id scheme below — readable batches when cutting the same size
+ * for several different minis in a session. Validated on commit with
+ * validatePlacementNamePrefix — the same filesystem-safety rules a
+ * placement's own name gets, minus the uniqueness check (a prefix is meant
+ * to be shared by a whole batch). Purely additive to existing placements:
+ * changing it only affects names minted AFTER the change (nextNames reads
+ * it fresh every call, nothing is baked in early), and per-row renaming
+ * still works exactly as before. */
+const namePrefixDraft = ref("");
+const namePrefixError = computed(() =>
+  validatePlacementNamePrefix(namePrefixDraft.value),
+);
+/** The prefix actually used for minting. Falls back to "" (the id-based
+ * scheme, feature off) while the draft is invalid, so a mid-edit typo shows
+ * its inline error without ALSO breaking placement in the meantime. */
+const activeNamePrefix = computed(() => {
+  const trimmed = namePrefixDraft.value.trim();
+  return trimmed && !namePrefixError.value ? trimmed : "";
+});
+
+/** "round32-1", "donkey-28.5mm-1" — see utils/placementName.ts's
+ * `placementNamePrefix` (which scheme, and why) and `mintNames` (the
+ * never-reuse-a-live-suffix mint itself) for the actual pure logic; this is
+ * just the reactive wire-up (the active prefix, the cutter's size label,
+ * and the live placements list) those two pure functions need. */
+const nextNames = (cutter: Cutter, count: number): string[] => {
+  const prefix = placementNamePrefix(
+    activeNamePrefix.value,
+    sizeLabel(cutter.kind),
+    cutter.id,
+  );
   // One scan mints the whole batch — the generators name dozens at a time,
   // and re-scanning a growing list per name is quadratic for no benefit.
-  return Array.from(
-    { length: count },
-    (_, i) => `${prefix}${maxSuffix + 1 + i}`,
+  return mintNames(
+    prefix,
+    placements.value.map((p) => p.name),
+    count,
   );
 };
-const nextName = (cutterId: string): string => nextNames(cutterId, 1)[0];
+const nextName = (cutter: Cutter): string => nextNames(cutter, 1)[0];
 
 // ---- groups (docs/BASECUTTER.md phase 6 follow-up: "regiment cutters
 // rotate/move as a group") ----
@@ -864,7 +1009,7 @@ const addPlacement = (cutter: Cutter) => {
     y_mm: landscapeBounds.value.centerY,
     rotation_deg: 0,
     magnet: null,
-    name: nextName(cutter.id),
+    name: nextName(cutter),
   });
   selectedIndex.value = placements.value.length - 1;
 };
@@ -959,11 +1104,11 @@ const regimentOutOfBounds = computed(() => {
  * own undo snapshot BEFORE calling this (one user action = one snapshot,
  * regardless of how many placements the action produces). */
 const pushGenerated = (
-  cutterId: string,
+  cutter: Cutter,
   generated: GeneratedPlacement[],
 ): string[] => {
   if (!generated.length) return [];
-  const names = nextNames(cutterId, generated.length);
+  const names = nextNames(cutter, generated.length);
   placements.value.push(...generated.map((g, i) => ({ ...g, name: names[i] })));
   selectedIndex.value = placements.value.length - 1;
   return names;
@@ -992,7 +1137,7 @@ const placeRegiment = () => {
     regimentGapMm.value,
     { x: b.centerX, y: b.centerY },
   );
-  const names = pushGenerated(cutter.id, generated);
+  const names = pushGenerated(cutter, generated);
   // A regiment is a GROUP only once it has more than one member — a single
   // cutter placed via a 1x1 "regiment" behaves like any hand-placed base.
   // Scatter never groups (see pushGenerated's doc comment): random loose
@@ -1021,7 +1166,7 @@ const runScatter = () => {
     placements.value,
     mulberry32(Date.now() >>> 0),
   );
-  pushGenerated(cutter.id, generated);
+  pushGenerated(cutter, generated);
   toastStore.addToast(
     `Spread ${generated.length} of ${requested} — ${
       generated.length < requested
@@ -1336,6 +1481,15 @@ const topperMode = ref(false);
  * to 1..3mm; 1.5 mirrors the script's own default. */
 const topperMm = ref(1.5);
 
+/** Rim fate for scattered pieces (docs/BASECUTTER.md's pinned
+ * `BaseCutJob.scatter_rim`, commit 918442b; see bindings.ts's `ScatterRim`
+ * doc comment for "keep" vs "slice"). Lives in step 4 next to topperMode —
+ * same "changes what gets built" reasoning — even though it only visibly
+ * matters when scatter was applied: Rust's own default is "keep" but every
+ * job Rust itself serializes carries an explicit key, so the UI sends one
+ * explicitly too rather than leaning on the Option default. */
+const scatterRim = ref<ScatterRim>("keep");
+
 /** "Cut N bases" / "Cut N toppers" — the cut button's own label must say
  * which flow topperMode will actually run, not just the count. */
 const cutButtonLabel = computed(() => {
@@ -1359,6 +1513,7 @@ const startCut = async () => {
     plinth: { ...plinth },
     out_dir: outDir.value,
     topper_mm: topperMode.value ? topperMm.value : null,
+    scatter_rim: scatterRim.value,
   };
   const result = await baseCut.start(job);
   if (result.status === "error") {
@@ -2373,10 +2528,125 @@ watch(baseCut.finishedSummary, (summary) => {
                     v-model.number="piece.weight"
                   />
                 </div>
-                <!-- get_scatter_assets() returns [] until S4 curation lands
-                     (docs/SCATTER.md "Execution phases") — no assets group
-                     renders until there's actually something in it, rather
-                     than an always-empty list confusing the picker. -->
+              </div>
+
+              <div
+                class="flex flex-col gap-1.5 border-t border-base-content/10 pt-2"
+              >
+                <span
+                  class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+                  >PIECE MIX — BUNDLED</span
+                >
+                <div
+                  v-for="piece in bundledPieces"
+                  :key="piece.asset.id"
+                  class="flex items-center gap-1.5"
+                >
+                  <input
+                    type="checkbox"
+                    class="checkbox checkbox-xs"
+                    v-model="piece.enabled"
+                  />
+                  <span
+                    class="text-[11px] flex-1 truncate"
+                    :title="piece.asset.label"
+                    >{{ piece.asset.label }}</span
+                  >
+                  <span
+                    class="text-[10px] text-base-content/40 font-mono shrink-0"
+                    >{{ piece.asset.footprint_mm.toFixed(1) }}×{{
+                      piece.asset.height_mm.toFixed(1)
+                    }}mm</span
+                  >
+                  <span
+                    v-if="piece.asset.warning"
+                    class="text-warning text-[11px] shrink-0"
+                    :title="piece.asset.warning"
+                    >⚠</span
+                  >
+                  <input
+                    type="number"
+                    class="input input-xs w-16 font-mono"
+                    min="0"
+                    step="0.1"
+                    :disabled="!piece.enabled"
+                    v-model.number="piece.weight"
+                  />
+                </div>
+                <span
+                  v-if="!bundledPieces.length"
+                  class="text-[10.5px] text-base-content/40"
+                  >No bundled pieces available</span
+                >
+              </div>
+
+              <div
+                class="flex flex-col gap-1.5 border-t border-base-content/10 pt-2"
+              >
+                <div class="flex items-center gap-1.5">
+                  <span
+                    class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40 flex-1"
+                    >PIECE MIX — USER LIBRARY</span
+                  >
+                  <button
+                    v-if="scatterLibraryDir"
+                    type="button"
+                    class="btn btn-xs btn-ghost"
+                    :disabled="userLibraryScanning"
+                    @click="rescanUserLibrary"
+                  >
+                    {{ userLibraryScanning ? "Scanning…" : "Rescan" }}
+                  </button>
+                </div>
+                <span
+                  v-if="!scatterLibraryDir"
+                  class="text-[10.5px] text-base-content/40"
+                  >Set a scatter folder in Settings to use your own
+                  pieces.</span
+                >
+                <template v-else>
+                  <div
+                    v-for="piece in userLibraryPieces"
+                    :key="piece.asset.id"
+                    class="flex items-center gap-1.5"
+                  >
+                    <input
+                      type="checkbox"
+                      class="checkbox checkbox-xs"
+                      v-model="piece.enabled"
+                    />
+                    <span
+                      class="text-[11px] flex-1 truncate"
+                      :title="piece.asset.label"
+                      >{{ piece.asset.label }}</span
+                    >
+                    <span
+                      class="text-[10px] text-base-content/40 font-mono shrink-0"
+                      >{{ piece.asset.footprint_mm.toFixed(1) }}×{{
+                        piece.asset.height_mm.toFixed(1)
+                      }}mm</span
+                    >
+                    <span
+                      v-if="piece.asset.warning"
+                      class="text-warning text-[11px] shrink-0"
+                      :title="piece.asset.warning"
+                      >⚠</span
+                    >
+                    <input
+                      type="number"
+                      class="input input-xs w-16 font-mono"
+                      min="0"
+                      step="0.1"
+                      :disabled="!piece.enabled"
+                      v-model.number="piece.weight"
+                    />
+                  </div>
+                  <span
+                    v-if="!userLibraryPieces.length && !userLibraryScanning"
+                    class="text-[10.5px] text-base-content/40"
+                    >No .stl files found in this folder</span
+                  >
+                </template>
               </div>
             </div>
           </details>
@@ -2426,6 +2696,29 @@ watch(baseCut.finishedSummary, (summary) => {
           v-show="activeStep === 3"
           class="flex flex-col gap-3.5 px-3 pb-3.5"
         >
+          <div class="flex flex-col gap-1">
+            <label
+              for="placement-name-prefix"
+              class="text-[11px] text-base-content/50"
+              >Name prefix</label
+            >
+            <input
+              id="placement-name-prefix"
+              type="text"
+              class="input input-xs font-mono"
+              placeholder="optional — e.g. donkey"
+              v-model="namePrefixDraft"
+            />
+            <p v-if="namePrefixError" class="text-[10.5px] text-error">
+              {{ namePrefixError }}
+            </p>
+            <p v-else class="text-[10.5px] text-base-content/40">
+              New placements mint as "prefix-size mm-n" (e.g. "donkey-28.5mm-1")
+              instead of the cutter-id scheme. Existing placements are never
+              renamed.
+            </p>
+          </div>
+
           <div class="flex flex-col gap-1.5">
             <span
               class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
@@ -3013,6 +3306,34 @@ watch(baseCut.finishedSummary, (summary) => {
               :step="0.1"
               v-model="topperMm"
             />
+          </div>
+
+          <div class="flex flex-col gap-1.5">
+            <span class="text-[11px] text-base-content/50 shrink-0"
+              >Scatter at the rim</span
+            >
+            <div class="flex gap-1">
+              <button
+                type="button"
+                class="btn btn-xs"
+                :class="scatterRim === 'keep' ? 'btn-primary' : 'btn-ghost'"
+                @click="scatterRim = 'keep'"
+              >
+                Keep whole
+              </button>
+              <button
+                type="button"
+                class="btn btn-xs"
+                :class="scatterRim === 'slice' ? 'btn-primary' : 'btn-ghost'"
+                @click="scatterRim = 'slice'"
+              >
+                Slice
+              </button>
+            </div>
+            <p class="text-[10.5px] text-base-content/40">
+              keep: pieces overhang like hand-made basing · slice: cut flush
+              through
+            </p>
           </div>
 
           <details

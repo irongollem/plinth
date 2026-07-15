@@ -227,6 +227,69 @@
       <div class="flex flex-col gap-1.5">
         <span
           class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          >SCATTER LIBRARY</span
+        >
+        <div
+          class="flex items-center gap-2.5 bg-base-200 border border-base-content/10 rounded-lg px-2.5 py-1.5"
+        >
+          <span
+            class="font-mono text-[12px] text-base-content/60 flex-1 truncate"
+          >
+            {{ settings.scatter_library_dir || "No folder configured" }}
+          </span>
+          <button
+            type="button"
+            class="btn btn-xs"
+            @click="browseScatterLibrary"
+          >
+            Browse…
+          </button>
+          <button
+            v-if="settings.scatter_library_dir"
+            type="button"
+            class="btn btn-xs btn-ghost"
+            @click="settings.scatter_library_dir = null"
+          >
+            clear
+          </button>
+        </div>
+        <p class="text-[10.5px] text-base-content/40">
+          A flat folder of your own scatter pieces (*.stl) — Base Cutter's piece
+          mix picker offers them alongside the bundled set, right next to a
+          "rescan" button. Non-recursive; scanned fresh every time.
+        </p>
+
+        <details
+          class="collapse collapse-arrow border border-base-content/10 bg-base-200/20 rounded-box"
+        >
+          <summary
+            class="collapse-title min-h-0 py-2 px-3 flex items-center gap-2 cursor-pointer"
+            @toggle="loadScatterCredits"
+          >
+            <span
+              class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+              >CREDITS — BUNDLED SCATTER PIECES</span
+            >
+          </summary>
+          <div class="collapse-content px-3">
+            <p
+              v-if="scatterCreditsLoading"
+              class="text-[10.5px] text-base-content/40"
+            >
+              Loading…
+            </p>
+            <pre
+              v-else
+              class="text-[10.5px] whitespace-pre-wrap font-mono text-base-content/70"
+              >{{ scatterCredits }}</pre
+            >
+          </div>
+        </details>
+      </div>
+
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
           >PRINT BUTTON</span
         >
         <div
@@ -455,7 +518,7 @@ import { useThemeStore } from "../stores/themeStore";
 import { useToastStore } from "../stores/toastStore";
 
 const toastStore = useToastStore();
-const { selectFiles } = useFileSelect();
+const { selectFiles, selectDirectory } = useFileSelect();
 const themeStore = useThemeStore();
 
 const settings = ref<Settings>({
@@ -474,6 +537,7 @@ const settings = ref<Settings>({
   pack_level: null,
   pack_cleanup_after: null,
   blender_setup_acknowledged: null,
+  scatter_library_dir: null,
 });
 
 // Display only — the Catalog tab manages the list. Falls back to the
@@ -589,6 +653,34 @@ const browseLicence = async () => {
   });
   if (files?.length) {
     settings.value.licence_path = files[0].path;
+  }
+};
+
+/* Scatter library (docs/SCATTER.md "User library") — Base Cutter's own
+   piece-mix picker only reads settings.scatter_library_dir and scans it
+   itself; this view just points it at a folder (or clears it). */
+const browseScatterLibrary = async () => {
+  const dir = await selectDirectory({ title: "Select scatter library folder" });
+  if (dir) settings.value.scatter_library_dir = dir;
+};
+
+/* Bundled scatter pieces are all CC0 (nothing legally owed), but
+   get_scatter_credits() still lists the source institutions — fetched
+   lazily on first expand rather than on every Settings load, since most
+   visits never open this disclosure. */
+const scatterCredits = ref("");
+const scatterCreditsLoading = ref(false);
+const scatterCreditsLoaded = ref(false);
+const loadScatterCredits = async () => {
+  if (scatterCreditsLoaded.value || scatterCreditsLoading.value) return;
+  scatterCreditsLoading.value = true;
+  try {
+    scatterCredits.value = await commands.getScatterCredits();
+    scatterCreditsLoaded.value = true;
+  } catch (error) {
+    toastStore.reportError("Failed to load scatter credits", error);
+  } finally {
+    scatterCreditsLoading.value = false;
   }
 };
 
