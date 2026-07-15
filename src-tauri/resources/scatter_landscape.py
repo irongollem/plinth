@@ -132,13 +132,94 @@ CELL_JITTER_FRACTION = 0.7
 # regardless of local relief.
 RAY_MARGIN_MM = 2.0
 
-# Icosphere subdivision level per kind: rock stays low-poly (chunkier facets
-# read as an angular stone at a few mm), pebble goes one level finer (reads
-# rounder/smoother at its smaller size). Both get noise displacement on top —
-# subdivision alone would still be "a sphere with fewer faces", not the
-# irregular outline/profile the spec requires.
-PEBBLE_SUBDIV = 2
-ROCK_SUBDIV = 1
+# Icosphere subdivision level is DERIVED PER PIECE from its final size_mm,
+# not a fixed constant per kind — a fixed level (the old PEBBLE_SUBDIV=2 /
+# ROCK_SUBDIV=1) bakes in a facet size that scales with the piece, so a
+# 12mm rock and a 2mm pebble got the same 20/80-triangle icosahedron and
+# both showed crisp polygonal facets at print scale (user report: "the
+# generated rocks/pebbles are also too low poly" — unlike a render, where
+# shade_smooth cosmetically hides facets, the exported STL keeps them raw
+# and a resin printer's ~0.05mm layers reproduce them exactly).
+#
+# The model (measured empirically against Blender 5.1.2's own
+# bmesh.ops.create_icosphere — see subdivision_for_size's docstring): a
+# `subdivisions=N` icosphere of diameter `size_mm` has a maximum facet
+# edge length of approximately
+#     max_edge_mm = size_mm * ICOSPHERE_EDGE_K / 2**(N - 1)
+# fit to <1% error for N in 3..8 against measured sizes 2/3/5/8/9/12mm (N=1
+# is the bare icosahedron and the fit over-predicts its edge slightly,
+# which only ever pushes the computed level UP, never under target — safe
+# in the direction that matters).
+ICOSPHERE_EDGE_K = 0.6614
+
+# Target max facet edge at real (printed) scale — the loose (least-tris)
+# end of the "fine enough a 0.05mm-layer resin printer can't crisply
+# reproduce it" 0.08-0.12mm band, since bigger facets cost fewer tris and
+# the cap below already gives up on hitting this exactly for large rocks.
+TARGET_MAX_EDGE_MM = 0.12
+
+# Tri cost of Blender's own `subdivisions` parameter (this is what
+# create_icosphere actually builds — the "subdiv 1" base icosahedron has
+# 20 tris regardless, then each level quadruples): levels 0-1=20, 2=80,
+# 3=320, 4=1280, 5=5120, 6=20480. Uncapped, the size-driven formula asks
+# for level 6 or more (up to 8, 327680 tris) for anything bigger than
+# ~2.9mm — i.e. most rocks and a majority of pebbles in the documented
+# 28-32mm-heroic canonical range (pebbles ~1.9-4.7mm, rocks ~5.7-14mm with
+# the default scale/jitter) — since hitting the literal facet-size target
+# at those sizes genuinely needs that many tris (see TARGET_MAX_EDGE_MM's
+# comment). That's far past "cap sensibly", and measured expensive: a
+# 35-piece / 120x80mm scatter (this repo's S1 job shape) went from ~6s
+# wall-clock at the ORIGINAL fixed low-poly levels (rock=1/pebble=2, 20/80
+# tris) to ~41s (~6.9x) with BOTH kinds uncapped at level 6 — the per-piece
+# EXACT-solver boolean union (module docstring: "cheap, one small piece at
+# a time") stops being cheap once every piece is 20480 tris. Landing under
+# the 3x regression budget took capping BOTH kinds well below what the
+# formula alone would ask for, and capping them UNEVENLY:
+#   - ROCK_MAX_SUBDIV=5 (5120 tris): rocks carry the new fine noise octave
+#     (see ROCK_FINE_NOISE_FRACTION), so they keep the higher of the two
+#     caps — still a 256x tri increase over the original 20-tri rock, and
+#     still well short of the formula's uncapped ask, but that's the
+#     "give up precision, not just cheat on cost" compromise.
+#   - PEBBLE_MAX_SUBDIV=4 (1280 tris): pebbles get no fine octave and are
+#     meant to read smooth/round, not textured, so a coarser cap costs
+#     comparatively little visually (still a 16x tri increase over the
+#     original 80-tri pebble) while removing the single biggest chunk of
+#     the regression (most pebbles were landing on the same level-6 cap
+#     as rocks, and there are more pebbles than rocks per the default 0.6/
+#     0.4 weight split).
+# Measured result at these caps: ~12.2s for the same 35-piece/120x80mm job
+# — ~2.0x the original, inside the "if it regresses badly (>3x)" budget.
+# See this commit's report for the full before/after/cap-sweep numbers.
+ROCK_MAX_SUBDIV = 5
+PEBBLE_MAX_SUBDIV = 4
+
+MIN_SUBDIV = 2  # never below "vaguely round" even for a near-zero piece
+
+
+def subdivision_for_size(size_mm, max_subdiv):
+    """Pure function of size_mm (and the per-kind cap) -> Blender's
+    icosphere `subdivisions` parameter — the smallest level whose modeled
+    max facet edge (see ICOSPHERE_EDGE_K's comment) is <= TARGET_MAX_EDGE_MM,
+    clamped to [MIN_SUBDIV, max_subdiv].
+
+    Deterministic by construction: takes only size_mm (itself already
+    drawn from the seeded rng stream earlier in build_generated_piece) and
+    a compile-time constant — no rng access here, so it can never perturb
+    the fixed-order draw sequence the module docstring's determinism proof
+    depends on.
+    """
+    ratio = max(1.0, size_mm * ICOSPHERE_EDGE_K / TARGET_MAX_EDGE_MM)
+    level = 1 + math.ceil(math.log2(ratio))
+    return int(clamp(level, MIN_SUBDIV, max_subdiv))
+
+
+def facet_edge_mm(size_mm, subdiv):
+    """The same model subdivision_for_size inverts, evaluated forward —
+    used to scale the rock-only fine noise octave's wavelength to the
+    ACTUAL facet size a piece ended up with (post-cap), so that octave's
+    ripples stay resolvable by the mesh instead of aliasing against it
+    (see ROCK_FINE_NOISE_* below)."""
+    return size_mm * ICOSPHERE_EDGE_K / (2 ** (subdiv - 1))
 
 # Noise displacement amplitude, as a fraction of the piece's own DIAMETER
 # (size_mm). Rock rougher/craggier than pebble on purpose. Both sit well
@@ -156,6 +237,31 @@ ROCK_SUBDIV = 1
 # verification render.
 PEBBLE_NOISE_AMOUNT = 0.30
 ROCK_NOISE_AMOUNT = 0.42
+
+# Rock-only THIRD octave: genuine surface grain on top of the two lobes
+# above (which must stay — they're what reads as a silhouette at arm's
+# length; this is deliberately NOT a replacement for them). Now that
+# subdivision_for_size gives rocks enough vertices to carry it, a fine
+# high-frequency ripple reads as craggy rock texture at print/macro scale
+# instead of getting erased by render_mini.py's shade_smooth (the same
+# erasure the module docstring's noise-tuning lesson already names — this
+# octave is fine enough that shade_smooth WILL blur it in the render, same
+# as any real fine surface texture does under smooth shading; the exported
+# STL is what resin printing sees, and the STL keeps every facet raw).
+# Pebbles do NOT get this octave — river pebbles are smooth by nature, and
+# the task is exactly to make their silhouette a curve, not add texture.
+#
+# Amplitude: "a few %" of the piece's own diameter (deliberately small —
+# this is texture, not shape). Wavelength: scaled off the piece's ACTUAL
+# post-cap facet size (facet_edge_mm), not a fixed mm value, so the ripple
+# never aliases against the mesh that carries it — FINE_NOISE_FACET_MULT
+# facet-edges per wavelength keeps several triangles per ripple cycle
+# regardless of how coarse or fine subdivision_for_size ended up landing a
+# particular piece (rocks near the ROCK_MAX_SUBDIV cap have coarser facets
+# than the size-driven formula would ideally want — see that constant's
+# comment — so the safety margin matters most exactly there).
+ROCK_FINE_NOISE_FRACTION = 0.035
+FINE_NOISE_FACET_MULT = 4.0
 
 # Vertical squash range per kind: a resting stone/pebble is flatter than a
 # sphere, never a perfect ball (the "never spheres" requirement starts here,
@@ -344,13 +450,24 @@ def build_generated_piece(kind, rng, scale_range, scale_factor):
       - height_local: full local Z extent (max - min) — the floor
         (max(0.4, 20% of piece height)) is 20% of THIS, not of size_mm,
         since squash/noise change the piece's actual vertical extent.
+
+    Icosphere subdivision is now DERIVED from size_mm (subdivision_for_size),
+    not a fixed level per kind — see that function's and ROCK_MAX_SUBDIV's
+    docstrings/comments for the print-resolution target and the tri-cost
+    cap. Rocks additionally get a third, high-frequency noise octave (see
+    ROCK_FINE_NOISE_FRACTION) layered on top of the same two-lobe coarse
+    displacement pebbles also get — pebbles stay smooth (river pebbles ARE
+    smooth), just denser, so their silhouette reads as a curve rather than
+    a polygon; rocks read as fine-grained stone rather than facets.
     """
     canonical = CANONICAL_MM[kind]
     size_jitter = rng.uniform(*PIECE_SIZE_JITTER)
     user_scale = rng.uniform(scale_range[0], scale_range[1])
     size_mm = max(0.05, canonical * size_jitter * scale_factor * user_scale)
 
-    subdiv = PEBBLE_SUBDIV if kind == "pebble" else ROCK_SUBDIV
+    is_rock = kind != "pebble"
+    max_subdiv = ROCK_MAX_SUBDIV if is_rock else PEBBLE_MAX_SUBDIV
+    subdiv = subdivision_for_size(size_mm, max_subdiv)
     noise_fraction = PEBBLE_NOISE_AMOUNT if kind == "pebble" else ROCK_NOISE_AMOUNT
     squash_lo, squash_hi = PEBBLE_SQUASH_Z if kind == "pebble" else ROCK_SQUASH_Z
 
@@ -374,6 +491,26 @@ def build_generated_piece(kind, rng, scale_range, scale_factor):
     freq2 = freq1 * rng.uniform(2.6, 3.6)
     noise_amount = noise_fraction * size_mm
 
+    # Rock-only third octave (see ROCK_FINE_NOISE_FRACTION's comment): drawn
+    # ONLY for rocks, so pebbles never spend an rng draw on it — that's fine
+    # for determinism (see subdivision_for_size's docstring: the sequence
+    # only needs to be fixed-order for a GIVEN kind sequence, not
+    # kind-invariant in draw count) and keeps pebbles genuinely untouched by
+    # this change beyond their denser icosphere.
+    if is_rock:
+        offset3 = Vector((rng.uniform(-1000.0, 1000.0) for _ in range(3)))
+        fine_wavelength_mm = FINE_NOISE_FACET_MULT * facet_edge_mm(size_mm, subdiv)
+        freq3 = 1.0 / max(fine_wavelength_mm, 1e-6)
+        fine_amount = ROCK_FINE_NOISE_FRACTION * size_mm
+    else:
+        offset3 = None
+        freq3 = 0.0
+        fine_amount = 0.0
+
+    # subdivisions=N builds 20 tris at N<=1, then quadruples per level
+    # (20, 80, 320, 1280, 5120, 20480 for N=1..6) — see ROCK_MAX_SUBDIV's
+    # comment for the per-piece tri-cost budget this level was chosen
+    # against.
     bm = bmesh.new()
     bmesh.ops.create_icosphere(bm, subdivisions=subdiv, radius=size_mm / 2.0)
     bmesh.ops.scale(bm, vec=Vector((aspect_x, aspect_y, squash_z)), verts=bm.verts)
@@ -383,7 +520,11 @@ def build_generated_piece(kind, rng, scale_range, scale_factor):
         p1 = Vector((v.co.x * freq1 + offset1.x, v.co.y * freq1 + offset1.y, v.co.z * freq1 + offset1.z))
         p2 = Vector((v.co.x * freq2 + offset2.x, v.co.y * freq2 + offset2.y, v.co.z * freq2 + offset2.z))
         n = noise.noise(p1) * 0.8 + noise.noise(p2) * 0.2
-        v.co += direction * (n * noise_amount)
+        displacement = n * noise_amount
+        if is_rock:
+            p3 = Vector((v.co.x * freq3 + offset3.x, v.co.y * freq3 + offset3.y, v.co.z * freq3 + offset3.z))
+            displacement += noise.noise(p3) * fine_amount
+        v.co += direction * displacement
 
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
 
