@@ -38,6 +38,12 @@ const props = defineProps<{
   placements: Placement[];
   plinth: PlinthParams;
   selectedIndex: number | null;
+  /** Indices (into `placements`) of OTHER members of the selected
+   * placement's group, if any (BaseCutter.vue's view-state-only regiment
+   * groups) — rendered with a softer highlight than the true selection, so
+   * a formation reads as one unit without this component knowing anything
+   * about grouping itself. Empty/omitted when nothing's grouped. */
+  coSelected?: number[];
   /** Suppresses drag/rotate/delete while a cut job is running — the
    * submitted job already snapshotted names/positions, mid-job edits would
    * just desync the live view from what's actually being cut. */
@@ -60,6 +66,16 @@ const emit = defineEmits<{
     },
   ];
   error: [message: string];
+  /** A placement-mutating drag/rotate GESTURE just started (pointerdown on
+   * a placement or its rotation handle, not pan/tilt) — fires once per
+   * gesture, before the first `update`, so BaseCutter.vue's undo history
+   * can snapshot once per gesture instead of once per pointermove. */
+  "gesture-start": [];
+  /** The gesture ended (pointerup/pointercancel) — always paired with a
+   * prior `gesture-start`, even if that gesture never emitted `update`. */
+  "gesture-end": [];
+  /** Ctrl/Cmd+Z while this viewport is focused — see onKeydown. */
+  undo: [];
 }>();
 
 const container = ref<HTMLDivElement | null>(null);
@@ -337,8 +353,25 @@ const footprintPoints = (kind: CutterKind): [number, number][] => {
 
 const OUTER_COLOR = 0x9ad1ff;
 const OUTER_SELECTED_COLOR = 0xffcc55;
+/** Softer than OUTER_SELECTED_COLOR — a group's OTHER members read as
+ * co-selected, not selected (only one placement ever owns the rotation
+ * handle / MAGNET panel below). */
+const OUTER_CO_SELECTED_COLOR = 0xe0b562;
 const INNER_COLOR = 0x5a8fc0;
 const INNER_SELECTED_COLOR = 0xcf9a3a;
+
+/** Outer-loop color for one placement's current state — true selection
+ * wins over co-selection (a selected placement is never merely
+ * co-selected). */
+const outerColorFor = (selected: boolean, coSelected: boolean): number =>
+  selected
+    ? OUTER_SELECTED_COLOR
+    : coSelected
+      ? OUTER_CO_SELECTED_COLOR
+      : OUTER_COLOR;
+
+const isCoSelected = (index: number) =>
+  props.coSelected?.includes(index) ?? false;
 
 const makeLoop = (
   points: [number, number][],
@@ -411,10 +444,11 @@ const buildOverlayLoops = (
   placement: Placement,
   shrink: number,
   selected: boolean,
+  coSelected: boolean,
 ) => {
   const outer = makeLoop(
     footprintPoints(placement.cutter),
-    selected ? OUTER_SELECTED_COLOR : OUTER_COLOR,
+    outerColorFor(selected, coSelected),
     false,
   );
   const inner = makeLoop(
@@ -502,12 +536,13 @@ const syncOverlays = () => {
 
   placements.forEach((placement, index) => {
     const selected = index === props.selectedIndex;
+    const coSelected = !selected && isCoSelected(index);
     const kindKey = kindKeyOf(placement.cutter);
     let group = overlayGroups[index];
 
     if (!group) {
       group = new THREE.Group();
-      buildOverlayLoops(group, placement, shrink, selected);
+      buildOverlayLoops(group, placement, shrink, selected, coSelected);
       overlayGroups[index] = group;
       overlayGroup?.add(group);
     } else if (
@@ -516,7 +551,7 @@ const syncOverlays = () => {
     ) {
       disposeOverlayGroup(group);
       while (group.children.length) group.remove(group.children[0]);
-      buildOverlayLoops(group, placement, shrink, selected);
+      buildOverlayLoops(group, placement, shrink, selected, coSelected);
     }
 
     group.userData.index = index;
@@ -532,15 +567,16 @@ const syncOverlays = () => {
   requestRender();
 };
 
-/** Selection changed: recolor the outer/inner loops in place, no geometry
- * work (see syncOverlays' doc comment). */
+/** Selection (or co-selection) changed: recolor the outer/inner loops in
+ * place, no geometry work (see syncOverlays' doc comment). */
 const updateOverlayColors = () => {
   overlayGroups.forEach((group, index) => {
     const selected = index === props.selectedIndex;
+    const coSelected = !selected && isCoSelected(index);
     const [outer, inner] = group.children as THREE.LineLoop[];
     if (outer) {
       (outer.material as THREE.LineBasicMaterial).color.setHex(
-        selected ? OUTER_SELECTED_COLOR : OUTER_COLOR,
+        outerColorFor(selected, coSelected),
       );
     }
     if (inner) {
@@ -556,6 +592,7 @@ const updateOverlayColors = () => {
 watch(() => props.placements, syncOverlays, { deep: true });
 watch(() => props.plinth, syncOverlays, { deep: true });
 watch(() => props.selectedIndex, updateOverlayColors);
+watch(() => props.coSelected, updateOverlayColors);
 watch(() => props.locked, updateOverlayColors);
 
 // ---- pointer interaction ----
@@ -668,6 +705,7 @@ const onPointerDown = (e: PointerEvent) => {
         if (Math.hypot(world.x - hx, world.y - hy) <= tol) {
           rotateIndex = props.selectedIndex;
           dragIndex = null;
+          emit("gesture-start");
           return;
         }
       }
@@ -681,6 +719,7 @@ const onPointerDown = (e: PointerEvent) => {
       if (!props.locked) {
         dragIndex = hit;
         dragOffset.set(world.x - p.x_mm, world.y - p.y_mm);
+        emit("gesture-start");
       }
       if (hit !== props.selectedIndex) emit("select", hit);
     } else {
@@ -742,6 +781,10 @@ const onPointerMove = (e: PointerEvent) => {
 };
 
 const onPointerUp = (e: PointerEvent) => {
+  // A gesture was in flight iff a drag or handle-rotate had actually
+  // started (matches the `gesture-start` emit sites above one-to-one) —
+  // pan/tilt/plain-select never emitted a start, so they don't emit an end.
+  const hadGesture = dragIndex !== null || rotateIndex !== null;
   dragButton = null;
   isPanning = false;
   dragIndex = null;
@@ -750,6 +793,7 @@ const onPointerUp = (e: PointerEvent) => {
     isTilting = false;
     snapTiltBack();
   }
+  if (hadGesture) emit("gesture-end");
   (e.target as HTMLElement).releasePointerCapture(e.pointerId);
 };
 
@@ -760,6 +804,18 @@ const onWheel = (e: WheelEvent) => {
 };
 
 const onKeydown = (e: KeyboardEvent) => {
+  // Ctrl/Cmd+Z: undo, independent of selection/lock state (BaseCutter.vue's
+  // `undo` no-ops safely on its own — empty stack, locked job — so this
+  // component doesn't need to duplicate that gating). Scoped to this
+  // container the same way [ / ] and Delete already are (this handler only
+  // ever fires while the container div itself has focus — see the
+  // `tabindex="0"` + `@keydown` on the template's container below), so it
+  // never fires while focus is in one of the sidebar's text/number inputs.
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
+    e.preventDefault();
+    emit("undo");
+    return;
+  }
   if (props.locked) return;
   if (props.selectedIndex === null) return;
   const p = props.placements[props.selectedIndex];
@@ -840,7 +896,8 @@ onBeforeUnmount(() => {
       class="absolute bottom-2 left-2 text-xs text-base-content/40 pointer-events-none"
     >
       drag: move · handle: rotate (shift snaps 15°) · [ / ]: rotate · delete:
-      remove · middle-drag: pan · right-drag: tilt/rotate peek · wheel: zoom
+      remove · middle-drag: pan · right-drag: tilt/rotate peek · wheel: zoom ·
+      ctrl/cmd+z: undo
     </div>
   </div>
 </template>

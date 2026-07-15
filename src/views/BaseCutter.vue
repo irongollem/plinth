@@ -45,6 +45,15 @@ import {
   regimentPlacements,
   scatterPlacements,
 } from "../utils/placementGenerators";
+import {
+  angularDelta,
+  centroidOf,
+  moveDelta,
+  normalizeDeg,
+  reindexSelection,
+  rotateGroup,
+} from "../utils/placementGroups";
+import { popLast, pushBounded } from "../utils/placementUndo";
 
 const toastStore = useToastStore();
 const releasesStore = useReleasesStore();
@@ -353,6 +362,141 @@ const nextNames = (cutterId: string, count: number): string[] => {
 };
 const nextName = (cutterId: string): string => nextNames(cutterId, 1)[0];
 
+// ---- groups (docs/BASECUTTER.md phase 6 follow-up: "regiment cutters
+// rotate/move as a group") ----
+// VIEW STATE ONLY: a group is never sent to the backend and never touches
+// the Placement wire type (BaseCutJob's placements are plain Placement[],
+// unchanged) — it exists purely so this view can move/rotate a regiment as
+// one formation. Membership is keyed by placement NAME rather than array
+// index, because indices shift on every delete/splice while names don't:
+// nextNames() above mints a name that's collision-free AND never reused
+// while a placement carrying it still lives (it takes 1 + the highest
+// existing numeric suffix, specifically so a still-live placement's name
+// can never be handed to a new one — see its own comment), so a name is a
+// stable, durable handle for the placement's whole lifetime.
+type PlacementGroup = { id: string; label: string; names: string[] };
+const groups = ref<PlacementGroup[]>([]);
+let groupSeq = 0;
+
+/** The group (if any) holding placement `name` — the one place group
+ * membership is queried, so the viewport-move mapping, the rotate buttons,
+ * the list UI, and co-selection all agree on what's grouped. */
+const groupOfName = (name: string | null): PlacementGroup | undefined =>
+  name ? groups.value.find((g) => g.names.includes(name)) : undefined;
+const groupOfIndex = (index: number): PlacementGroup | undefined =>
+  groupOfName(placements.value[index]?.name ?? null);
+
+/** Live placement indices for a group's member names, in `placements`'
+ * current order. Recomputed on demand rather than cached: deletes shift
+ * indices, and a stale index cache would silently go wrong. */
+const memberIndices = (group: PlacementGroup): number[] =>
+  group.names
+    .map((n) => placements.value.findIndex((p) => p.name === n))
+    .filter((i) => i !== -1);
+
+/** Drop `name` from whichever group holds it (a no-op if none does), and
+ * dissolve that group once it falls to a single remaining member — a
+ * "group" of one is just a placement, per the list UI's own rule. */
+const removeMemberFromGroups = (name: string) => {
+  groups.value = groups.value
+    .map((g) =>
+      g.names.includes(name)
+        ? { ...g, names: g.names.filter((n) => n !== name) }
+        : g,
+    )
+    .filter((g) => g.names.length > 1);
+};
+
+/** Pivot a group's whole formation by `deltaDeg` around ITS OWN centroid:
+ * every member's position orbits the centroid (rotateGroup's bearing math)
+ * and every member's own rotation_deg advances by the same delta — a real
+ * unit block pivots as one rigid body, so position and facing move
+ * together or the ranks slide out of alignment relative to each other.
+ * Shared by the viewport's rotation handle/[ / ] keys (via
+ * onUpdatePlacement), the row's per-member ↺/↻ (via rotatePlacement), and
+ * the group header's own ↺/↻ (rotateGroupBy) — one implementation, so all
+ * three read the delta identically. */
+const applyGroupRotation = (group: PlacementGroup, deltaDeg: number) => {
+  if (!deltaDeg) return;
+  const indices = memberIndices(group);
+  const members = indices.map((i) => placements.value[i]);
+  const { x, y } = centroidOf(members);
+  const rotated = rotateGroup(members, x, y, deltaDeg);
+  indices.forEach((i, k) => {
+    const p = placements.value[i];
+    p.x_mm = rotated[k].x_mm;
+    p.y_mm = rotated[k].y_mm;
+    p.rotation_deg = rotated[k].rotation_deg;
+  });
+};
+
+// ---- undo (bounded history of placement/group edits) ----
+type PlacementSnapshot = {
+  placements: Placement[];
+  groups: PlacementGroup[];
+  selectedIndex: number | null;
+};
+const MAX_UNDO_STEPS = 10;
+const undoStack = ref<PlacementSnapshot[]>([]);
+
+/** Snapshot BEFORE a discrete mutation (or once per drag/rotate GESTURE,
+ * at its start — see `gestureInFlight` below) so undo can restore it.
+ * cloneRaw's on the individual refs' `.value`, NOT on a fresh wrapper
+ * object built from them: `placements.value`/`groups.value` are
+ * themselves reactive Proxies (same trap selectPreset's own comment
+ * documents for presets), and cloneRaw's toRaw() unwrap only works on a
+ * value that IS a proxy — wrapping them in `{ placements: ..., groups:
+ * ... }` first would hand structuredClone a plain object with proxies
+ * still nested inside it, which throws DataCloneError exactly like a bare
+ * structuredClone(preset) did before selectPreset was fixed. */
+const pushUndoSnapshot = () => {
+  const snapshot: PlacementSnapshot = {
+    placements: cloneRaw(placements.value),
+    groups: cloneRaw(groups.value),
+    selectedIndex: selectedIndex.value,
+  };
+  undoStack.value = pushBounded(undoStack.value, snapshot, MAX_UNDO_STEPS);
+};
+
+const canUndo = computed(() => !locked.value && undoStack.value.length > 0);
+/** Disabled-with-tooltip convention (see the palette/generator buttons) —
+ * why Undo is greyed out, never a click-then-toast. */
+const undoBlockedReason = computed(() => {
+  if (locked.value) return "Locked while a job is running";
+  if (!undoStack.value.length) return "Nothing to undo";
+  return "";
+});
+
+/** Restores the whole snapshot — placements, group membership, and
+ * selection together — never partially. Undo-only: no redo stack exists
+ * (a forward stack could be added later without reshaping this one). */
+const undo = () => {
+  if (!canUndo.value) return;
+  const { item, rest } = popLast(undoStack.value);
+  if (!item) return;
+  undoStack.value = rest;
+  placements.value = item.placements;
+  groups.value = item.groups;
+  selectedIndex.value = item.selectedIndex;
+};
+
+/** True while a viewport drag/rotate GESTURE is in flight (between its
+ * `gesture-start` and the next pointerup) — the viewport streams many
+ * `update` patches per gesture (one per pointermove), and undo must
+ * coalesce all of them into the ONE snapshot already pushed at
+ * gesture-start, not push a fresh one per patch. Set/cleared by
+ * onGestureStart/onGestureEnd below; onUpdatePlacement only pushes its own
+ * snapshot when this is false (a standalone patch, e.g. a [ / ] keypress,
+ * which has no gesture wrapping it). */
+let gestureInFlight = false;
+const onGestureStart = () => {
+  gestureInFlight = true;
+  pushUndoSnapshot();
+};
+const onGestureEnd = () => {
+  gestureInFlight = false;
+};
+
 // Placement mutation is locked out while a job is running: the job already
 // took a snapshot (jobPlacementNames below) and mid-job add/delete would
 // desync indices between the live array and the in-flight cut list.
@@ -369,6 +513,7 @@ const addPlacement = (cutter: Cutter) => {
   // (a greyed button beats a click-then-scold toast); the guard stays for
   // any future non-palette caller.
   if (locked.value || !landscapeBounds.value) return;
+  pushUndoSnapshot();
   placements.value.push({
     cutter: cutter.kind,
     x_mm: landscapeBounds.value.centerX,
@@ -459,12 +604,20 @@ const regimentOutOfBounds = computed(() => {
   );
 });
 
-/** Append a generated batch, minting all names in one placements scan. */
-const pushGenerated = (cutterId: string, generated: GeneratedPlacement[]) => {
-  if (!generated.length) return;
+/** Append a generated batch, minting all names in one placements scan.
+ * Returns the minted names — placeRegiment groups them; runScatter ignores
+ * the return (scatter placements always stay ungrouped). Callers push their
+ * own undo snapshot BEFORE calling this (one user action = one snapshot,
+ * regardless of how many placements the action produces). */
+const pushGenerated = (
+  cutterId: string,
+  generated: GeneratedPlacement[],
+): string[] => {
+  if (!generated.length) return [];
   const names = nextNames(cutterId, generated.length);
   placements.value.push(...generated.map((g, i) => ({ ...g, name: names[i] })));
   selectedIndex.value = placements.value.length - 1;
+  return names;
 };
 
 const placeRegiment = () => {
@@ -475,6 +628,7 @@ const placeRegiment = () => {
   ) {
     return;
   }
+  pushUndoSnapshot();
   const cutter = generatorCutter.value;
   const b = landscapeBounds.value;
   const generated = regimentPlacements(
@@ -484,12 +638,25 @@ const placeRegiment = () => {
     regimentGapMm.value,
     { x: b.centerX, y: b.centerY },
   );
-  pushGenerated(cutter.id, generated);
+  const names = pushGenerated(cutter.id, generated);
+  // A regiment is a GROUP only once it has more than one member — a single
+  // cutter placed via a 1x1 "regiment" behaves like any hand-placed base.
+  // Scatter never groups (see pushGenerated's doc comment): random loose
+  // scatter isn't a formation the way a ranked grid is.
+  if (names.length > 1) {
+    groupSeq++;
+    groups.value.push({
+      id: `group-${groupSeq}`,
+      label: `regiment ${groupSeq} — ${cutterLabel(cutter.kind)}`,
+      names,
+    });
+  }
 };
 
 const runScatter = () => {
   if (!canScatter.value || !generatorCutter.value || !landscapeBounds.value)
     return;
+  pushUndoSnapshot();
   const cutter = generatorCutter.value;
   const requested = Math.min(scatterCount.value, MAX_SCATTER_COUNT);
   const generated = scatterPlacements(
@@ -510,20 +677,66 @@ const runScatter = () => {
   );
 };
 
+/** Rotate a single member, EXCEPT when it's grouped: rotating a grouped
+ * member is a group rotate (the FORMATION pivots), consistent with the
+ * viewport's own rotation handle — a member never spins in place while its
+ * squadmates stay put. Drives the per-member row buttons. */
 const rotatePlacement = (index: number, deltaDeg: number) => {
   if (locked.value) return;
   const p = placements.value[index];
   if (!p) return;
-  p.rotation_deg = (((p.rotation_deg + deltaDeg) % 360) + 360) % 360;
+  pushUndoSnapshot();
+  const group = groupOfIndex(index);
+  if (group) {
+    applyGroupRotation(group, deltaDeg);
+    return;
+  }
+  p.rotation_deg = normalizeDeg(p.rotation_deg + deltaDeg);
 };
 
 const deletePlacement = (index: number) => {
   if (locked.value) return;
+  pushUndoSnapshot();
+  const removedName = placements.value[index]?.name ?? null;
   placements.value.splice(index, 1);
-  if (selectedIndex.value === index) selectedIndex.value = null;
-  else if (selectedIndex.value !== null && selectedIndex.value > index) {
-    selectedIndex.value--;
-  }
+  selectedIndex.value = reindexSelection(selectedIndex.value, [index]);
+  // A member deleted this way just drops out of its group (not the whole
+  // group) — deleting the GROUP itself is deleteGroup, below.
+  if (removedName) removeMemberFromGroups(removedName);
+};
+
+/** Release a group's members back to plain, ungrouped placements — the
+ * placements themselves are untouched. */
+const ungroupGroup = (group: PlacementGroup) => {
+  if (locked.value) return;
+  pushUndoSnapshot();
+  groups.value = groups.value.filter((g) => g.id !== group.id);
+};
+
+/** Delete every member of a group in one action. Splices high-to-low so
+ * earlier indices stay valid mid-loop, then reindexes the selection against
+ * the WHOLE removed set at once (reindexSelection, extended from
+ * deletePlacement's single-index compensation to cover simultaneous
+ * multi-member removal). */
+const deleteGroup = (group: PlacementGroup) => {
+  if (locked.value) return;
+  pushUndoSnapshot();
+  // .sort(), not .toSorted(): the tsconfig lib target predates ES2023.
+  // Safe here regardless — memberIndices() already returns a fresh array
+  // (map+filter), so there's no shared reference to mutate out from under.
+  const indices = memberIndices(group).sort((a, b) => b - a);
+  for (const i of indices) placements.value.splice(i, 1);
+  selectedIndex.value = reindexSelection(selectedIndex.value, indices);
+  groups.value = groups.value.filter((g) => g.id !== group.id);
+};
+
+/** The group header's own ↺/↻ (±15°, same step as the per-member row
+ * buttons) — identical math to a grouped member's row rotate, just entered
+ * directly from the group rather than via one of its members. */
+const rotateGroupBy = (group: PlacementGroup, deltaDeg: number) => {
+  if (locked.value) return;
+  pushUndoSnapshot();
+  applyGroupRotation(group, deltaDeg);
 };
 
 const isMagnetSize = (spec: MagnetSpec) => {
@@ -538,6 +751,7 @@ const isMagnetSize = (spec: MagnetSpec) => {
  * added) — count is edited independently via the button group below. */
 const setMagnetSize = (spec: MagnetSpec) => {
   if (!selectedPlacement.value) return;
+  pushUndoSnapshot();
   const count = selectedPlacement.value.magnet?.count ?? 1;
   selectedPlacement.value.magnet = {
     diameter_mm: spec.diameter_mm,
@@ -548,11 +762,13 @@ const setMagnetSize = (spec: MagnetSpec) => {
 
 const clearMagnet = () => {
   if (!selectedPlacement.value) return;
+  pushUndoSnapshot();
   selectedPlacement.value.magnet = null;
 };
 
 const setMagnetCount = (count: number) => {
   if (!selectedPlacement.value?.magnet) return;
+  pushUndoSnapshot();
   selectedPlacement.value.magnet.count = count;
 };
 
@@ -582,6 +798,7 @@ const isSuggestedMagnet = (spec: MagnetSpec) => {
  * deliberately preserves the existing count instead. */
 const applySuggestedMagnet = () => {
   if (!selectedPlacement.value || !suggestedMagnet.value) return;
+  pushUndoSnapshot();
   // count comes from the suggestion, NOT the inventory spec — inventory
   // rows always carry count 1, so spreading the spec alone would apply a
   // "suggested ×2" as a single magnet (and leave the button visible).
@@ -599,7 +816,48 @@ const onSelect = (index: number | null) => {
 const onUpdatePlacement = (index: number, patch: Partial<Placement>) => {
   if (locked.value) return;
   const p = placements.value[index];
-  if (p) Object.assign(p, patch);
+  if (!p) return;
+
+  // A patch arriving OUTSIDE a viewport gesture (e.g. a [ / ] keypress) is
+  // its own discrete undo step; a patch that's part of an ongoing drag/
+  // rotate gesture was already snapshotted once at gesture-start, so
+  // pushing here too would coalesce into more than one undo step per drag.
+  if (!gestureInFlight) pushUndoSnapshot();
+
+  const group = groupOfIndex(index);
+
+  if (group && patch.rotation_deg !== undefined) {
+    // Group ROTATE (rotation handle or [ / ] keys): the FORMATION pivots —
+    // every member's position orbits the group centroid by the delta AND
+    // every member's own rotation_deg advances by it. The delta is the
+    // SHORTEST signed angle from this member's pre-patch rotation to the
+    // patched one (angularDelta, not raw subtraction — see its own comment
+    // for why a step across the 0/360 seam would otherwise invert
+    // direction), computed fresh against the pre-patch value every event so
+    // a continuous handle drag can't double-apply.
+    applyGroupRotation(group, angularDelta(p.rotation_deg, patch.rotation_deg));
+    return;
+  }
+
+  if (group && (patch.x_mm !== undefined || patch.y_mm !== undefined)) {
+    // Group MOVE: the same dx/dy lands on every OTHER member. Computed
+    // against THIS member's PRE-patch position each event (old vs patch),
+    // never accumulated across the drag — see moveDelta's own comment for
+    // why an accumulator or a stale "drag start" reference would
+    // double-apply the motion as the drag continues.
+    const { dx, dy } = moveDelta(p, {
+      x_mm: patch.x_mm ?? p.x_mm,
+      y_mm: patch.y_mm ?? p.y_mm,
+    });
+    for (const i of memberIndices(group)) {
+      if (i === index) continue;
+      const member = placements.value[i];
+      member.x_mm += dx;
+      member.y_mm += dy;
+    }
+  }
+
+  Object.assign(p, patch);
 };
 const onDeletePlacement = (index: number) => deletePlacement(index);
 const onLandscapeLoaded = (bounds: LandscapeBounds) => {
@@ -608,6 +866,54 @@ const onLandscapeLoaded = (bounds: LandscapeBounds) => {
 const onViewportError = (message: string) => {
   toastStore.addToast(message, "error", 0);
 };
+
+/** Other members of the selected placement's group, if any — softens their
+ * viewport outline to read as co-selected (docs task: "the other group
+ * members' outlines should read as co-selected"). Empty when nothing's
+ * selected or the selection is ungrouped. */
+const coSelectedIndices = computed<number[]>(() => {
+  if (selectedIndex.value === null) return [];
+  const group = groupOfIndex(selectedIndex.value);
+  if (!group) return [];
+  return memberIndices(group).filter((i) => i !== selectedIndex.value);
+});
+
+/** Placements list rendering: singles render one row each; a group's
+ * members render together under one collapsible header row. Relies on a
+ * group's members staying CONTIGUOUS in `placements` — true in practice
+ * because every mutation that adds placements (addPlacement, pushGenerated)
+ * only ever appends to the end of the array, so a group's members (always
+ * created together) are never interleaved with placements created after
+ * them; deleting a member only ever removes from the run, never reorders
+ * it. */
+type PlacementRow =
+  | { kind: "single"; index: number; p: Placement }
+  | {
+      kind: "group";
+      group: PlacementGroup;
+      members: { index: number; p: Placement }[];
+    };
+const placementRows = computed<PlacementRow[]>(() => {
+  const rows: PlacementRow[] = [];
+  const list = placements.value;
+  let i = 0;
+  while (i < list.length) {
+    const p = list[i];
+    const group = groupOfName(p.name);
+    if (!group) {
+      rows.push({ kind: "single", index: i, p });
+      i++;
+      continue;
+    }
+    const members: { index: number; p: Placement }[] = [];
+    while (i < list.length && groupOfName(list[i].name) === group) {
+      members.push({ index: i, p: list[i] });
+      i++;
+    }
+    rows.push({ kind: "group", group, members });
+  }
+  return rows;
+});
 
 /** Swap in a different landscape STL — from the file picker OR a freshly
  * generated one (below). Existing placements' coordinates belong to the
@@ -1382,67 +1688,195 @@ const exportToCatalog = async () => {
       </div>
 
       <div class="flex flex-col gap-1.5">
-        <span
-          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-          >PLACEMENTS ({{ placements.length }})</span
-        >
+        <div class="flex items-center justify-between gap-2">
+          <span
+            class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+            >PLACEMENTS ({{ placements.length }})</span
+          >
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs gap-1"
+            :title="undoBlockedReason || 'Undo (Ctrl/Cmd+Z)'"
+            :disabled="!canUndo"
+            @click="undo"
+          >
+            ↶ Undo
+          </button>
+        </div>
         <ul
           v-if="placements.length"
           class="flex flex-col gap-1 max-h-48 overflow-y-auto"
         >
-          <li
-            v-for="(p, i) in placements"
-            :key="i"
-            class="flex items-center gap-1.5 px-2 py-1.5 rounded border cursor-pointer text-[12px]"
-            :class="
-              i === selectedIndex
-                ? 'bg-primary/10 border-primary'
-                : 'border-base-content/10 hover:border-base-content/30'
-            "
-            @click="selectedIndex = i"
+          <template
+            v-for="row in placementRows"
+            :key="row.kind === 'group' ? row.group.id : `p-${row.index}`"
           >
-            <span class="flex-1 truncate font-medium">{{ p.name }}</span>
-            <span class="text-base-content/50 font-mono text-[10px]">{{
-              cutterLabel(p.cutter)
-            }}</span>
-            <span
-              class="font-mono text-[10px] text-base-content/40 w-9 text-right"
-              >{{ Math.round(p.rotation_deg) }}°</span
+            <li
+              v-if="row.kind === 'single'"
+              class="flex items-center gap-1.5 px-2 py-1.5 rounded border cursor-pointer text-[12px]"
+              :class="
+                row.index === selectedIndex
+                  ? 'bg-primary/10 border-primary'
+                  : 'border-base-content/10 hover:border-base-content/30'
+              "
+              @click="selectedIndex = row.index"
             >
-            <span
-              v-if="p.magnet"
-              class="badge badge-xs badge-info"
-              title="Magnet pocket"
-              >{{ p.magnet.count > 1 ? `M×${p.magnet.count}` : "M" }}</span
+              <span class="flex-1 truncate font-medium">{{ row.p.name }}</span>
+              <span class="text-base-content/50 font-mono text-[10px]">{{
+                cutterLabel(row.p.cutter)
+              }}</span>
+              <span
+                class="font-mono text-[10px] text-base-content/40 w-9 text-right"
+                >{{ Math.round(row.p.rotation_deg) }}°</span
+              >
+              <span
+                v-if="row.p.magnet"
+                class="badge badge-xs badge-info"
+                title="Magnet pocket"
+                >{{
+                  row.p.magnet.count > 1 ? `M×${row.p.magnet.count}` : "M"
+                }}</span
+              >
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs px-1"
+                title="Rotate -15°"
+                :disabled="locked"
+                @click.stop="rotatePlacement(row.index, -15)"
+              >
+                ↺
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs px-1"
+                title="Rotate +15°"
+                :disabled="locked"
+                @click.stop="rotatePlacement(row.index, 15)"
+              >
+                ↻
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs px-1 text-error"
+                title="Delete placement"
+                :disabled="locked"
+                @click.stop="deletePlacement(row.index)"
+              >
+                ✕
+              </button>
+            </li>
+
+            <li
+              v-else
+              class="flex flex-col gap-1 rounded border border-base-content/10 px-2 py-1.5 text-[12px]"
             >
-            <button
-              type="button"
-              class="btn btn-ghost btn-xs px-1"
-              title="Rotate -15°"
-              :disabled="locked"
-              @click.stop="rotatePlacement(i, -15)"
-            >
-              ↺
-            </button>
-            <button
-              type="button"
-              class="btn btn-ghost btn-xs px-1"
-              title="Rotate +15°"
-              :disabled="locked"
-              @click.stop="rotatePlacement(i, 15)"
-            >
-              ↻
-            </button>
-            <button
-              type="button"
-              class="btn btn-ghost btn-xs px-1 text-error"
-              title="Delete placement"
-              :disabled="locked"
-              @click.stop="deletePlacement(i)"
-            >
-              ✕
-            </button>
-          </li>
+              <div class="flex items-center gap-1.5">
+                <span class="flex-1 truncate font-semibold">{{
+                  row.group.label
+                }}</span>
+                <span class="text-base-content/40 font-mono text-[10px]">{{
+                  row.members.length
+                }}</span>
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-xs px-1"
+                  title="Rotate group -15°"
+                  :disabled="locked"
+                  @click.stop="rotateGroupBy(row.group, -15)"
+                >
+                  ↺
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-xs px-1"
+                  title="Rotate group +15°"
+                  :disabled="locked"
+                  @click.stop="rotateGroupBy(row.group, 15)"
+                >
+                  ↻
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-xs px-1.5"
+                  title="Ungroup — release members to single bases"
+                  :disabled="locked"
+                  @click.stop="ungroupGroup(row.group)"
+                >
+                  ungroup
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-xs px-1 text-error"
+                  title="Delete group"
+                  :disabled="locked"
+                  @click.stop="deleteGroup(row.group)"
+                >
+                  ✕
+                </button>
+              </div>
+              <ul
+                class="flex flex-col gap-1 pl-2 border-l border-base-content/10"
+              >
+                <li
+                  v-for="m in row.members"
+                  :key="m.index"
+                  class="flex items-center gap-1.5 py-1 rounded cursor-pointer"
+                  :class="
+                    m.index === selectedIndex
+                      ? 'bg-primary/10'
+                      : 'hover:bg-base-content/5'
+                  "
+                  @click="selectedIndex = m.index"
+                >
+                  <span class="flex-1 truncate font-medium">{{
+                    m.p.name
+                  }}</span>
+                  <span class="text-base-content/50 font-mono text-[10px]">{{
+                    cutterLabel(m.p.cutter)
+                  }}</span>
+                  <span
+                    class="font-mono text-[10px] text-base-content/40 w-9 text-right"
+                    >{{ Math.round(m.p.rotation_deg) }}°</span
+                  >
+                  <span
+                    v-if="m.p.magnet"
+                    class="badge badge-xs badge-info"
+                    title="Magnet pocket"
+                    >{{
+                      m.p.magnet.count > 1 ? `M×${m.p.magnet.count}` : "M"
+                    }}</span
+                  >
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-xs px-1"
+                    title="Rotate group -15° (this base is grouped)"
+                    :disabled="locked"
+                    @click.stop="rotatePlacement(m.index, -15)"
+                  >
+                    ↺
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-xs px-1"
+                    title="Rotate group +15° (this base is grouped)"
+                    :disabled="locked"
+                    @click.stop="rotatePlacement(m.index, 15)"
+                  >
+                    ↻
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-xs px-1 text-error"
+                    title="Remove from group"
+                    :disabled="locked"
+                    @click.stop="deletePlacement(m.index)"
+                  >
+                    ✕
+                  </button>
+                </li>
+              </ul>
+            </li>
+          </template>
         </ul>
         <p v-else class="text-[11px] text-base-content/40">
           Click a cutter above to place one at the landscape center.
@@ -1755,12 +2189,16 @@ const exportToCatalog = async () => {
         :placements="placements"
         :plinth="plinth"
         :selected-index="selectedIndex"
+        :co-selected="coSelectedIndices"
         :locked="locked"
         @select="onSelect"
         @update="onUpdatePlacement"
         @delete="onDeletePlacement"
         @loaded="onLandscapeLoaded"
         @error="onViewportError"
+        @gesture-start="onGestureStart"
+        @gesture-end="onGestureEnd"
+        @undo="undo"
       />
     </aside>
 
