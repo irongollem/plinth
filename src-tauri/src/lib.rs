@@ -35,7 +35,11 @@ use file::commands::{
     add_models, cancel_compression, create_release, finalize_release, import_release,
     inspect_release_package, list_release_drafts, load_release_draft, open_with_default_app,
 };
-use minihoard::{cancel_minihoard, detect_minihoard, run_minihoard, MinihoardStatus};
+use minihoard::{
+    cancel_minihoard, cancel_minihoard_download, detect_minihoard, minihoard_list,
+    minihoard_status, run_minihoard, start_minihoard_download, MinihoardDownloadStatus,
+    MinihoardStatus,
+};
 use models::events::{
     BaseCutStatus, BatchRenderStatus, BlenderProvisionStatus, CompressionStatus, DuplicateStatus,
     LandscapeGenStatus, PackStatus, RenderStatus, ScanStatus, ScatterStatus,
@@ -145,6 +149,10 @@ fn create_specta_builder() -> Builder {
             detect_minihoard,
             run_minihoard,
             cancel_minihoard,
+            minihoard_status,
+            minihoard_list,
+            start_minihoard_download,
+            cancel_minihoard_download,
             get_cutter_library,
             get_plinth_defaults,
             start_base_cut,
@@ -168,6 +176,7 @@ fn create_specta_builder() -> Builder {
             BlenderProvisionStatus,
             BatchRenderStatus,
             MinihoardStatus,
+            MinihoardDownloadStatus,
             BaseCutStatus,
             LandscapeGenStatus,
             ScatterStatus,
@@ -183,6 +192,10 @@ fn export_typescript_bindings(builder: &Builder) {
         .export(
             Typescript::default()
                 .formatter(specta_typescript::formatter::biome)
+                // Render Rust 64-bit ints as TS `number`. minihoard object ids
+                // and download byte counts are u64; both sit far below 2^53, so
+                // the (default) hard failure on BigInt is stricter than we need.
+                .bigint(specta_typescript::BigIntExportBehavior::Number)
                 .header("// @ts-nocheck\n// eslint-disable\n// biome-ignore lint/*: auto-generated file\n"),
             "../src/bindings.ts",
         )

@@ -799,6 +799,56 @@ async cancelMinihoard(jobId: string) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Probe minihoard's install + auth health (`status --json`). Never surfaces
+ * auth failure as an error — a dead login or missing cookie is reported in the
+ * returned fields, so the UI can render state rather than an exception.
+ */
+async minihoardStatus(binaryPath: string) : Promise<Result<MinihoardHealth, MinihoardError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("minihoard_status", { binaryPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Fetch the whole library (`list --json`). Buffered — ~4k entries is fine, and
+ * objectPreviews has no pagination, so this is one call, not a poll. A stale or
+ * missing cookie comes back as a typed `CookieExpired`/`CookieMissing`.
+ */
+async minihoardList(binaryPath: string) : Promise<Result<MinihoardEntry[], MinihoardError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("minihoard_list", { binaryPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Start a typed download of the given object ids. Returns a job id immediately;
+ * progress arrives as `MinihoardDownloadStatus` events. One run at a time.
+ */
+async startMinihoardDownload(binaryPath: string, ids: number[]) : Promise<Result<string, MinihoardError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_minihoard_download", { binaryPath, ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Cancel the active typed download (the queue's stop button). Emits
+ * `Cancelled` and marks the run terminal so the waiter stays silent.
+ */
+async cancelMinihoardDownload(jobId: string) : Promise<Result<null, MinihoardError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_minihoard_download", { jobId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getCutterLibrary() : Promise<Cutter[]> {
     return await TAURI_INVOKE("get_cutter_library");
 },
@@ -932,6 +982,7 @@ blenderProvisionStatus: BlenderProvisionStatus,
 compressionStatus: CompressionStatus,
 duplicateStatus: DuplicateStatus,
 landscapeGenStatus: LandscapeGenStatus,
+minihoardDownloadStatus: MinihoardDownloadStatus,
 minihoardStatus: MinihoardStatus,
 packStatus: PackStatus,
 renderStatus: RenderStatus,
@@ -944,6 +995,7 @@ blenderProvisionStatus: "blender-provision-status",
 compressionStatus: "compression-status",
 duplicateStatus: "duplicate-status",
 landscapeGenStatus: "landscape-gen-status",
+minihoardDownloadStatus: "minihoard-download-status",
 minihoardStatus: "minihoard-status",
 packStatus: "pack-status",
 renderStatus: "render-status",
@@ -1427,12 +1479,79 @@ feature_scale?: number; carrier_mm?: number; relief_mm: number; layers?: Landsca
  * straight into a placement's `magnet` field for base_cut.py.
  */
 export type MagnetSpec = { diameter_mm: number; height_mm: number; count: number }
+export type MdCancelled = { job_id: string }
+export type MdFailed = { job_id: string; error: MinihoardError }
+export type MdFileProgress = { job_id: string; id: number; bytes_done: number; 
+/**
+ * Absent when the server didn't send a Content-Length.
+ */
+bytes_total: number | null }
+export type MdFinished = { job_id: string; ok: number; failed: number }
+export type MdObjectDone = { job_id: string; id: number; 
+/**
+ * Final on-disk release folder (post flatten/rename).
+ */
+dir: string }
+export type MdObjectFailed = { job_id: string; id: number; reason: string }
+export type MdObjectStart = { job_id: string; id: number; name: string; index: number; total: number }
+export type MdStarted = { job_id: string; 
+/**
+ * Number of objects requested — the queue can render rows before the first
+ * `object_start` arrives.
+ */
+total: number }
+/**
+ * Streaming status for a typed download run, shaped like `BaseCutStatus`: a
+ * `Started`, a run of per-object events, then exactly one terminal
+ * (`Finished` | `Failed` | `Cancelled`). User cancel is `Cancelled`, never
+ * `Failed`. Every variant carries `job_id` so the queue UI can route it.
+ */
+export type MinihoardDownloadStatus = { Started: MdStarted } | { ObjectStart: MdObjectStart } | { FileProgress: MdFileProgress } | { ObjectDone: MdObjectDone } | { ObjectFailed: MdObjectFailed } | { Finished: MdFinished } | { Failed: MdFailed } | { Cancelled: MdCancelled }
+/**
+ * One library object, mirroring minihoard's `list --json` `entry` payload.
+ */
+export type MinihoardEntry = { id: number; name: string; creator: string | null; creator_username: string | null; source: string | null; library_added_at: string | null; yearmonth: string | null; tags: string[]; downloaded: boolean }
+/**
+ * Errors from the typed commands, shaped so the frontend branches on `kind`
+ * (a discriminated union in the generated bindings), never on message text —
+ * the exact coupling the old console's hardcoded English strings created.
+ */
+export type MinihoardError = 
+/**
+ * No website session cookie is stored — offer `sync-cookie`.
+ */
+{ kind: "cookie_missing"; message: string } | 
+/**
+ * The stored cookie no longer authenticates — offer `sync-cookie`.
+ */
+{ kind: "cookie_expired"; message: string } | 
+/**
+ * OAuth isn't set up (login lives in a real terminal).
+ */
+{ kind: "auth"; message: string } | 
+/**
+ * minihoard has no usable config yet.
+ */
+{ kind: "config"; message: string } | 
+/**
+ * The binary is missing, too old, or otherwise unusable.
+ */
+{ kind: "unavailable"; message: string } | 
+/**
+ * Anything else minihoard reported.
+ */
+{ kind: "failed"; message: string }
 export type MinihoardFinished = { job_id: string; success: boolean; 
 /**
  * Present when the process couldn't run at all (spawn failure).
  */
 error: string | null }
-export type MinihoardInfo = { path: string; version: string;
+/**
+ * Install + auth health, mirroring minihoard's `status --json`. Non-mutating;
+ * `cookie_present` is presence only — validity is proven by a real `list`.
+ */
+export type MinihoardHealth = { version: string; oauth_ok: boolean; username: string | null; cookie_present: boolean; library_dir: string | null }
+export type MinihoardInfo = { path: string; version: string; 
 /**
  * Whether this build speaks the `--json` protocol (>= 0.4.0). Below that,
  * the view falls back to the legacy raw console with an "update" hint —
@@ -1667,7 +1786,7 @@ look_config?: string | null;
  * Geometry-driven translucent resin: thickness-dependent SSS plus a
  * warm rear-light boost. Intended for thin wings, cloth and foliage.
  */
-translucent?: boolean;
+translucent?: boolean; 
 /**
  * Render the configured scale-reference figure beside the model
  * (settings supply the STL path + height; silently off when unset).
@@ -1732,7 +1851,7 @@ export type ScatterFinishedStatus = { job_id: string; out_path: string; placed: 
  * scatter_landscape.py verbatim — unlike `BaseCutJob`, no field is renamed:
  * the script reads `job["landscape_path"]`, `job["out_path"]`,
  * `job["layers"]` directly (see its module docstring's job JSON example).
- *
+ * 
  * `layers` is a STACK, not a single pass (docs/SCATTER.md "Layers — build
  * the debris up, peel it back"): each entry is a full `ScatterParams`, and
  * each places independently onto the TERRAIN from its own seed — adding or
