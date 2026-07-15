@@ -9,7 +9,10 @@ describe("cloneRaw", () => {
   // result) silently broke on every template interaction (proxied).
   it("clones a value read out of a ref (a reactive Proxy)", () => {
     const presets = ref([
-      { id: "sandy", params: { seed: 2, layers: { ripples: { enabled: true } } } },
+      {
+        id: "sandy",
+        params: { seed: 2, layers: { ripples: { enabled: true } } },
+      },
     ]);
     const proxied = presets.value[0].params;
 

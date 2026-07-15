@@ -29,7 +29,7 @@ a placement UI**. No CSG code in Rust, ever.
 The placement UI is also cheaper than it first looks: `StlViewport.vue`
 already proves out three.js + the STL-decode worker
 (`stlGeometry.worker.ts`). The cutter view reuses that machinery with a
-top-down orthographic camera — no Blender render needed just to *see* the
+top-down orthographic camera — no Blender render needed just to _see_ the
 landscape.
 
 ## Cutters are data, not code
@@ -134,14 +134,14 @@ a per-cut CLI, and per cut:
 3. **Boolean intersect** (exact solver) → the terrain plug. The plug
    still carries the landscape's flat underside ("carrier" thickness),
    which must not become base height.
-4. **Seat** the plug: find the lowest point of its *top* (sculpted)
+4. **Seat** the plug: find the lowest point of its _top_ (sculpted)
    surface — raycast a grid down inside the footprint — and sink the
    plug so that point sits exactly on the plinth's top plane. Trim
    everything below that plane (boolean with a half-space box), so the
    finished base is plinth height + terrain relief only. Side walls then show the
    terrain's height profile around the rim, like a hand-made scenic base.
 5. **Generate the plinth** (top face = derived cut footprint); **union**.
-   The trim leaves the plug reaching ~0.2 mm *into* the top plate so the
+   The trim leaves the plug reaching ~0.2 mm _into_ the top plate so the
    union sees two overlapping solids — two solids merely kissing on a
    shared plane can hand the exact solver a non-manifold seam.
 6. **Cleanup**: merge-by-distance, recalc normals, manifold check.
@@ -275,14 +275,14 @@ tool-agnostic, so the Render UI can reuse it for the size picker.
 
 - **Designer mesh quality** is the real one. Exact-solver booleans are
   tolerant but not magic; voxel remesh is the fallback, the validation
-  pass is the gate. Test landscapes get generated *with Blender itself* —
+  pass is the gate. Test landscapes get generated _with Blender itself_ —
   imported junk meshes fake unrelated symptoms (see the inverted-normals
   incident).
 - **Performance**: booleans on multi-million-triangle sculpts take
   seconds-to-minutes per cut. Acceptable as a batch job with per-cut
   progress; decimation stays available as a later option.
 - **Licensing**: cutting for personal printing sits squarely inside
-  personal-use licences; *sharing* a cut STL does not. Exports stay
+  personal-use licences; _sharing_ a cut STL does not. Exports stay
   local/catalog-bound; no share path for cut output.
 
 ## Pinned interfaces
@@ -332,19 +332,19 @@ Blender CLI, same convention as `render_mini.py`), not as flags per cut.
 
 1. **Script spike** — hand-run `base_cut.py` against the local 5.1.2:
    Blender-generated test landscape + one placement → `base.stl`;
-   confirm the measured profile (3.7 mm, 15°). *Done when*: a printed
+   confirm the measured profile (3.7 mm, 15°). _Done when_: a printed
    base has a clean plug/plinth seam, correct nominal footprint at the
    table, and total height = 3.7 mm + relief (seat logic proven).
 2. **Cutter library** — `basecutter/cutters.rs`: types, seed table,
-   `top_face_of`, `get_cutter_library`. *Done when*: unit tests pin the
+   `top_face_of`, `get_cutter_library`. _Done when_: unit tests pin the
    table and the nominal→cut derivation.
 3. **Job pipeline** — embed the script, `job.rs` + commands +
-   `BaseCutStatus`, registration in `lib.rs`. *Done when*: a job started
+   `BaseCutStatus`, registration in `lib.rs`. _Done when_: a job started
    from a test harness (no UI) emits the full event sequence, produces N
    STLs, and cancel kills the child mid-run.
 4. **Tab + viewport** — sidebar entry, `BaseCutter.vue`,
-   `LandscapeViewport.vue` with single-placement drag/rotate. *Done
-   when*: one cut runs end-to-end from the UI with live progress.
+   `LandscapeViewport.vue` with single-placement drag/rotate. _Done
+   when_: one cut runs end-to-end from the UI with live progress.
 5. **Multi-cut + polish** — placement list, duplicate/overlap warnings,
    plinth options UI, magnet inventory in settings + per-placement magnet
    picker, validation surfacing, export-into-catalog.

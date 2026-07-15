@@ -32,7 +32,8 @@
         if (!skeleton) return;
         skeleton.classList.add("boot-skeleton--stalled");
         var msg = document.createElement("p");
-        msg.textContent = "Still loading — if this never finishes, restart Plinth.";
+        msg.textContent =
+          "Still loading — if this never finishes, restart Plinth.";
         skeleton.appendChild(msg);
       }, 20000);
     </script>
