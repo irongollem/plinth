@@ -5,10 +5,126 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Plinth</title>
+    <!-- Anti-flash critical path: between document (re)load and the CSS
+         bundle arriving, the webview shows the document's own background —
+         white by default, jarring on the dark theme and visible for the
+         full module-load time on a dev hot reload. Restore the persisted
+         theme attribute before first paint and give <html> the matching
+         base-100 color inline, so the gap renders in-theme instead.
+         Hex values mirror --color-base-100 / --color-base-300 in
+         assets/styles.css AND the window backgroundColor in
+         src-tauri/tauri.conf.json — update all three together.
+         tauri.conf.json's backgroundColor is dark-only by design: it paints
+         before any code can read the persisted theme, so light-theme users
+         see a brief dark first frame. That's the accepted cost, since dark
+         is the majority default. -->
+    <script>
+      try {
+        if (localStorage.getItem("plinth-theme") === "plinth-light") {
+          document.documentElement.setAttribute("data-theme", "plinth-light");
+        }
+      } catch (_) {}
+      // Startup-crash guard: if main.ts throws before app.mount(), the
+      // skeleton below would otherwise shimmer forever, indistinguishable
+      // from a slow load. After a generous timeout, freeze it and say so.
+      setTimeout(function () {
+        var skeleton = document.querySelector(".boot-skeleton");
+        if (!skeleton) return;
+        skeleton.classList.add("boot-skeleton--stalled");
+        var msg = document.createElement("p");
+        msg.textContent = "Still loading — if this never finishes, restart Plinth.";
+        skeleton.appendChild(msg);
+      }, 20000);
+    </script>
+    <style>
+      html {
+        background-color: #232120;
+        --boot-panel: #1b1917;
+        --boot-bone: #2c2925;
+        --boot-sheen: #3a3631;
+      }
+      html[data-theme="plinth-light"] {
+        background-color: #edeae4;
+        --boot-panel: #e3dfd8;
+        --boot-bone: #d3cec4;
+        --boot-sheen: #c4beb2;
+      }
+      /* Boot skeleton: static markup inside #app, replaced wholesale when
+         Vue mounts. Mirrors the real shell (220px base-300 sidebar + main
+         pane) so the mount doesn't jump. Bones shimmer so the wait reads
+         as loading, not as a hung app. */
+      .boot-skeleton {
+        position: fixed;
+        inset: 0;
+        display: flex;
+      }
+      .boot-skeleton aside {
+        width: 220px;
+        flex-shrink: 0;
+        background: var(--boot-panel);
+        padding: 3rem 1.125rem 1rem;
+      }
+      .boot-skeleton main {
+        flex: 1;
+        padding: 3rem 1.5rem 1.5rem;
+      }
+      .boot-bone {
+        height: 0.875rem;
+        border-radius: 0.25rem;
+        margin-bottom: 1.125rem;
+        background: linear-gradient(
+          100deg,
+          var(--boot-bone) 40%,
+          var(--boot-sheen) 50%,
+          var(--boot-bone) 60%
+        );
+        background-size: 200% 100%;
+        animation: boot-shimmer 1.4s ease-in-out infinite;
+      }
+      .boot-skeleton main .boot-bone {
+        height: 5rem;
+        border-radius: 0.625rem;
+      }
+      @keyframes boot-shimmer {
+        from {
+          background-position: 120% 0;
+        }
+        to {
+          background-position: -80% 0;
+        }
+      }
+      .boot-skeleton--stalled .boot-bone {
+        animation: none;
+      }
+      .boot-skeleton--stalled p {
+        position: absolute;
+        bottom: 1.5rem;
+        left: 1.5rem;
+        color: var(--boot-sheen);
+        font: 0.8125rem sans-serif;
+      }
+    </style>
   </head>
 
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <div class="boot-skeleton">
+        <aside>
+          <div class="boot-bone" style="width: 55%"></div>
+          <div class="boot-bone" style="width: 80%; margin-top: 2rem"></div>
+          <div class="boot-bone" style="width: 70%"></div>
+          <div class="boot-bone" style="width: 75%"></div>
+          <div class="boot-bone" style="width: 65%"></div>
+          <div class="boot-bone" style="width: 72%"></div>
+        </aside>
+        <main>
+          <div class="boot-bone" style="width: 40%; height: 1.5rem"></div>
+          <div class="boot-bone"></div>
+          <div class="boot-bone" style="width: 85%"></div>
+          <div class="boot-bone" style="width: 60%"></div>
+        </main>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
