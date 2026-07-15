@@ -268,6 +268,17 @@ const hasScatterApplied = computed(
     landscapePath.value !== scatterSourcePath.value,
 );
 
+/** One committed pass in the scatter STACK (docs/SCATTER.md "Layers — build
+ * the debris up, peel it back"): the draft editor below (preset chips,
+ * density, seed, mix) always builds the NEXT layer via buildScatterParams();
+ * "Add layer" snapshots it here and re-runs the whole stack. `params` is a
+ * raw, non-reactive snapshot (cloneRaw at the push site) — never the live
+ * reactive draft, which would keep mutating under a layer that's supposed
+ * to be frozen the moment it's added. */
+type ScatterLayerEntry = { id: string; label: string; params: ScatterParams };
+const scatterLayers = ref<ScatterLayerEntry[]>([]);
+let scatterLayerSeq = 0;
+
 type ScatterMixEntry = {
   kind: GeneratedPieceKind;
   enabled: boolean;
@@ -438,6 +449,42 @@ const rerollDebrisSeed = () => {
   debrisParams.seed = Math.floor(Math.random() * 0xffffffff);
 };
 
+/** Whether the CURRENT draft still matches the preset last clicked. A hand
+ * edit anywhere a preset writes to — density, the generated-piece mix, or a
+ * bundled weight/enable — silently detaches the draft from it (a preset
+ * never touches seed or the ADVANCED knobs, so those don't count). Read
+ * when a layer is added (docs/SCATTER.md "Layers") to decide its label. */
+const draftMatchesSelectedPreset = computed(() => {
+  const preset = SCATTER_PRESETS.find(
+    (p) => p.id === selectedScatterPresetId.value,
+  );
+  if (!preset) return false;
+  if (debrisParams.density_per_dm2 !== preset.density_per_dm2) return false;
+  if (
+    debrisPieces.some((p) => !p.enabled || p.weight !== preset.weights[p.kind])
+  ) {
+    return false;
+  }
+  return bundledPieces.value.every((b) => {
+    const weight = preset.assetWeights?.[b.asset.id];
+    const shouldBeEnabled = weight !== undefined;
+    return (
+      b.enabled === shouldBeEnabled && (!shouldBeEnabled || b.weight === weight)
+    );
+  });
+});
+
+/** The label the NEXT layer gets if "Add layer" is clicked right now — the
+ * matched preset's own name, or "Custom" once the draft has drifted off it
+ * (or was never on one). */
+const draftLayerLabel = computed(() => {
+  if (!draftMatchesSelectedPreset.value) return "Custom";
+  return (
+    SCATTER_PRESETS.find((p) => p.id === selectedScatterPresetId.value)
+      ?.label ?? "Custom"
+  );
+});
+
 /** Shared "counts toward the mix" predicate — a piece must be checked AND
  * carry a positive weight (a preset like Boneyard leaves rock checked at
  * weight 0 rather than unchecking it, see SCATTER_PRESETS). Used both to
@@ -466,7 +513,7 @@ const removeScatterBlockedReason = computed(() => {
   if (locked.value || debrisScatter.isRunning.value) {
     return "Locked while a job is running";
   }
-  if (!hasScatterApplied.value) return "No scatter to remove";
+  if (!scatterLayers.value.length) return "No scatter to remove";
   return "";
 });
 const canRemoveScatter = computed(() => !removeScatterBlockedReason.value);
@@ -519,29 +566,113 @@ const buildScatterParams = (): ScatterParams => ({
   ],
 });
 
-/** Runs (or re-runs) scatter FROM the tracked source, never from the
- * currently-displayed decorated path — see scatterSourcePath's comment. */
-const startDebrisScatter = async () => {
-  if (!canRunDebrisScatter.value) return;
+/** id -> display label for a scatter asset, bundled or user-library — feeds
+ * only the layer stack's one-line summary below (scatterLayerSummary),
+ * which shows names rather than raw asset ids for a small mix. */
+const scatterAssetLabelById = computed(() => {
+  const map = new Map<string, string>();
+  for (const a of scatterAssets.value) map.set(a.id, a.label);
+  for (const p of userLibraryPieces.value) map.set(p.asset.id, p.asset.label);
+  return map;
+});
+
+/** "8/dm² · pebble, rock" or "8/dm² · 6 pieces" once the mix runs past a
+ * handful — a committed layer block gets one line, not a re-rendering of
+ * the whole PIECE MIX fold. */
+const scatterLayerSummary = (params: ScatterParams): string => {
+  const density = `${params.density_per_dm2}/dm²`;
+  const n = params.pieces.length;
+  if (n === 0) return `${density} · no pieces`;
+  if (n > 3) return `${density} · ${n} pieces`;
+  const names = params.pieces.map((p) =>
+    "Generated" in p.piece
+      ? p.piece.Generated.kind
+      : (scatterAssetLabelById.value.get(p.piece.Asset.id) ?? p.piece.Asset.id),
+  );
+  return `${density} · ${names.join(", ")}`;
+};
+
+/** Runs ONE scatter job carrying the given layer STACK, always from the
+ * tracked undecorated source (docs/SCATTER.md "Layers": "re-scatter never
+ * compounds" generalized to N passes) — the one place `addScatterLayer` and
+ * `removeScatterLayer` both funnel through, so neither can disagree about
+ * what "the job for this stack" means. An empty stack sends no job at all —
+ * it just restores the plain source, same as `removeScatter`'s clear-all.
+ * Returns whether the job actually started (or the empty-stack restore
+ * ran), so callers know whether to commit the stack change. */
+const runScatterLayerStack = async (
+  layers: ScatterLayerEntry[],
+): Promise<boolean> => {
   const source = scatterSourcePath.value || landscapePath.value;
+  if (layers.length === 0) {
+    setLandscapePath(source);
+    return true;
+  }
   const job: ScatterJob = {
     landscape_path: source,
     out_path: deriveScatterOutPath(source),
-    params: buildScatterParams(),
+    layers: layers.map((l) => l.params),
   };
   const result = await debrisScatter.start(job);
   if (result.status === "error") {
     toastStore.reportError("Failed to start scatter", result.error);
+    return false;
   }
+  return true;
+};
+
+/** "Add layer": snapshots the draft (buildScatterParams, cloneRaw'd — see
+ * cloneRaw's own doc comment on why a reactive object can't ride into a
+ * stored list/job) as a new layer and re-runs the WHOLE stack. Only once
+ * that job has actually started does it commit the stack and reroll the
+ * draft's seed, so the next layer stacked on top differs by default — the
+ * rest of the draft (preset, density, mix) is left alone, since stacking
+ * variations of the same mix is the common case. */
+const addScatterLayer = async () => {
+  if (!canRunDebrisScatter.value) return;
+  const nextLayers = [
+    ...scatterLayers.value,
+    {
+      id: `layer-${scatterLayerSeq++}`,
+      label: draftLayerLabel.value,
+      params: cloneRaw(buildScatterParams()),
+    },
+  ];
+  if (!(await runScatterLayerStack(nextLayers))) return;
+  scatterLayers.value = nextLayers;
+  rerollDebrisSeed();
+};
+
+/** Gates each committed layer's ✕ — separate from debrisScatterBlockedReason
+ * (which also cares whether the DRAFT has a piece enabled, irrelevant to
+ * removing an already-committed layer). */
+const scatterLayerActionsBlockedReason = computed(() =>
+  locked.value || debrisScatter.isRunning.value
+    ? "Locked while a job is running"
+    : "",
+);
+
+/** Removes one committed layer and re-runs the stack minus it. The other
+ * layers' own placements are untouched by this (each is an independent pass
+ * from its own seed, docs/SCATTER.md "Layers") — only the re-bake moves
+ * them onto the freshly-recomputed terrain. Falling to zero layers restores
+ * the plain source, same as `removeScatter`'s clear-all below. */
+const removeScatterLayer = async (id: string) => {
+  if (scatterLayerActionsBlockedReason.value) return;
+  const nextLayers = scatterLayers.value.filter((l) => l.id !== id);
+  if (!(await runScatterLayerStack(nextLayers))) return;
+  scatterLayers.value = nextLayers;
 };
 
 const cancelDebrisScatter = () => debrisScatter.cancel();
 
-/** Restores the undecorated source into the viewport — the mirror of a
- * scatter's own Finished handler below, both routed through
- * setLandscapePath so placements/undo get the same terrain-swap treatment. */
+/** Restores the undecorated source into the viewport and clears the whole
+ * stack — the "start over" action, as opposed to removeScatterLayer's
+ * single-layer removal. Routed through setLandscapePath so placements/undo
+ * get the same terrain-swap treatment as every other source change. */
 const removeScatter = () => {
   if (!canRemoveScatter.value) return;
+  scatterLayers.value = [];
   setLandscapePath(scatterSourcePath.value);
 };
 
@@ -1470,6 +1601,11 @@ const chooseLandscape = async () => {
   // scatter source (docs/SCATTER.md: "If the user picks/generates a NEW
   // landscape, scatterSourcePath resets to it").
   scatterSourcePath.value = files[0].path;
+  // Stale layers belong to the PREVIOUS terrain — left in place, the next
+  // add/remove would silently re-bake them onto this unrelated one (the
+  // "re-scatter never compounds" rule applies across a terrain swap too,
+  // not just repeated runs on the same source).
+  scatterLayers.value = [];
 };
 
 const chooseOutDir = async () => {
@@ -1570,6 +1706,9 @@ watch(landscapeGen.finished, (finished) => {
   // A freshly baked terrain is by definition undecorated — same reasoning
   // as chooseLandscape's own scatterSourcePath reset above.
   scatterSourcePath.value = finished.out_path;
+  // Same reasoning as chooseLandscape: a stack built for the OLD bake
+  // doesn't carry over to this one.
+  scatterLayers.value = [];
   const [w, d, h] = finished.dims_mm;
   toastStore.addToast(
     `Generated landscape (${w}×${d}×${h}mm)${finished.manifold ? "" : " — non-manifold"}`,
@@ -1794,19 +1933,11 @@ const step1Summary = computed(() => {
   return `${base} (${w}×${d}mm)`;
 });
 
-/** The seed the last APPLIED scatter actually ran with — captured when the
- * job finishes, not read live from debrisParams.seed, so rerolling the seed
- * field after a scatter doesn't lie about what's on the terrain. (Capturing
- * at finish is safe: the seed input is disabled while a scatter runs.) */
-const lastScatterSeed = ref<number | null>(null);
-watch(debrisScatter.finished, (finished) => {
-  if (finished) lastScatterSeed.value = debrisParams.seed;
-});
+/** "3 layers" / "not scattered" — a layer count, not a single seed, now
+ * that scatter is a stack (docs/SCATTER.md "Layers"). */
 const step2Summary = computed(() => {
-  if (!hasScatterApplied.value) return "not scattered";
-  return lastScatterSeed.value !== null
-    ? `scattered · seed ${lastScatterSeed.value}`
-    : "scattered";
+  const n = scatterLayers.value.length;
+  return n ? `${n} layer${n === 1 ? "" : "s"}` : "not scattered";
 });
 
 /** "N placements" (+ "· M magnets" counting placements with a magnet set, +
@@ -2336,6 +2467,38 @@ watch(baseCut.finishedSummary, (summary) => {
           v-show="activeStep === 2"
           class="flex flex-col gap-1.5 px-3 pb-3.5"
         >
+          <div v-if="scatterLayers.length" class="flex flex-col gap-1">
+            <span
+              class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+              >LAYERS</span
+            >
+            <div
+              v-for="(layer, layerIndex) in scatterLayers"
+              :key="layer.id"
+              class="flex items-center gap-1.5 rounded border border-base-content/10 px-2 py-1.5 text-[12px]"
+            >
+              <span
+                class="font-mono text-[10px] text-base-content/40 w-4 text-right shrink-0"
+                >{{ layerIndex + 1 }}</span
+              >
+              <span class="flex-1 min-w-0 flex flex-col">
+                <span class="font-semibold truncate">{{ layer.label }}</span>
+                <span class="text-[10.5px] text-base-content/50 truncate">{{
+                  scatterLayerSummary(layer.params)
+                }}</span>
+              </span>
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs px-1 text-error"
+                :title="scatterLayerActionsBlockedReason || 'Remove layer'"
+                :disabled="!!scatterLayerActionsBlockedReason"
+                @click="removeScatterLayer(layer.id)"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+
           <div class="flex flex-wrap gap-1">
             <button
               v-for="preset in SCATTER_PRESETS"
@@ -2409,15 +2572,13 @@ watch(baseCut.finishedSummary, (summary) => {
               class="btn btn-secondary btn-sm grow"
               :disabled="!canRunDebrisScatter"
               :title="debrisScatterBlockedReason || undefined"
-              @click="startDebrisScatter"
+              @click="addScatterLayer"
             >
               <template v-if="debrisScatter.isRunning.value">
                 <span class="loading loading-spinner loading-xs"></span>
                 <span>Scattering…</span>
               </template>
-              <span v-else>{{
-                hasScatterApplied ? "Re-scatter" : "Scatter"
-              }}</span>
+              <span v-else>Add layer</span>
             </button>
             <button
               v-if="debrisScatter.isRunning.value"
