@@ -28,7 +28,8 @@
 #                     "cut": { "kind": "circle", "diameter_mm": 30.017 },
 #                     "x_mm": 0.0, "y_mm": 0.0, "rotation_deg": 0.0,
 #                     "magnet": { "diameter_mm": 5.0, "height_mm": 1.0,
-#                                 "count": 1 } } ]
+#                                 "count": 1 } } ],
+#   "topper_mm": null
 #
 # "cutter" is the NOMINAL (bottom-face) footprint; "cut" is Rust's already-
 # derived top-face footprint (basecutter::job::write_job_file injects it) —
@@ -40,13 +41,38 @@
 # that many boss/pocket pairs along the footprint's long axis (see
 # _magnet_positions' docstring) instead of one centered pocket.
 #
+# "topper_mm" (job-level, not per placement): null = the normal seat-on-
+# plinth flow. A number puts every cut in this job into BASE TOPPER mode —
+# no plinth at all, the plug is flat-trimmed topper_mm below its lowest
+# sculpted point and exported alone as a glue-on terrain slab for hard
+# plastic bases. Clamped here to [MIN_TOPPER_MM, MAX_TOPPER_MM]; if the
+# request fell outside that range the clamped value is echoed back in every
+# CUT_DONE's "topper_mm_clamped" field. Magnets are ignored in this mode
+# (nothing to pocket without a plinth) — a placement that carried one gets
+# "magnet_ignored": true in its CUT_DONE instead of a silently dropped spec.
+# Total height = topper_mm + relief (the trim plane falls out of the seat
+# math below, not a separate computation).
+#
 # kinds: circle { diameter_mm } | ellipse { major_mm, minor_mm }
 #      | rect { width_mm, depth_mm }   (sharp corners — unit blocks tile)
 #
 # stdout protocol (parsed by basecutter/job.rs):
 #   VALIDATING / VALIDATED {json} / VALIDATION_FAILED {json}
 #   CUT_START {"index":i} / CUT_DONE {"index":i,"out":...,"dims_mm":[x,y,z],
-#   "manifold":bool} / CUT_FAILED {"index":i,"reason":...} / JOB_DONE {json}
+#   "manifold":bool, ...additive fields below} / CUT_FAILED {"index":i,
+#   "reason":...} / JOB_DONE {json}
+#
+# CUT_DONE's additive fields (all optional, present only when relevant —
+# see docs/BASECUTTER.md "Pinned interfaces"):
+#   "fused": false + "shells": N  — normal mode only: the plug/plinth union
+#     left N > 1 loose shells behind (the union tripwire below). The cut
+#     still counts as a success; this only makes a silent non-fuse visible
+#     instead of the accident that motivated this feature (CUT_DONE reported
+#     success while the STL held two loose shells).
+#   "topper_mm_clamped": t — topper mode only, present only when the
+#     requested topper_mm was outside [MIN_TOPPER_MM, MAX_TOPPER_MM].
+#   "magnet_ignored": true — topper mode only, present when the placement
+#     carried a magnet spec that this mode can't pocket.
 
 import json
 import math
@@ -76,6 +102,15 @@ MIN_BBOX_DIM_MM = 0.1
 # Sane upper bound on magnets-per-placement — past this it stops being a
 # plausible mounting pattern for any base in the seed library.
 MAX_MAGNET_COUNT = 4
+
+# Usable range for BASE TOPPER mode's topper_mm (docs/BASECUTTER.md's
+# BaseCutJob.topper_mm note: "t clamped ~1..3, default 1.5"). Requests
+# outside this range are clamped, not rejected — main() echoes the clamped
+# value back in every CUT_DONE via "topper_mm_clamped" when it changed the
+# input. commands.rs's own guard is deliberately looser (it only rejects
+# non-finite/absurd values); this script's clamp is the real usable range.
+MIN_TOPPER_MM = 1.0
+MAX_TOPPER_MM = 3.0
 
 
 def tok(name, payload=None):
@@ -243,13 +278,42 @@ def bbox_dims(verts):
     return [max_x - min_x, max_y - min_y, max_z - min_z]
 
 
+def count_shells(bm):
+    """Number of disconnected mesh islands ("loose shells") via a
+    face-adjacency flood fill over shared edges. Backs the plug-plinth union
+    tripwire in cut_one: a union that silently failed to fuse leaves 2+
+    shells behind even though the boolean op itself reported success and the
+    result may still be technically manifold/printable — this is exactly the
+    accident that motivated BASE TOPPER mode (CUT_DONE said success while
+    the STL held a floating plug and a separate plinth)."""
+    unvisited = set(bm.faces)
+    shells = 0
+    while unvisited:
+        shells += 1
+        start = next(iter(unvisited))
+        unvisited.discard(start)
+        stack = [start]
+        while stack:
+            face = stack.pop()
+            for edge in face.edges:
+                for neighbor in edge.link_faces:
+                    if neighbor in unvisited:
+                        unvisited.discard(neighbor)
+                        stack.append(neighbor)
+    return shells
+
+
 def cleanup_and_check(obj):
-    """Merge stray verts, fix normals; return (manifold, dims_mm).
+    """Merge stray verts, fix normals; return (manifold, dims_mm, shells).
 
     dissolve_degenerate matters for the STL roundtrip: booleans can leave
     near-zero-area slivers that are manifold here but collapse to exactly
     zero area in float32 STL — the importer then drops them, leaving a
-    pinhole in the printed shell."""
+    pinhole in the printed shell.
+
+    `shells` (see count_shells) is computed post-cleanup so it reflects what
+    actually gets exported, not an intermediate state merge_doubles might
+    still stitch back together."""
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.001)
@@ -257,9 +321,10 @@ def cleanup_and_check(obj):
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     manifold = all(e.is_manifold for e in bm.edges)
     dims = bbox_dims(bm.verts)
+    shells = count_shells(bm)
     bm.to_mesh(obj.data)
     bm.free()
-    return manifold, [round(d, 3) for d in dims]
+    return manifold, [round(d, 3) for d in dims], shells
 
 
 # ---------------------------------------------------------------- the plinth
@@ -370,7 +435,22 @@ def seat_height(plug_obj):
     return lowest
 
 
-def cut_one(landscape_obj, placement, plinth, out_dir, index):
+def cut_one(landscape_obj, placement, plinth, out_dir, index, topper_mm=None):
+    """Cut one placement.
+
+    `topper_mm` is None for the normal seat-on-plinth flow (unchanged). A
+    float (already clamped to [MIN_TOPPER_MM, MAX_TOPPER_MM] by main())
+    puts this cut in BASE TOPPER mode instead: build the cutter prism and
+    boolean-intersect exactly as normal, but rather than seating the plug on
+    a generated plinth, flat-trim it topper_mm below its lowest sculpted
+    point and export it alone — no plinth is built, no union happens. The
+    cut footprint stays the TOP face in both modes (it's the face that glues
+    onto the hard plastic base in topper mode) — see the module docstring's
+    "topper_mm" note.
+
+    Returns (out_path, dims_mm, manifold, extra) where `extra` is a dict of
+    additive CUT_DONE payload fields (magnet_ignored / fused+shells),
+    empty when there's nothing to report for this cut."""
     cutter = placement["cutter"]
     h = plinth["height_mm"]
     # The cut footprint is Rust's derivation (placement["cut"]), not
@@ -401,21 +481,52 @@ def cut_one(landscape_obj, placement, plinth, out_dir, index):
         unrot @ Matrix.Translation((-placement["x_mm"], -placement["y_mm"], 0.0))
     )
 
-    # Seat: lowest sculpted point onto the plinth top, trim what's beneath
-    # (WELD_OVERLAP deep into the top plate, so union gets a real overlap).
     seat = seat_height(plug)
     if seat is None:
         raise RuntimeError("no upward-facing surface inside the cut")
-    plug.data.transform(Matrix.Translation((0.0, 0.0, h - seat)))
-    trim = big_box("trim", -1000.0, h - WELD_OVERLAP)
-    apply_boolean(plug, trim, "DIFFERENCE")
-    delete_object(trim)
 
-    base = build_plinth(plinth, cutter, placement["cut"], placement.get("magnet"))
-    apply_boolean(base, plug, "UNION")
-    delete_object(plug)
+    extra = {}
+    if topper_mm is not None:
+        # Topper mode: sink so the lowest sculpted point sits topper_mm
+        # above a flat bottom at z=0, then trim everything below that plane.
+        # That flat trim plane IS the final bottom face — unlike the normal
+        # flow there's no union afterwards, so no WELD_OVERLAP is needed.
+        # Total height falls out of this for free: max_z - (seat - topper_mm)
+        # = topper_mm + (max_z - seat) = topper_mm + relief.
+        plug.data.transform(Matrix.Translation((0.0, 0.0, topper_mm - seat)))
+        trim = big_box("trim", -1000.0, 0.0)
+        apply_boolean(plug, trim, "DIFFERENCE")
+        delete_object(trim)
+        base = plug
+        if placement.get("magnet"):
+            # There's no plinth to pocket a magnet into — surface that
+            # instead of silently dropping the placement's magnet spec.
+            extra["magnet_ignored"] = True
+    else:
+        # Seat: lowest sculpted point onto the plinth top, trim what's
+        # beneath (WELD_OVERLAP deep into the top plate, so union gets a
+        # real overlap).
+        plug.data.transform(Matrix.Translation((0.0, 0.0, h - seat)))
+        trim = big_box("trim", -1000.0, h - WELD_OVERLAP)
+        apply_boolean(plug, trim, "DIFFERENCE")
+        delete_object(trim)
 
-    manifold, dims = cleanup_and_check(base)
+        base = build_plinth(plinth, cutter, placement["cut"], placement.get("magnet"))
+        apply_boolean(base, plug, "UNION")
+        delete_object(plug)
+
+    manifold, dims, shells = cleanup_and_check(base)
+    if topper_mm is None and shells > 1:
+        # The union tripwire: a plug that silently failed to fuse with its
+        # plinth leaves >1 loose shell behind even though the boolean op and
+        # the manifold check both reported success — the exact accident
+        # that motivated topper mode existing (see the module's top
+        # docstring). The cut still counts as a success (the mesh may still
+        # be printable as loose parts); this only makes the silent case
+        # visible.
+        extra["fused"] = False
+        extra["shells"] = shells
+
     name = placement.get("name") or f"base_{index}"
     out = os.path.join(out_dir, f"{name}.stl")
     bpy.ops.object.select_all(action="DESELECT")
@@ -423,7 +534,7 @@ def cut_one(landscape_obj, placement, plinth, out_dir, index):
     bpy.context.view_layer.objects.active = base
     bpy.ops.wm.stl_export(filepath=out, export_selected_objects=True)
     delete_object(base)
-    return out, dims, manifold
+    return out, dims, manifold, extra
 
 
 # ---------------------------------------------------------------------- job
@@ -494,6 +605,18 @@ def main():
 
     os.makedirs(job["out_dir"], exist_ok=True)
 
+    # BASE TOPPER mode (job-level, applies to every placement in this job —
+    # see the module docstring's "topper_mm" note). Clamped here, not just
+    # bounds-checked in Rust: commands.rs only guards non-finite/absurd
+    # requests, this script owns the real usable range.
+    raw_topper_mm = job.get("topper_mm")
+    topper_mm = None
+    topper_mm_clamped = None
+    if raw_topper_mm is not None:
+        topper_mm = min(max(float(raw_topper_mm), MIN_TOPPER_MM), MAX_TOPPER_MM)
+        if abs(topper_mm - raw_topper_mm) > 1e-9:
+            topper_mm_clamped = topper_mm
+
     tok("VALIDATING")
     landscape = import_landscape(job["landscape"])
     ok, report = validate(landscape)
@@ -510,8 +633,14 @@ def main():
     for i, placement in enumerate(job["placements"]):
         tok("CUT_START", {"index": i})
         try:
-            out, dims, manifold = cut_one(landscape, placement, job["plinth"], job["out_dir"], i)
-            tok("CUT_DONE", {"index": i, "out": out, "dims_mm": dims, "manifold": manifold})
+            out, dims, manifold, extra = cut_one(
+                landscape, placement, job["plinth"], job["out_dir"], i, topper_mm
+            )
+            payload = {"index": i, "out": out, "dims_mm": dims, "manifold": manifold}
+            if topper_mm_clamped is not None:
+                payload["topper_mm_clamped"] = topper_mm_clamped
+            payload.update(extra)
+            tok("CUT_DONE", payload)
             done += 1
         except Exception as e:  # one bad placement must not kill the batch
             traceback.print_exc()

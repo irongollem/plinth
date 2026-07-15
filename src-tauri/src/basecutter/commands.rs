@@ -48,6 +48,34 @@ fn placement_label(placement: &Placement, index: usize) -> String {
     }
 }
 
+/// Rust-side sanity bound on `BaseCutJob.topper_mm` — deliberately looser
+/// than base_cut.py's [1.0, 3.0] clamp (docs/BASECUTTER.md "Pinned
+/// interfaces": "the script clamps 1..3 anyway — Rust just guards
+/// nonsense"). This only rejects values that can't possibly be a sane
+/// request (non-finite, zero/negative, or wildly oversized); the script
+/// remains the single source of truth for the actual usable range and
+/// echoes back a clamp in CUT_DONE when it adjusts the value.
+const MAX_SANE_TOPPER_MM: f64 = 10.0;
+
+/// Guard for `BaseCutJob.topper_mm`, split out as a plain function so it's
+/// unit-testable without spawning a job (same shape as `validate_placements`
+/// below). `None` (normal seat-on-plinth mode) always passes.
+fn validate_topper_mm(topper_mm: Option<f64>) -> Result<(), AppError> {
+    match topper_mm {
+        None => Ok(()),
+        Some(t) if !t.is_finite() => Err(AppError::InvalidInput(
+            "topper_mm must be a finite number".to_string(),
+        )),
+        Some(t) if t <= 0.0 => Err(AppError::InvalidInput(format!(
+            "topper_mm must be positive, got {t}"
+        ))),
+        Some(t) if t > MAX_SANE_TOPPER_MM => Err(AppError::InvalidInput(format!(
+            "topper_mm {t} is unreasonably large (max {MAX_SANE_TOPPER_MM}mm) — base_cut.py clamps the usable range to 1.0-3.0mm anyway"
+        ))),
+        Some(_) => Ok(()),
+    }
+}
+
 /// Input guards for `start_base_cut`, split out as a plain function (no
 /// AppHandle/Blender detection) so both guards are unit-testable without
 /// spawning a job:
@@ -112,6 +140,7 @@ pub async fn start_base_cut(app_handle: AppHandle, job: BaseCutJob) -> Result<St
         )));
     }
     validate_placements(&job.placements, &job.plinth)?;
+    validate_topper_mm(job.topper_mm)?;
 
     let blender = engine::detect_blender_cached().await?;
     let script = job::materialize_base_cut_script(&app_handle)?;
@@ -282,6 +311,10 @@ fn handle_token(app_handle: &AppHandle, job_id: &str, token: &BaseCutToken) {
             out,
             dims_mm,
             manifold,
+            fused,
+            shells,
+            topper_mm_clamped,
+            magnet_ignored,
         } => {
             BaseCutStatus::CutDone(BaseCutCutDoneStatus {
                 job_id: job_id.to_string(),
@@ -289,6 +322,10 @@ fn handle_token(app_handle: &AppHandle, job_id: &str, token: &BaseCutToken) {
                 out_path: out.clone(),
                 dims_mm: *dims_mm,
                 manifold: *manifold,
+                fused: *fused,
+                shells: *shells,
+                topper_mm_clamped: *topper_mm_clamped,
+                magnet_ignored: *magnet_ignored,
             })
             .emit(app_handle)
             .ok();
@@ -609,6 +646,45 @@ mod tests {
             err.to_string().contains("round32"),
             "error should name the duplicate: {err}"
         );
+    }
+
+    // ---- validate_topper_mm (docs/BASECUTTER.md's BaseCutJob.topper_mm) ----
+
+    #[test]
+    fn topper_mm_none_is_always_fine() {
+        assert!(validate_topper_mm(None).is_ok());
+    }
+
+    #[test]
+    fn topper_mm_accepts_any_sane_positive_value() {
+        // Rust's guard is deliberately looser than base_cut.py's [1.0, 3.0]
+        // clamp — values outside that range are still valid REQUESTS, the
+        // script just clamps and echoes back the adjustment.
+        assert!(validate_topper_mm(Some(1.5)).is_ok());
+        assert!(validate_topper_mm(Some(0.1)).is_ok());
+        assert!(validate_topper_mm(Some(10.0)).is_ok());
+    }
+
+    #[test]
+    fn topper_mm_rejects_zero_and_negative() {
+        for bad in [0.0, -1.0, -0.001] {
+            let err = validate_topper_mm(Some(bad)).expect_err("must reject non-positive");
+            assert!(err.to_string().contains("positive"), "{err}");
+        }
+    }
+
+    #[test]
+    fn topper_mm_rejects_absurdly_large_values() {
+        let err = validate_topper_mm(Some(10.001)).expect_err("must reject > 10mm");
+        assert!(err.to_string().contains("unreasonably large"), "{err}");
+    }
+
+    #[test]
+    fn topper_mm_rejects_non_finite() {
+        let err = validate_topper_mm(Some(f64::NAN)).expect_err("must reject NaN");
+        assert!(err.to_string().contains("finite"), "{err}");
+        let err = validate_topper_mm(Some(f64::INFINITY)).expect_err("must reject infinity");
+        assert!(err.to_string().contains("finite"), "{err}");
     }
 
     #[test]

@@ -929,7 +929,33 @@ scatterStatus: "scatter-status"
 
 export type AppError = { InvalidInput: string } | { IoError: string } | { JsonError: string } | { FileProcessingError: string } | { ConfigError: string } | { NotFoundError: string } | { ImageProcessingError: string } | { UserCancelled: string }
 export type BaseCutCancelledStatus = { job_id: string }
-export type BaseCutCutDoneStatus = { job_id: string; index: number; out_path: string; dims_mm: [number, number, number]; manifold: boolean }
+export type BaseCutCutDoneStatus = { job_id: string; index: number; out_path: string; dims_mm: [number, number, number]; manifold: boolean; 
+/**
+ * The union tripwire (normal seat-on-plinth mode only, see
+ * docs/BASECUTTER.md "The cut pipeline"): `Some(false)` when the
+ * plug/plinth union left more than one loose shell behind — the exact
+ * silent failure a base-cut accident revealed (CUT_DONE reported
+ * success, the STL held two loose shells). The cut still counts as
+ * success — the mesh may still be printable — this only makes the
+ * silent case visible. `None` in topper mode (nothing to fuse) or when
+ * the union fused into one shell.
+ */
+fused: boolean | null; 
+/**
+ * Loose-shell count backing `fused`, present alongside it.
+ */
+shells: number | null; 
+/**
+ * Present only when the job's requested `topper_mm` fell outside
+ * base_cut.py's [1.0, 3.0] clamp range — the effective value the
+ * script used instead.
+ */
+topper_mm_clamped: number | null; 
+/**
+ * `Some(true)` = this placement carried a magnet spec that topper mode
+ * ignored (there's no plinth to pocket it into).
+ */
+magnet_ignored: boolean | null }
 export type BaseCutCutFailedStatus = { job_id: string; index: number; reason: string }
 export type BaseCutCutStartedStatus = { job_id: string; index: number }
 export type BaseCutFailedStatus = { job_id: string; message: string; 
@@ -945,7 +971,16 @@ export type BaseCutFinishedStatus = { job_id: string; ok_count: number; total: n
  * top docstring and docs/BASECUTTER.md "Pinned interfaces") — `landscape`
  * and `out_dir` are the script's exact keys.
  */
-export type BaseCutJob = { landscape: string; placements: Placement[]; plinth: PlinthParams; out_dir: string }
+export type BaseCutJob = { landscape: string; placements: Placement[]; plinth: PlinthParams; out_dir: string; 
+/**
+ * `Some(t)` = BASE TOPPER mode: no plinth at all — the plug is
+ * flat-trimmed `t` mm below its lowest sculpted point and exported as a
+ * glue-on terrain slab for hard plastic bases. `None` = the normal
+ * seat-on-plinth flow. See docs/BASECUTTER.md "Pinned interfaces" for
+ * the full contract (clamp range, magnet handling). `serde(default)` so
+ * old frontends/job files without the field keep working.
+ */
+topper_mm?: number | null }
 export type BaseCutStartedStatus = { job_id: string; total: number }
 /**
  * Base Cutter job progress — see docs/BASECUTTER.md "Pinned interfaces".

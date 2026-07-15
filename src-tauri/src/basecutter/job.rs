@@ -38,6 +38,14 @@ pub struct BaseCutJob {
     pub placements: Vec<Placement>,
     pub plinth: PlinthParams,
     pub out_dir: String,
+    /// `Some(t)` = BASE TOPPER mode: no plinth at all — the plug is
+    /// flat-trimmed `t` mm below its lowest sculpted point and exported as a
+    /// glue-on terrain slab for hard plastic bases. `None` = the normal
+    /// seat-on-plinth flow. See docs/BASECUTTER.md "Pinned interfaces" for
+    /// the full contract (clamp range, magnet handling). `serde(default)` so
+    /// old frontends/job files without the field keep working.
+    #[serde(default)]
+    pub topper_mm: Option<f64>,
 }
 
 /// One parsed line of base_cut.py's stdout protocol (see its docstring and
@@ -59,6 +67,19 @@ pub enum BaseCutToken {
         out: String,
         dims_mm: [f64; 3],
         manifold: bool,
+        /// `Some(false)` = the plug/plinth union left more than one loose
+        /// shell behind (the silent-fuse-failure tripwire) — `None` in
+        /// topper mode (nothing to fuse) or when the union fused cleanly.
+        fused: Option<bool>,
+        /// Loose-shell count backing `fused`, present alongside it.
+        shells: Option<u32>,
+        /// The effective `topper_mm` the script clamped to, present only
+        /// when the requested value fell outside base_cut.py's [1.0, 3.0]
+        /// clamp range.
+        topper_mm_clamped: Option<f64>,
+        /// `Some(true)` = this placement carried a magnet spec that topper
+        /// mode ignored (nothing to pocket without a plinth).
+        magnet_ignored: Option<bool>,
     },
     CutFailed {
         index: u32,
@@ -85,6 +106,14 @@ pub fn parse_token(line: &str) -> Option<BaseCutToken> {
         out: String,
         dims_mm: [f64; 3],
         manifold: bool,
+        #[serde(default)]
+        fused: Option<bool>,
+        #[serde(default)]
+        shells: Option<u32>,
+        #[serde(default)]
+        topper_mm_clamped: Option<f64>,
+        #[serde(default)]
+        magnet_ignored: Option<bool>,
     }
     #[derive(Deserialize)]
     struct CutFailedPayload {
@@ -120,6 +149,10 @@ pub fn parse_token(line: &str) -> Option<BaseCutToken> {
             out: p.out,
             dims_mm: p.dims_mm,
             manifold: p.manifold,
+            fused: p.fused,
+            shells: p.shells,
+            topper_mm_clamped: p.topper_mm_clamped,
+            magnet_ignored: p.magnet_ignored,
         });
     }
     if let Some(json) = line.strip_prefix("CUT_FAILED ") {
@@ -342,6 +375,7 @@ mod tests {
                 }),
                 name: Some("round32".to_string()),
             }],
+            topper_mm: None,
         };
         let json = serde_json::to_value(&job).unwrap();
 
@@ -367,9 +401,58 @@ mod tests {
         assert_eq!(placement["rotation_deg"], 0.0);
         assert_eq!(placement["magnet"]["diameter_mm"], 5.0);
         assert_eq!(placement["magnet"]["height_mm"], 1.0);
+        assert_eq!(json["topper_mm"], serde_json::Value::Null);
 
         let back: BaseCutJob = serde_json::from_value(json).unwrap();
         assert_eq!(back.landscape_path, "/path/to/landscape.stl");
+        assert_eq!(back.topper_mm, None);
+    }
+
+    /// Pinned interface: `BaseCutJob.topper_mm` serializes verbatim as the
+    /// key `topper_mm` (no rename), and round-trips through the same
+    /// job_json_with_cut_footprints path a normal job takes — topper mode
+    /// still gets the derived "cut" footprint injected per placement (the
+    /// cut footprint stays the TOP face in topper mode too, see
+    /// docs/BASECUTTER.md's BaseCutJob.topper_mm note).
+    #[test]
+    fn job_with_topper_mm_serializes_the_key() {
+        let job = BaseCutJob {
+            landscape_path: "/l.stl".to_string(),
+            out_dir: "/out".to_string(),
+            plinth: PlinthParams::default(),
+            placements: vec![Placement {
+                cutter: CutterKind::Circle { diameter_mm: 32.0 },
+                x_mm: 0.0,
+                y_mm: 0.0,
+                rotation_deg: 0.0,
+                magnet: None,
+                name: Some("topper32".to_string()),
+            }],
+            topper_mm: Some(1.5),
+        };
+        let json = serde_json::to_value(&job).unwrap();
+        assert_eq!(json["topper_mm"], 1.5);
+
+        let back: BaseCutJob = serde_json::from_value(json).unwrap();
+        assert_eq!(back.topper_mm, Some(1.5));
+
+        let wire = job_json_with_cut_footprints(&job).unwrap();
+        assert_eq!(wire["topper_mm"], 1.5);
+        assert_eq!(wire["placements"][0]["cut"]["kind"], "circle");
+    }
+
+    /// Old job JSON (pre-topper_mm) still deserializes — `#[serde(default)]`
+    /// backfills `None` rather than erroring on the missing key.
+    #[test]
+    fn job_without_topper_mm_key_defaults_to_none() {
+        let json = serde_json::json!({
+            "landscape": "/l.stl",
+            "out_dir": "/out",
+            "plinth": PlinthParams::default(),
+            "placements": [],
+        });
+        let job: BaseCutJob = serde_json::from_value(json).unwrap();
+        assert_eq!(job.topper_mm, None);
     }
 
     /// The wire JSON (what actually reaches base_cut.py, via
@@ -392,6 +475,7 @@ mod tests {
                 magnet: None,
                 name: Some("round32".to_string()),
             }],
+            topper_mm: None,
         };
         let wire = job_json_with_cut_footprints(&job).unwrap();
         let cut = &wire["placements"][0]["cut"];
@@ -432,6 +516,7 @@ mod tests {
                 magnet: None,
                 name: None,
             }],
+            topper_mm: None,
         };
         let json = serde_json::to_value(&job).unwrap();
         assert_eq!(json["placements"][0]["magnet"], serde_json::Value::Null);
@@ -470,6 +555,44 @@ mod tests {
                 out: "/dir/round32.stl".to_string(),
                 dims_mm: [32.0, 32.0, 8.5],
                 manifold: true,
+                fused: None,
+                shells: None,
+                topper_mm_clamped: None,
+                magnet_ignored: None,
+            })
+        );
+        // The additive fields (fused/shells/topper_mm_clamped/
+        // magnet_ignored) all parse when present, independent of one
+        // another — a topper-mode cut with an ignored magnet, and a
+        // normal-mode cut whose union didn't fully fuse.
+        assert_eq!(
+            parse_token(
+                r#"CUT_DONE {"index": 1, "out": "/dir/topper.stl", "dims_mm": [32.0, 32.0, 3.0], "manifold": true, "topper_mm_clamped": 3.0, "magnet_ignored": true}"#
+            ),
+            Some(BaseCutToken::CutDone {
+                index: 1,
+                out: "/dir/topper.stl".to_string(),
+                dims_mm: [32.0, 32.0, 3.0],
+                manifold: true,
+                fused: None,
+                shells: None,
+                topper_mm_clamped: Some(3.0),
+                magnet_ignored: Some(true),
+            })
+        );
+        assert_eq!(
+            parse_token(
+                r#"CUT_DONE {"index": 2, "out": "/dir/round40.stl", "dims_mm": [40.0, 40.0, 9.0], "manifold": true, "fused": false, "shells": 2}"#
+            ),
+            Some(BaseCutToken::CutDone {
+                index: 2,
+                out: "/dir/round40.stl".to_string(),
+                dims_mm: [40.0, 40.0, 9.0],
+                manifold: true,
+                fused: Some(false),
+                shells: Some(2),
+                topper_mm_clamped: None,
+                magnet_ignored: None,
             })
         );
         assert_eq!(
@@ -560,6 +683,7 @@ mod tests {
                 magnet: None,
                 name: Some("round32".to_string()),
             }],
+            topper_mm: None,
         };
         let path = write_job_file(&dir, &job, "abc123").unwrap();
         assert!(path.is_file());
@@ -611,6 +735,7 @@ mod tests {
                 magnet: None,
                 name: Some("round32".to_string()),
             }],
+            topper_mm: None,
         };
         let job_path = write_job_file(&dir, &job, "test-job").expect("write job file");
 

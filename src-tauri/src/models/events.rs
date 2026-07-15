@@ -378,6 +378,24 @@ pub struct BaseCutCutDoneStatus {
     pub out_path: String,
     pub dims_mm: [f64; 3],
     pub manifold: bool,
+    /// The union tripwire (normal seat-on-plinth mode only, see
+    /// docs/BASECUTTER.md "The cut pipeline"): `Some(false)` when the
+    /// plug/plinth union left more than one loose shell behind — the exact
+    /// silent failure a base-cut accident revealed (CUT_DONE reported
+    /// success, the STL held two loose shells). The cut still counts as
+    /// success — the mesh may still be printable — this only makes the
+    /// silent case visible. `None` in topper mode (nothing to fuse) or when
+    /// the union fused into one shell.
+    pub fused: Option<bool>,
+    /// Loose-shell count backing `fused`, present alongside it.
+    pub shells: Option<u32>,
+    /// Present only when the job's requested `topper_mm` fell outside
+    /// base_cut.py's [1.0, 3.0] clamp range — the effective value the
+    /// script used instead.
+    pub topper_mm_clamped: Option<f64>,
+    /// `Some(true)` = this placement carried a magnet spec that topper mode
+    /// ignored (there's no plinth to pocket it into).
+    pub magnet_ignored: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
