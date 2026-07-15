@@ -246,6 +246,35 @@
         Scale figure
       </label>
 
+      <div class="flex flex-col gap-1">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          title="A tapered wargaming plinth under the mini — the hobby's own scale reference"
+          >STAND ON BASE</span
+        >
+        <select
+          class="select select-sm select-bordered w-full"
+          v-model="baseCutterId"
+        >
+          <option value="">None</option>
+          <optgroup v-if="cutterGroups.rounds.length" label="Rounds">
+            <option v-for="c in cutterGroups.rounds" :key="c.id" :value="c.id">
+              {{ c.label }}
+            </option>
+          </optgroup>
+          <optgroup v-if="cutterGroups.ovals.length" label="Ovals">
+            <option v-for="c in cutterGroups.ovals" :key="c.id" :value="c.id">
+              {{ c.label }}
+            </option>
+          </optgroup>
+          <optgroup v-if="cutterGroups.rects.length" label="Squares & rects">
+            <option v-for="c in cutterGroups.rects" :key="c.id" :value="c.id">
+              {{ c.label }}
+            </option>
+          </optgroup>
+        </select>
+      </div>
+
       <div class="flex items-center gap-2">
         <label class="label cursor-pointer gap-2 text-sm flex-1">
           <input
@@ -620,6 +649,7 @@ import { openPath } from "@tauri-apps/plugin-opener";
 import { storeToRefs } from "pinia";
 import { computed, onActivated, onMounted, reactive, ref, watch } from "vue";
 import { commands } from "../bindings.ts";
+import type { Cutter, CutterKind } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
 import ProgressBar from "../components/ProgressBar.vue";
 import RenderAdvanced from "../components/RenderAdvanced.vue";
@@ -627,6 +657,7 @@ import RenderAdvanced from "../components/RenderAdvanced.vue";
 // biome's useImportType can't see (rule disabled for .vue in biome.json)
 import StlViewport from "../components/StlViewport.vue";
 import { useBlenderProvision } from "../composables/useBlenderProvision";
+import { groupCutters } from "../utils/cutterKinds";
 import { filesFromPaths, useFileSelect } from "../composables/useFileSelect";
 import type { SelectedFile } from "../composables/useFileSelect";
 import { useRenderStatus } from "../composables/useRenderStatus";
@@ -701,6 +732,20 @@ const refreshScaleRefConfigured = async () => {
     result.status === "ok" && !!result.data.scale_reference_path?.trim();
   if (!scaleRefConfigured.value) scaleReference.value = false;
 };
+// Stand on base: the hobby's OWN scale reference — a standard tapered
+// plinth under the mini. Library comes from the same get_cutter_library
+// command the Base Cutter tool uses (docs/BASECUTTER.md: "tool-agnostic").
+// "" = None; the id (not the CutterKind) is what the <select> can v-model.
+const cutterLibrary = ref<Cutter[]>([]);
+const baseCutterId = ref("");
+const loadCutterLibrary = async () => {
+  cutterLibrary.value = await commands.getCutterLibrary();
+};
+const cutterGroups = computed(() => groupCutters(cutterLibrary.value));
+const selectedBaseKind = computed<CutterKind | null>(
+  () =>
+    cutterLibrary.value.find((c) => c.id === baseCutterId.value)?.kind ?? null,
+);
 const resolution = ref(1600);
 const samples = ref(96);
 // "flat" (the handover's locked look) won the three-way comparison against
@@ -1213,6 +1258,7 @@ const resetRenderSettings = () => {
   matchCamera.value = true;
   alignParts.value = false;
   scaleReference.value = false;
+  baseCutterId.value = "";
   resolution.value = 1600;
   samples.value = 96;
   look.value = "flat";
@@ -1272,6 +1318,7 @@ const outdatedHintDismissed = ref(false);
 onMounted(() => {
   loadRenderSettings();
   refreshScaleRefConfigured();
+  loadCutterLibrary();
 });
 // keep-alive'd view: the user may configure a figure in Settings and come back
 onActivated(() => {
@@ -1351,6 +1398,7 @@ const render = async () => {
       ? JSON.stringify(overridesToNested(advanced.value))
       : null,
     scale_reference: scaleReference.value,
+    base: selectedBaseKind.value,
   });
 
   if (result.status === "error") {

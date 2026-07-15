@@ -485,8 +485,39 @@ pub fn build_render_command(
             cmd.arg("--scale-ref-height").arg(height.to_string());
         }
     }
+    if let Some(nominal) = &options.base {
+        cmd.arg("--base").arg(base_arg_json(nominal));
+    }
     cmd.arg("--out").arg(output_path);
     cmd
+}
+
+/// `--base` payload: the user's NOMINAL footprint plus Rust's already-
+/// derived cut (top-face) footprint and the plinth profile — same ownership
+/// rule as the base cutter job (docs/BASECUTTER.md "The plinth": Rust owns
+/// the nominal->cut derivation via `top_face_of`, the script only lofts
+/// between the two footprints it's handed, never re-deriving). Inline JSON
+/// as ONE argv element, same reasoning as `--config` above.
+///
+/// `PlinthParams::default()` here — not the user's Base Cutter profile — is
+/// deliberate, not a stub: per docs/BASECUTTER.md "Synergy: standard bases
+/// in the Render tool", a rendered mini stood on a base only reads as a
+/// scale cue if it's the industry-standard measured profile every hobbyist
+/// already recognizes. A user's customized taper/wall/hollow settings are a
+/// Base Cutter *cutting* concern (what actually gets printed) and must not
+/// leak into this shared reference, or the same "32 mm round" would render
+/// differently per user and stop being a legible scale reference at all.
+fn base_arg_json(nominal: &crate::basecutter::cutters::CutterKind) -> String {
+    use crate::basecutter::cutters::{top_face_of, PlinthParams};
+    let plinth = PlinthParams::default();
+    let cut = top_face_of(nominal, &plinth);
+    serde_json::json!({
+        "nominal": nominal,
+        "cut": cut,
+        "height_mm": plinth.height_mm,
+        "taper_deg": plinth.taper_deg,
+    })
+    .to_string()
 }
 
 /// The user's scale-reference figure, when one is configured. Read from the
@@ -726,6 +757,7 @@ mod tests {
             align_parts: false,
             look_config: None,
             scale_reference: false,
+            base: None,
         };
         let cmd = build_render_command(
             &blender,
@@ -820,6 +852,7 @@ mod tests {
             align_parts: false,
             look_config: Some(r#"{"key":{"energy":1500}}"#.to_string()),
             scale_reference: false,
+            base: None,
         };
         let mut cmd = build_render_command(
             &blender,
@@ -882,6 +915,7 @@ mod tests {
             align_parts: false,
             look_config: None,
             scale_reference: false,
+            base: None,
         };
         let cmd = build_render_command(
             &blender,
@@ -962,6 +996,7 @@ mod tests {
             align_parts: false,
             look_config: Some(json.to_string()),
             scale_reference: false,
+            base: None,
         };
         let cmd = build_render_command(
             &blender,
@@ -996,6 +1031,69 @@ mod tests {
             );
             assert!(!cmd.as_std().get_args().any(|a| a == "--config"));
         }
+    }
+
+    /// `--base` must carry BOTH the user's nominal footprint and Rust's
+    /// already-derived cut (top-face) footprint — the script must never
+    /// re-derive the taper shrink itself (docs/BASECUTTER.md "The plinth").
+    #[test]
+    fn base_arg_carries_nominal_and_derived_cut() {
+        use crate::basecutter::cutters::CutterKind;
+
+        let blender = BlenderInfo {
+            path: "blender".to_string(),
+            version: "Blender 4.2.1".to_string(),
+        };
+        let options = RenderOptions {
+            rotate: (90.0, 0.0, 0.0),
+            color: None,
+            azimuth: None,
+            elevation: None,
+            zoom: None,
+            resolution: None,
+            samples: None,
+            look: None,
+            output_path: None,
+            overwrite: false,
+            align_parts: false,
+            look_config: None,
+            scale_reference: false,
+            base: Some(CutterKind::Circle { diameter_mm: 32.0 }),
+        };
+        let cmd = build_render_command(
+            &blender,
+            Path::new("render_mini.py"),
+            &["model.stl".to_string()],
+            &options,
+            Path::new("out.png"),
+        );
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let idx = args.iter().position(|a| a == "--base").expect("--base missing");
+        let payload: serde_json::Value = serde_json::from_str(&args[idx + 1]).unwrap();
+        assert_eq!(payload["nominal"]["kind"], "circle");
+        assert_eq!(payload["nominal"]["diameter_mm"], 32.0);
+        assert_eq!(payload["cut"]["kind"], "circle");
+        // 32 - 2*3.7*tan(15deg) = 30.017, same derivation
+        // top_face_of_circle_matches_measured_taper pins in basecutter::cutters
+        let cut_diameter = payload["cut"]["diameter_mm"].as_f64().unwrap();
+        assert!((cut_diameter - 30.017).abs() < 0.01);
+        assert_eq!(payload["height_mm"], 3.7);
+        assert_eq!(payload["taper_deg"], 15.0);
+
+        // None = no flag at all
+        let options = RenderOptions { base: None, ..options };
+        let cmd = build_render_command(
+            &blender,
+            Path::new("render_mini.py"),
+            &["model.stl".to_string()],
+            &options,
+            Path::new("out.png"),
+        );
+        assert!(!cmd.as_std().get_args().any(|a| a == "--base"));
     }
 
     #[test]

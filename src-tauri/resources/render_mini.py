@@ -31,11 +31,27 @@ SCALE REFERENCE ("banana for scale" — true relative size next to the model):
   stays chest-height to a 90mm ogre). Included in framing, excluded from
   MEASURED. Assumed sliced-ready (Z up). Missing file = warn and skip.
 
+STANDARD BASE (stand the mini on a tapered wargaming plinth — the hobby's
+OWN scale reference, see docs/BASECUTTER.md "Synergy: standard bases in the
+Render tool"):
+    blender -b -P render_mini.py -- MODEL.stl --base '{"nominal":{"kind":"circle","diameter_mm":32.0},"cut":{"kind":"circle","diameter_mm":30.017},"height_mm":3.7,"taper_deg":15.0}'
+  A solid (never hollow — invisible in a render) lofted plinth, built from
+  the SAME footprint math as base_cut.py's build_plinth, lifted per the
+  design note in docs/BASECUTTER.md. `nominal` and `cut` are both ALREADY
+  DERIVED by Rust (basecutter::cutters::top_face_of computes the taper
+  shrink) — this script never re-derives the cut footprint, same ownership
+  rule as the base cutter. The model is raised so its floor sits exactly on
+  the plinth's top plane; the plinth itself stands on the ground. Rendered
+  in a neutral dark grey, same "stay out of the hero's way" treatment as the
+  scale reference. Included in framing, excluded from MEASURED (it isn't
+  part of the model).
+
 BATCH MODE (many minis, one Blender launch — startup cost paid once):
     blender -b -P render_mini.py -- --batch manifest.json
   manifest.json = {"entries":[{"parts":["a.stl","base.stl"],"out":"a.png",
   "rotate":[90,0,0], ...optional per-entry overrides (color/look/res/samples/
-  azimuth/elev/zoom/align/config)}]}. Progress is machine-readable on stdout:
+  azimuth/elev/zoom/align/config/scale_ref/scale_ref_height/base)}]}. Progress
+  is machine-readable on stdout:
     BATCH_START {"total":N} / BATCH_MODEL {"index":i,"out":...} /
     MEASURED {"index":i,"dims_mm":[x,y,z],"parts":n} /
     BATCH_DONE {"index":i,"ok":true|false[,"error":...]}
@@ -56,7 +72,7 @@ Notes:
   * Exit code is 0 on success, non-zero on failure — easy to check from Rust.
 """
 
-import bpy, sys, os, math, json, tempfile
+import bpy, bmesh, sys, os, math, json, tempfile
 from mathutils import Vector
 
 # ----------------------------- locked recipe -----------------------------
@@ -174,7 +190,7 @@ def parse():
     cfg = dict(paths=[], out=None, rotate=(90,0,0), color=LOOK["base_color"],
                azimuth=-15.0, elev=0.22, zoom=1.15, res=LOOK["res"], samples=LOOK["samples"],
                look="flat", contact=False, sheet_cols=3, sheet_res=420, sheet_samples=24,
-               align=False, batch=None, scale_ref=None, scale_ref_height=28.0)
+               align=False, batch=None, scale_ref=None, scale_ref_height=28.0, base=None)
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -195,6 +211,7 @@ def parse():
         elif a == "--batch":         i+=1; cfg["batch"]=argv[i]
         elif a == "--scale-ref":     i+=1; cfg["scale_ref"]=argv[i]
         elif a == "--scale-ref-height": i+=1; cfg["scale_ref_height"]=float(argv[i])
+        elif a == "--base":          i+=1; cfg["base"]=json.loads(argv[i])
         else:                        cfg["paths"].append(a)
         i += 1
     if not cfg["paths"] and not cfg["batch"]:
@@ -326,6 +343,97 @@ def add_scale_reference(cfg, obj, dims_mm):
     ref.location.x = -(obj.dimensions.x / 2 + ref.dimensions.x / 2 + gap)
     bpy.context.view_layer.update()
     return ref
+
+# ------------------------- standard base (plinth) --------------------------
+# Lifted from base_cut.py's footprint/loft geometry per docs/BASECUTTER.md
+# "Synergy: standard bases in the Render tool" — deliberately NOT a verbatim
+# import of build_plinth: a render only ever needs a SOLID plinth (no hollow
+# shell, no magnet bosses — both are invisible in a render), so this is the
+# footprint-loft core only. `_footprint_ring`/`_loft_solid` intentionally
+# mirror base_cut.py's footprint_polygon/loft_solid rather than sharing code
+# across the two embedded scripts (each is materialized independently at
+# runtime — see engine::materialize_embedded_script).
+BASE_SEGMENTS = 96
+BASE_COLOR = (0.16, 0.16, 0.17)  # neutral dark grey — a prop, not the hero
+
+def _base_ellipse_ring(a, b, segments=BASE_SEGMENTS):
+    return [Vector((math.cos(t) * a, math.sin(t) * b))
+            for t in (i * 2.0 * math.pi / segments for i in range(segments))]
+
+def _footprint_ring(cutter, segments=BASE_SEGMENTS):
+    """2D ring (mm, CCW), centered at origin, for a base_cut.py-shaped
+    cutter dict ({"kind": "circle"|"ellipse"|"rect", ...}). Mirrors
+    base_cut.py's footprint_polygon."""
+    kind = cutter["kind"]
+    if kind == "circle":
+        r = cutter["diameter_mm"] / 2.0
+        return _base_ellipse_ring(r, r, segments)
+    if kind == "ellipse":
+        return _base_ellipse_ring(cutter["major_mm"] / 2.0, cutter["minor_mm"] / 2.0, segments)
+    if kind == "rect":
+        w, d = cutter["width_mm"] / 2.0, cutter["depth_mm"] / 2.0
+        return [Vector((w, d)), Vector((-w, d)), Vector((-w, -d)), Vector((w, -d))]
+    raise ValueError(f"unknown base cutter kind: {kind}")
+
+def _loft_solid(name, rings):
+    """Closed solid from stacked CCW polygon rings [(z, poly2d), ...],
+    bottom to top. Mirrors base_cut.py's loft_solid."""
+    bm = bmesh.new()
+    layers = [[bm.verts.new((p.x, p.y, z)) for p in poly] for z, poly in rings]
+    for a, b in zip(layers, layers[1:]):
+        for i in range(len(a)):
+            j = (i + 1) % len(a)
+            bm.faces.new((a[i], a[j], b[j], b[i]))
+    bm.faces.new(tuple(reversed(layers[0])))
+    bm.faces.new(tuple(layers[-1]))
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+    mesh = bpy.data.meshes.new(name)
+    bm.to_mesh(mesh); bm.free()
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    return obj
+
+def add_standard_base(cfg, obj, dims_mm):
+    """Stand `obj` on a solid tapered plinth of the requested standard base
+    footprint, and raise `obj` in place so its floor sits on the plinth's
+    top plane. The plinth itself stands on the ground (z=0), matching a
+    real base on a table.
+
+    cfg["base"] = {"nominal": CutterKind, "cut": CutterKind, "height_mm",
+    "taper_deg"} — both footprints are ALREADY DERIVED by Rust
+    (basecutter::cutters::top_face_of; see build_render_command's
+    base_arg_json). This function only lofts between the two rings it's
+    handed, exactly like base_cut.py's build_plinth's non-hollow branch —
+    it never recomputes the taper shrink itself.
+
+    Not named add_base: `stack_on_base` above already overloads "base" to
+    mean the part FILE named *base* in a multi-part mini — an unrelated
+    concept. This is the hobby's standard base, a rendering prop."""
+    spec = cfg.get("base")
+    if not spec:
+        return None
+    # normalize() scaled the model so max(dims_mm) mm == 2.0 stage units —
+    # same mm<->stage-unit conversion add_scale_reference uses.
+    mm_per_unit = (max(dims_mm) or 1.0) / 2.0
+    height_stage = spec["height_mm"] / mm_per_unit
+    nominal_ring = [p / mm_per_unit for p in _footprint_ring(spec["nominal"])]
+    cut_ring = [p / mm_per_unit for p in _footprint_ring(spec["cut"])]
+    base_obj = _loft_solid("Plinth", [(0.0, nominal_ring), (height_stage, cut_ring)])
+    bpy.ops.object.select_all(action="DESELECT")
+    base_obj.select_set(True)
+    bpy.context.view_layer.objects.active = base_obj
+    # Rounds/ovals read as CG-faceted under flat shading at any print-safe
+    # segment count; rects keep flat shading — their corners are sharp by
+    # design (docs/BASECUTTER.md: "Ranked square bases touch... at their
+    # bottom edges"), and smoothing would fake a bevel that isn't there.
+    if spec["nominal"]["kind"] in ("circle", "ellipse"):
+        bpy.ops.object.shade_smooth()
+    bpy.context.view_layer.update()
+    # The plinth's own bottom ring is already at z=0 (the ground); seat the
+    # model on its top plane by raising the already-floored obj.
+    obj.location.z += height_stage
+    bpy.context.view_layer.update()
+    return base_obj
 
 def resin_material(obj, color, look="flat"):
     # use_nodes is deprecated (always True, no-op) since Blender 5.0 — new
@@ -490,14 +598,24 @@ def build_and_render(cfg, rotate, out, res, samples, index=0, measure=False):
             {"index": index,
              "dims_mm": [round(d, 1) for d in dims_mm],
              "parts": len(cfg["paths"])}), flush=True)
+    # Seat on a standard base BEFORE the scale reference: add_standard_base
+    # raises `obj` in place, and the reference's own floor-seat/gap math
+    # reads obj.dimensions (bbox size, unaffected by the Z raise), so order
+    # here only matters for which prop gets built first.
+    base_obj = add_standard_base(cfg, obj, dims_mm)
     ref = add_scale_reference(cfg, obj, dims_mm)
     resin_material(obj, cfg["color"], cfg["look"])
+    if base_obj is not None:
+        # same "stay out of the hero's way" grey as the scale reference
+        resin_material(base_obj, BASE_COLOR, cfg["look"])
     if ref is not None:
         # neutral grey: the reference must read as a ruler, not a product
         resin_material(ref, (0.52, 0.54, 0.58), cfg["look"])
     lights(cfg["look"]); black_world(cfg["look"])
-    camera([obj] + ([ref] if ref is not None else []),
-           cfg["azimuth"], cfg["elev"], cfg["zoom"])
+    stage = [obj]
+    if ref is not None: stage.append(ref)
+    if base_obj is not None: stage.append(base_obj)
+    camera(stage, cfg["azimuth"], cfg["elev"], cfg["zoom"])
     setup_render(res, samples, cfg["look"])
     bpy.context.scene.render.filepath = os.path.abspath(out).replace("\\","/")
     bpy.ops.render.render(write_still=True)
@@ -565,7 +683,7 @@ def run_batch(cfg, manifest_path):
             ecfg["paths"] = e["parts"]
             ecfg["align"] = bool(e.get("align", cfg["align"]))
             for k in ("look", "res", "samples", "azimuth", "elev", "zoom",
-                      "scale_ref", "scale_ref_height"):
+                      "scale_ref", "scale_ref_height", "base"):
                 if k in e: ecfg[k] = e[k]
             if "color" in e: ecfg["color"] = tuple(e["color"])
             rotate = tuple(e.get("rotate", (90, 0, 0)))
