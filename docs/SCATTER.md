@@ -68,7 +68,20 @@ ScatterParams = { seed: u32,
                   max_slope_deg: f64,               // skip cliff walls
                   edge_margin_mm: f64,
                   pieces: Vec<PieceChoice> }
-ScatterJob    = { landscape_path, out_path, params } // the frontend-facing
+ScatterJob    = { landscape_path, out_path,
+                  layers: Vec<ScatterParams> } // a STACK of scatter passes,
+                                                // not one — see "Layers"
+                                                // below. Each layer places
+                                                // independently onto the
+                                                // TERRAIN from its own seed,
+                                                // so adding/removing a layer
+                                                // never moves another's
+                                                // pieces. One layer = the
+                                                // common case. asset_paths
+                                                // (below) unions every
+                                                // layer's ids.
+// (previously { ..., params }; the single-params shape is gone, not kept)
+// the frontend-facing
                                                     // shape; the wire JSON
                                                     // scatter_landscape.py
                                                     // actually reads ALSO
@@ -108,6 +121,30 @@ at least max(0.4 mm, 20% of its own height) below the local surface,
 measured along the sink direction. The sink_mm range randomizes ABOVE
 that floor for variety (a skull half-swallowed by the mud vs one just
 peeking out), never below it.
+
+## Layers — build the debris up, peel it back
+
+Scatter is a STACK, not a single pass. You pick a mix (Boneyard), set its
+knobs, hit "Add layer" → it bakes and shows as a removable block; add
+another for rocks, another for plants; dislike the rocks → hit its ✕ and
+that layer alone is gone. Mechanically:
+
+- The UI holds an ordered list of layers, each a full `ScatterParams`
+  (its own preset origin, density, scale, seed, piece mix). Adding or
+  removing a layer re-runs ONE scatter job carrying the whole current
+  list, always from the kept UNDECORATED source — so the stack never
+  compounds (the re-scatter rule generalized to N passes).
+- Each layer places **independently onto the terrain** from its own seed.
+  This is the load-bearing property: adding a rocks layer must not move
+  where the Boneyard skulls fell, and removing one must leave the rest
+  exactly put. A layer's placement is a pure function of (terrain, that
+  layer's params) — nothing else.
+- Cross-layer overlap is allowed (two layers can drop pieces in the same
+  spot — they're loose shells, geometrically fine). Avoiding it would
+  couple layers to each other and break the independence above; a piece
+  poking through a skull is rare at real densities and reads as a pile.
+- Baking cost is ~1–2 s per layer (the whole stack re-runs), acceptable
+  for an interactive build-up; SCATTER progress spans all layers.
 
 ## Scale anchor: 28–32 mm heroic
 
