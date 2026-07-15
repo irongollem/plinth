@@ -11,6 +11,7 @@ import type {
   BaseCutJob,
   BouldersLayer,
   CamberLayer,
+  CatalogRootSummary,
   Cutter,
   CutterKind,
   FlowLayer,
@@ -35,6 +36,15 @@ import { useLandscapeGen } from "../composables/useLandscapeGen";
 import { useReleasesStore } from "../stores/releasesStore";
 import { useToastStore } from "../stores/toastStore";
 import { cloneRaw } from "../utils/cloneRaw";
+import { groupCutters } from "../utils/cutterKinds";
+import { MAX_MAGNET_COUNT, suggestMagnet } from "../utils/magnetSuggest";
+import {
+  type GeneratedPlacement,
+  mulberry32,
+  regimentExtent,
+  regimentPlacements,
+  scatterPlacements,
+} from "../utils/placementGenerators";
 
 const toastStore = useToastStore();
 const releasesStore = useReleasesStore();
@@ -51,7 +61,19 @@ const landscapePath = ref("");
 /** Bumped whenever the landscape must reload even at an unchanged path —
  * a regenerated bake overwrites its own file. */
 const landscapeReloadToken = ref(0);
-const landscapeBounds = ref<{ centerX: number; centerY: number } | null>(null);
+/** The landscape's full XY extent, as emitted by LandscapeViewport's
+ * `loaded` event — centerX/centerY feed "place at landscape center"
+ * (addPlacement, regiment default center), min/max feed the generators
+ * (regimentExtent's fit check, scatterPlacements' bounds). */
+type LandscapeBounds = {
+  centerX: number;
+  centerY: number;
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+};
+const landscapeBounds = ref<LandscapeBounds | null>(null);
 
 /** Where cut STLs land — remembered across sessions (localStorage, like the
  * theme: it only feeds the job payload, no backend round-trip needed). */
@@ -172,27 +194,105 @@ const rerollSeed = () => {
   genParams.seed = Math.floor(Math.random() * 0xffffffff);
 };
 
+/** The user's magnet inventory (app settings — docs/BASECUTTER.md "Hollow,
+ * with magnet mounts"): what the per-placement magnet panel offers as
+ * chips and what suggestMagnet() picks from. Loaded once on mount, same
+ * as the cutter library and plinth defaults; Settings.vue is the only
+ * place that edits it. */
+const magnetInventory = ref<MagnetSpec[]>([]);
+
+/** Configured catalog folders (docs/BASECUTTER.md phase 5,
+ * "export-into-catalog") — feeds the "Add to catalog…" root picker below
+ * the results list. Loaded once on mount like the rest of this block;
+ * list_catalog_roots already resolves which one (if any) is primary, so no
+ * separate settings read is needed. */
+const catalogRoots = ref<CatalogRootSummary[]>([]);
+/** Selected destination folder — defaulted to catalog_primary_root (via its
+ * `primary` flag on the loaded list) once roots resolve below. */
+const exportRoot = ref("");
+/** Group-name field, prefilled from the landscape's own file name the first
+ * time a job finishes with a keeper (see the finishedSummary watcher) —
+ * never overwritten after that, so a user edit survives a later job. */
+const exportGroupName = ref("");
+const exportBusy = ref(false);
+
 onMounted(async () => {
-  const [library, plinthDefaults, presets] = await Promise.all([
-    commands.getCutterLibrary(),
-    commands.getPlinthDefaults(),
-    commands.getLandscapePresets(),
-  ]);
+  const [library, plinthDefaults, presets, settingsResult, rootsResult] =
+    await Promise.all([
+      commands.getCutterLibrary(),
+      commands.getPlinthDefaults(),
+      commands.getLandscapePresets(),
+      commands.getSettings(),
+      commands.listCatalogRoots(),
+    ]);
   cutterLibrary.value = library;
   Object.assign(plinth, plinthDefaults);
   landscapePresets.value = presets;
   if (presets.length) selectPreset(presets[0]);
+  // Failed loads must SAY so: an empty inventory/roots list otherwise
+  // renders the same "add some in Settings" hints a genuinely empty
+  // config gets, gaslighting a user whose data simply failed to load.
+  if (settingsResult.status === "ok") {
+    magnetInventory.value = settingsResult.data.magnet_inventory ?? [];
+  } else {
+    toastStore.reportError(
+      "Failed to load settings — magnet inventory unavailable",
+      settingsResult.error,
+    );
+  }
+  if (rootsResult.status === "ok") {
+    catalogRoots.value = rootsResult.data;
+    exportRoot.value =
+      rootsResult.data.find((r) => r.primary)?.root ??
+      rootsResult.data[0]?.root ??
+      "";
+  } else {
+    toastStore.reportError(
+      "Failed to load catalog folders — export to catalog unavailable",
+      rootsResult.error,
+    );
+  }
 });
 
-const rounds = computed(() =>
-  cutterLibrary.value.filter((c) => c.kind.kind === "circle"),
+// The palette shows one shape family at a time: all 24 cutters as
+// always-visible chips read as a wall of buttons that dwarfed the rest of
+// the panel. A family tab + dimension-only chips keeps click-to-place one
+// click (two when switching family) while fitting in a couple of rows.
+const cutterGroups = computed(() => groupCutters(cutterLibrary.value));
+const PALETTE_FAMILIES = [
+  { key: "rounds", label: "Rounds" },
+  { key: "ovals", label: "Ovals" },
+  { key: "rects", label: "Squares & rects" },
+] as const;
+const paletteFamily = ref<(typeof PALETTE_FAMILIES)[number]["key"]>("rounds");
+const paletteCutters = computed(() => cutterGroups.value[paletteFamily.value]);
+
+/** The generators' cutter, held by ID and edited two ways: the dedicated
+ * select in the GENERATORS block picks WITHOUT placing (selecting a size
+ * for bulk generation must not drop a stray base as a side effect), while
+ * a palette chip click ALSO records itself here — the click already places
+ * deliberately, so inheriting it as the generator default costs nothing. */
+const generatorCutterId = ref("");
+const generatorCutter = computed(
+  () =>
+    cutterLibrary.value.find((c) => c.id === generatorCutterId.value) ?? null,
 );
-const ovals = computed(() =>
-  cutterLibrary.value.filter((c) => c.kind.kind === "ellipse"),
-);
-const rects = computed(() =>
-  cutterLibrary.value.filter((c) => c.kind.kind === "rect"),
-);
+
+/** Dimension-only chip label — the active family tab already says
+ * round/oval/rect, so repeating "mm round" on every chip is pure noise.
+ * The full label rides along as the chip's title tooltip. */
+const sizeLabel = (kind: CutterKind): string => {
+  switch (kind.kind) {
+    case "circle":
+      return `${kind.diameter_mm}`;
+    case "ellipse":
+      return `${kind.major_mm}×${kind.minor_mm}`;
+    case "rect":
+      return kind.width_mm === kind.depth_mm
+        ? `${kind.width_mm}`
+        : `${kind.width_mm}×${kind.depth_mm}`;
+  }
+};
 
 const placements = ref<Placement[]>([]);
 const selectedIndex = ref<number | null>(null);
@@ -200,26 +300,32 @@ const selectedPlacement = computed(() =>
   selectedIndex.value !== null ? placements.value[selectedIndex.value] : null,
 );
 
-const MAGNET_PRESETS: { label: string; spec: MagnetSpec }[] = [
-  { label: "5×1", spec: { diameter_mm: 5, height_mm: 1, count: 1 } },
-  { label: "6×2", spec: { diameter_mm: 6, height_mm: 2, count: 1 } },
-  { label: "10×2", spec: { diameter_mm: 10, height_mm: 2, count: 1 } },
-];
+/** One chip per inventory magnet — size only (diameter x height); count is
+ * a separate per-placement control (see the COUNT button group below), not
+ * part of the chip identity, so picking a different size never resets an
+ * already-chosen count. */
+const magnetChips = computed(() =>
+  magnetInventory.value.map((spec) => ({
+    label: `${spec.diameter_mm}×${spec.height_mm}`,
+    spec,
+  })),
+);
 
-/** Human label for a placement's cutter kind — display only, doesn't need
- * to byte-match the backend seed library's labels (JS number->string
- * already drops trailing zeros the way fmt_mm does in Rust). */
+/** Human label for a placement's cutter kind — sizeLabel's dimensions plus
+ * a unit and shape noun, so the numeric formatting lives in exactly one
+ * place. Display only: doesn't need to byte-match the backend seed
+ * library's labels (JS number->string already drops trailing zeros the way
+ * fmt_mm does in Rust). */
 const cutterLabel = (kind: CutterKind): string => {
-  switch (kind.kind) {
-    case "circle":
-      return `${kind.diameter_mm} mm round`;
-    case "ellipse":
-      return `${kind.major_mm}×${kind.minor_mm} mm oval`;
-    case "rect":
-      return kind.width_mm === kind.depth_mm
-        ? `${kind.width_mm} mm square`
-        : `${kind.width_mm}×${kind.depth_mm} mm rect`;
-  }
+  const noun =
+    kind.kind === "circle"
+      ? "round"
+      : kind.kind === "ellipse"
+        ? "oval"
+        : kind.width_mm === kind.depth_mm
+          ? "square"
+          : "rect";
+  return `${sizeLabel(kind)} mm ${noun}`;
 };
 
 /** "round32-1", "square25-2" — cutter id (dashes stripped) + 1-past the
@@ -229,7 +335,7 @@ const cutterLabel = (kind: CutterKind): string => {
  * name as a still-live placement, so the job silently overwrites one
  * output STL with another. Taking 1 + max(existing suffixes) instead never
  * reuses a name that's still on the list. */
-const nextName = (cutterId: string): string => {
+const nextNames = (cutterId: string, count: number): string[] => {
   const slug = cutterId.replace(/-/g, "");
   const prefix = `${slug}-`;
   let maxSuffix = 0;
@@ -238,8 +344,14 @@ const nextName = (cutterId: string): string => {
     const suffix = Number(p.name.slice(prefix.length));
     if (Number.isFinite(suffix)) maxSuffix = Math.max(maxSuffix, suffix);
   }
-  return `${prefix}${maxSuffix + 1}`;
+  // One scan mints the whole batch — the generators name dozens at a time,
+  // and re-scanning a growing list per name is quadratic for no benefit.
+  return Array.from(
+    { length: count },
+    (_, i) => `${prefix}${maxSuffix + 1 + i}`,
+  );
 };
+const nextName = (cutterId: string): string => nextNames(cutterId, 1)[0];
 
 // Placement mutation is locked out while a job is running: the job already
 // took a snapshot (jobPlacementNames below) and mid-job add/delete would
@@ -252,11 +364,11 @@ const locked = computed(
 );
 
 const addPlacement = (cutter: Cutter) => {
-  if (locked.value) return;
-  if (!landscapeBounds.value) {
-    toastStore.addToast("Choose a landscape STL first", "info");
-    return;
-  }
+  generatorCutterId.value = cutter.id;
+  // The palette already disables itself while locked or landscape-less
+  // (a greyed button beats a click-then-scold toast); the guard stays for
+  // any future non-palette caller.
+  if (locked.value || !landscapeBounds.value) return;
   placements.value.push({
     cutter: cutter.kind,
     x_mm: landscapeBounds.value.centerX,
@@ -266,6 +378,136 @@ const addPlacement = (cutter: Cutter) => {
     name: nextName(cutter.id),
   });
   selectedIndex.value = placements.value.length - 1;
+};
+
+// ---- generators (docs/BASECUTTER.md phase 6): regiment (grid) and
+// scatter (random, non-overlapping) placement of the palette's currently
+// selected cutter. Both append to `placements` (never wipe it) and name
+// each new placement through the same `nextName` the palette uses, so
+// generated and hand-placed bases share one naming sequence.
+const GENERATOR_MODES = [
+  { key: "regiment", label: "Regiment" },
+  { key: "scatter", label: "Scatter" },
+] as const;
+const generatorMode = ref<(typeof GENERATOR_MODES)[number]["key"]>("regiment");
+const regimentRows = ref(2);
+const regimentCols = ref(5);
+const regimentGapMm = ref(0);
+const scatterCount = ref(10);
+// Hard ceilings, mirrored as `max` on the inputs and clamped again at run
+// time: the scatter's rejection sampling is O(count x attempts x
+// obstacles) SYNCHRONOUS on the main thread, so an unbounded count typed
+// into the field could freeze the webview for seconds. 20x20 regiments and
+// 200 scattered bases are already far past any real tabletop batch.
+const MAX_REGIMENT_DIM = 20;
+const MAX_SCATTER_COUNT = 200;
+
+/** Why the generator buttons are disabled — the palette's own tooltip
+ * convention (a greyed button with a `title`, never a click-then-toast). */
+const generatorBlockedReason = computed(() => {
+  if (locked.value) return "Locked while a job is running";
+  if (!landscapeBounds.value) return "Load or generate a landscape first";
+  if (!generatorCutter.value) return "Pick a cutter size first";
+  return "";
+});
+
+/** What placeRegiment will actually place (clamped) — the button label
+ * must promise the clamped number, not the raw typed one. */
+const regimentPlannedCount = computed(
+  () =>
+    Math.min(Math.max(regimentRows.value, 0), MAX_REGIMENT_DIM) *
+    Math.min(Math.max(regimentCols.value, 0), MAX_REGIMENT_DIM),
+);
+
+const canPlaceRegiment = computed(
+  () =>
+    !generatorBlockedReason.value &&
+    regimentRows.value > 0 &&
+    regimentCols.value > 0,
+);
+const canScatter = computed(
+  () => !generatorBlockedReason.value && scatterCount.value > 0,
+);
+
+/** Warns (inline text, not a toast — see docs/BASECUTTER.md phase 6 and
+ * the palette's own "disabled beats click-then-scold" convention) when the
+ * regiment as configured would spill outside the landscape. It still gets
+ * placed: cuts outside the sculpt simply fail per-cut with a reason,
+ * that's the pipeline's job, not this preview's. */
+const regimentOutOfBounds = computed(() => {
+  if (
+    !generatorCutter.value ||
+    !landscapeBounds.value ||
+    regimentRows.value <= 0 ||
+    regimentCols.value <= 0
+  ) {
+    return false;
+  }
+  const b = landscapeBounds.value;
+  const ext = regimentExtent(
+    generatorCutter.value,
+    Math.min(regimentRows.value, MAX_REGIMENT_DIM),
+    Math.min(regimentCols.value, MAX_REGIMENT_DIM),
+    regimentGapMm.value,
+    { x: b.centerX, y: b.centerY },
+  );
+  return (
+    ext.minX < b.minX ||
+    ext.maxX > b.maxX ||
+    ext.minY < b.minY ||
+    ext.maxY > b.maxY
+  );
+});
+
+/** Append a generated batch, minting all names in one placements scan. */
+const pushGenerated = (cutterId: string, generated: GeneratedPlacement[]) => {
+  if (!generated.length) return;
+  const names = nextNames(cutterId, generated.length);
+  placements.value.push(...generated.map((g, i) => ({ ...g, name: names[i] })));
+  selectedIndex.value = placements.value.length - 1;
+};
+
+const placeRegiment = () => {
+  if (
+    !canPlaceRegiment.value ||
+    !generatorCutter.value ||
+    !landscapeBounds.value
+  ) {
+    return;
+  }
+  const cutter = generatorCutter.value;
+  const b = landscapeBounds.value;
+  const generated = regimentPlacements(
+    cutter,
+    Math.min(regimentRows.value, MAX_REGIMENT_DIM),
+    Math.min(regimentCols.value, MAX_REGIMENT_DIM),
+    regimentGapMm.value,
+    { x: b.centerX, y: b.centerY },
+  );
+  pushGenerated(cutter.id, generated);
+};
+
+const runScatter = () => {
+  if (!canScatter.value || !generatorCutter.value || !landscapeBounds.value)
+    return;
+  const cutter = generatorCutter.value;
+  const requested = Math.min(scatterCount.value, MAX_SCATTER_COUNT);
+  const generated = scatterPlacements(
+    cutter,
+    requested,
+    landscapeBounds.value,
+    placements.value,
+    mulberry32(Date.now() >>> 0),
+  );
+  pushGenerated(cutter.id, generated);
+  toastStore.addToast(
+    `Scattered ${generated.length} of ${requested} — ${
+      generated.length < requested
+        ? "ran out of room without overlapping"
+        : "placed"
+    }`,
+    generated.length === requested ? "success" : "warning",
+  );
 };
 
 const rotatePlacement = (index: number, deltaDeg: number) => {
@@ -284,16 +526,69 @@ const deletePlacement = (index: number) => {
   }
 };
 
-const isMagnetPreset = (spec: MagnetSpec) => {
+const isMagnetSize = (spec: MagnetSpec) => {
   const m = selectedPlacement.value?.magnet;
   return (
     !!m && m.diameter_mm === spec.diameter_mm && m.height_mm === spec.height_mm
   );
 };
 
-const setMagnet = (spec: MagnetSpec | null) => {
+/** Picking a size chip sets diameter/height and keeps whatever count is
+ * already on the placement (defaulting to 1 the first time a magnet is
+ * added) — count is edited independently via the button group below. */
+const setMagnetSize = (spec: MagnetSpec) => {
   if (!selectedPlacement.value) return;
-  selectedPlacement.value.magnet = spec;
+  const count = selectedPlacement.value.magnet?.count ?? 1;
+  selectedPlacement.value.magnet = {
+    diameter_mm: spec.diameter_mm,
+    height_mm: spec.height_mm,
+    count,
+  };
+};
+
+const clearMagnet = () => {
+  if (!selectedPlacement.value) return;
+  selectedPlacement.value.magnet = null;
+};
+
+const setMagnetCount = (count: number) => {
+  if (!selectedPlacement.value?.magnet) return;
+  selectedPlacement.value.magnet.count = count;
+};
+
+/** The suggestion rule (docs/BASECUTTER.md: "the tool suggests the largest
+ * inventory magnet whose boss fits the base's top face") for the selected
+ * placement — badged on the matching chip, never auto-applied. */
+const suggestedMagnet = computed(() => {
+  if (!selectedPlacement.value) return null;
+  return suggestMagnet(
+    selectedPlacement.value.cutter,
+    plinth,
+    magnetInventory.value,
+  );
+});
+
+const isSuggestedMagnet = (spec: MagnetSpec) => {
+  const s = suggestedMagnet.value;
+  return (
+    !!s &&
+    s.spec.diameter_mm === spec.diameter_mm &&
+    s.spec.height_mm === spec.height_mm
+  );
+};
+
+/** Applies both the suggested size AND count in one action — the only way
+ * a suggestion ever changes a placement, since picking a size chip alone
+ * deliberately preserves the existing count instead. */
+const applySuggestedMagnet = () => {
+  if (!selectedPlacement.value || !suggestedMagnet.value) return;
+  // count comes from the suggestion, NOT the inventory spec — inventory
+  // rows always carry count 1, so spreading the spec alone would apply a
+  // "suggested ×2" as a single magnet (and leave the button visible).
+  selectedPlacement.value.magnet = {
+    ...suggestedMagnet.value.spec,
+    count: suggestedMagnet.value.count,
+  };
 };
 
 /* ---- viewport wiring: the view owns placement state, the viewport is a
@@ -307,7 +602,7 @@ const onUpdatePlacement = (index: number, patch: Partial<Placement>) => {
   if (p) Object.assign(p, patch);
 };
 const onDeletePlacement = (index: number) => deletePlacement(index);
-const onLandscapeLoaded = (bounds: { centerX: number; centerY: number }) => {
+const onLandscapeLoaded = (bounds: LandscapeBounds) => {
   landscapeBounds.value = bounds;
 };
 const onViewportError = (message: string) => {
@@ -437,6 +732,18 @@ watch(baseCut.finishedSummary, (summary) => {
     `Cut ${ok_count}/${total} base${total === 1 ? "" : "s"}`,
     ok_count === total ? "success" : "warning",
   );
+  // Seed the "Add to catalog" group name from the landscape's own file name
+  // the first time there's something to export — never overrides a name
+  // the user already typed (this fires again on every finish, including a
+  // second job in the same session).
+  if (ok_count > 0 && !exportGroupName.value.trim()) {
+    const base = landscapePath.value.split(/[/\\]/).pop() ?? "";
+    const stem = base
+      .replace(/\.stl$/i, "")
+      .replace(/[_-]+/g, " ")
+      .trim();
+    exportGroupName.value = stem || "Cut bases";
+  }
 });
 watch(baseCut.failedMessage, (message) => {
   if (!message) return;
@@ -464,6 +771,71 @@ const stepLabel = computed(() => {
 
 const resultName = (index: number) =>
   jobPlacementNames.value[index] ?? `#${index + 1}`;
+
+/* ---- export into the catalog (docs/BASECUTTER.md phase 5) ----
+ * Cut output stays local/catalog-bound — this only ever copies into a
+ * configured catalog folder, never into the release/share pipeline
+ * (Releases.vue / file::commands::create_release): licensing covers
+ * personal printing, not redistribution. */
+
+const successfulOutPaths = computed(() =>
+  baseCut.results.value
+    .filter((r) => r.ok && r.out_path)
+    .map((r) => r.out_path as string),
+);
+const hasSuccessfulResults = computed(
+  () => !baseCut.isRunning.value && successfulOutPaths.value.length > 0,
+);
+
+/** Folder basename for the picker's option label — the full path is the
+ * title tooltip, same "short label, full path on hover" convention as the
+ * landscape/output-folder path fields above. */
+const rootLabel = (root: string) => root.split(/[/\\]/).pop() || root;
+
+const exportBlockedReason = computed(() => {
+  if (!catalogRoots.value.length) return "Add a catalog folder in Settings";
+  if (!exportRoot.value) return "Choose a catalog folder";
+  if (!exportGroupName.value.trim()) return "Enter a group name";
+  if (exportBusy.value) return "Adding to catalog…";
+  return "";
+});
+const canExportToCatalog = computed(() => !exportBlockedReason.value);
+
+const exportToCatalog = async () => {
+  if (!canExportToCatalog.value) return;
+  exportBusy.value = true;
+  try {
+    const result = await commands.exportCutsToCatalog(
+      successfulOutPaths.value,
+      exportRoot.value,
+      exportGroupName.value.trim(),
+    );
+    if (result.status === "error") {
+      toastStore.reportError("Failed to add bases to catalog", result.error);
+      return;
+    }
+    const destDir = result.data;
+    // Kick a rescan of the destination root so the new bases show up
+    // without a manual rescan — a failure here doesn't undo the copy, it
+    // just means the catalog view is stale until the next scan.
+    const scanResult = await commands.startCatalogScan(exportRoot.value);
+    if (scanResult.status === "error") {
+      toastStore.reportError(
+        `Added to catalog at ${destDir}, but the rescan didn't start`,
+        scanResult.error,
+      );
+      return;
+    }
+    toastStore.addToast(
+      `Added ${successfulOutPaths.value.length} base${
+        successfulOutPaths.value.length === 1 ? "" : "s"
+      } to catalog — ${destDir}`,
+      "success",
+    );
+  } finally {
+    exportBusy.value = false;
+  }
+};
 </script>
 
 <template>
@@ -854,54 +1226,158 @@ const resultName = (index: number) =>
           class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
           >CUTTER PALETTE — CLICK TO PLACE</span
         >
-        <div class="flex flex-col gap-1.5">
-          <div>
-            <div class="text-[10.5px] text-base-content/50 mb-1">Rounds</div>
-            <div class="flex flex-wrap gap-1">
-              <button
-                v-for="c in rounds"
-                :key="c.id"
-                type="button"
-                class="btn btn-xs"
-                :disabled="locked"
-                @click="addPlacement(c)"
-              >
-                {{ c.label }}
-              </button>
-            </div>
+        <div class="flex gap-1">
+          <button
+            v-for="f in PALETTE_FAMILIES"
+            :key="f.key"
+            type="button"
+            class="btn btn-xs"
+            :class="paletteFamily === f.key ? 'btn-primary' : 'btn-ghost'"
+            @click="paletteFamily = f.key"
+          >
+            {{ f.label }}
+          </button>
+        </div>
+        <div
+          class="flex flex-wrap gap-1"
+          :title="landscapeBounds ? '' : 'Load or generate a landscape first'"
+        >
+          <button
+            v-for="c in paletteCutters"
+            :key="c.id"
+            type="button"
+            class="btn btn-xs font-mono"
+            :class="generatorCutterId === c.id ? 'btn-primary' : ''"
+            :disabled="locked || !landscapeBounds"
+            :title="c.label"
+            @click="addPlacement(c)"
+          >
+            {{ sizeLabel(c.kind) }}
+          </button>
+        </div>
+        <p v-if="!landscapeBounds" class="text-[10.5px] text-base-content/40">
+          Load or generate a landscape to start placing.
+        </p>
+      </div>
+
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          >GENERATORS</span
+        >
+        <div class="flex gap-1">
+          <button
+            v-for="m in GENERATOR_MODES"
+            :key="m.key"
+            type="button"
+            class="btn btn-xs"
+            :class="generatorMode === m.key ? 'btn-primary' : 'btn-ghost'"
+            @click="generatorMode = m.key"
+          >
+            {{ m.label }}
+          </button>
+        </div>
+        <!-- Own picker, NOT just "last palette click": selecting a size for
+             bulk generation through the palette would place a stray base as
+             a side effect. A palette click still pre-fills this. -->
+        <select
+          class="select select-xs font-mono"
+          v-model="generatorCutterId"
+          :disabled="locked"
+        >
+          <option value="" disabled>Pick a cutter…</option>
+          <optgroup label="Rounds">
+            <option v-for="c in cutterGroups.rounds" :key="c.id" :value="c.id">
+              {{ c.label }}
+            </option>
+          </optgroup>
+          <optgroup label="Ovals">
+            <option v-for="c in cutterGroups.ovals" :key="c.id" :value="c.id">
+              {{ c.label }}
+            </option>
+          </optgroup>
+          <optgroup label="Squares & rects">
+            <option v-for="c in cutterGroups.rects" :key="c.id" :value="c.id">
+              {{ c.label }}
+            </option>
+          </optgroup>
+        </select>
+
+        <div v-if="generatorMode === 'regiment'" class="flex flex-col gap-1.5">
+          <div class="flex items-center gap-1.5">
+            <span class="text-[11px] text-base-content/50 shrink-0 w-10"
+              >Rows</span
+            >
+            <input
+              type="number"
+              min="1"
+              :max="MAX_REGIMENT_DIM"
+              step="1"
+              class="input input-xs flex-1 font-mono"
+              v-model.number="regimentRows"
+            />
+            <span class="text-[11px] text-base-content/50 shrink-0 w-10"
+              >Cols</span
+            >
+            <input
+              type="number"
+              min="1"
+              :max="MAX_REGIMENT_DIM"
+              step="1"
+              class="input input-xs flex-1 font-mono"
+              v-model.number="regimentCols"
+            />
           </div>
-          <div>
-            <div class="text-[10.5px] text-base-content/50 mb-1">Ovals</div>
-            <div class="flex flex-wrap gap-1">
-              <button
-                v-for="c in ovals"
-                :key="c.id"
-                type="button"
-                class="btn btn-xs"
-                :disabled="locked"
-                @click="addPlacement(c)"
-              >
-                {{ c.label }}
-              </button>
-            </div>
+          <div class="flex items-center gap-1.5">
+            <span class="text-[11px] text-base-content/50 shrink-0 w-10"
+              >Gap</span
+            >
+            <input
+              type="number"
+              min="0"
+              step="0.5"
+              class="input input-xs flex-1 font-mono"
+              v-model.number="regimentGapMm"
+            />
+            <span class="text-[10.5px] text-base-content/40 shrink-0">mm</span>
           </div>
-          <div>
-            <div class="text-[10.5px] text-base-content/50 mb-1">
-              Squares / rects
-            </div>
-            <div class="flex flex-wrap gap-1">
-              <button
-                v-for="c in rects"
-                :key="c.id"
-                type="button"
-                class="btn btn-xs"
-                :disabled="locked"
-                @click="addPlacement(c)"
-              >
-                {{ c.label }}
-              </button>
-            </div>
+          <button
+            type="button"
+            class="btn btn-xs btn-secondary"
+            :disabled="!canPlaceRegiment"
+            :title="generatorBlockedReason"
+            @click="placeRegiment"
+          >
+            Place regiment ({{ regimentPlannedCount }})
+          </button>
+          <p v-if="regimentOutOfBounds" class="text-[10.5px] text-warning">
+            regiment extends past the landscape
+          </p>
+        </div>
+
+        <div v-else class="flex flex-col gap-1.5">
+          <div class="flex items-center gap-1.5">
+            <span class="text-[11px] text-base-content/50 shrink-0 w-10"
+              >Count</span
+            >
+            <input
+              type="number"
+              min="1"
+              :max="MAX_SCATTER_COUNT"
+              step="1"
+              class="input input-xs flex-1 font-mono"
+              v-model.number="scatterCount"
+            />
           </div>
+          <button
+            type="button"
+            class="btn btn-xs btn-secondary"
+            :disabled="!canScatter"
+            :title="generatorBlockedReason"
+            @click="runScatter"
+          >
+            Scatter
+          </button>
         </div>
       </div>
 
@@ -937,7 +1413,7 @@ const resultName = (index: number) =>
               v-if="p.magnet"
               class="badge badge-xs badge-info"
               title="Magnet pocket"
-              >M</span
+              >{{ p.magnet.count > 1 ? `M×${p.magnet.count}` : "M" }}</span
             >
             <button
               type="button"
@@ -969,8 +1445,7 @@ const resultName = (index: number) =>
           </li>
         </ul>
         <p v-else class="text-[11px] text-base-content/40">
-          Pick a landscape, then click a cutter above to place one at its
-          center.
+          Click a cutter above to place one at the landscape center.
         </p>
 
         <div
@@ -981,25 +1456,73 @@ const resultName = (index: number) =>
             class="font-mono text-[10px] tracking-widest text-base-content/40"
             >MAGNET — {{ selectedPlacement.name }}</span
           >
-          <div class="flex flex-wrap gap-1.5">
+          <div class="flex flex-wrap gap-1.5 items-center">
             <button
               type="button"
               class="btn btn-xs"
               :class="!selectedPlacement.magnet ? 'btn-primary' : ''"
-              @click="setMagnet(null)"
+              @click="clearMagnet"
             >
               None
             </button>
             <button
-              v-for="preset in MAGNET_PRESETS"
-              :key="preset.label"
+              v-for="chip in magnetChips"
+              :key="chip.label"
               type="button"
-              class="btn btn-xs"
-              :class="isMagnetPreset(preset.spec) ? 'btn-primary' : ''"
-              @click="setMagnet(preset.spec)"
+              class="btn btn-xs gap-1"
+              :class="isMagnetSize(chip.spec) ? 'btn-primary' : ''"
+              @click="setMagnetSize(chip.spec)"
             >
-              {{ preset.label }}
+              {{ chip.label }}
+              <span
+                v-if="isSuggestedMagnet(chip.spec)"
+                class="badge badge-xs badge-accent"
+                >suggested{{
+                  suggestedMagnet && suggestedMagnet.count > 1
+                    ? ` ×${suggestedMagnet.count}`
+                    : ""
+                }}</span
+              >
             </button>
+            <button
+              v-if="
+                suggestedMagnet &&
+                (!selectedPlacement.magnet ||
+                  !isMagnetSize(suggestedMagnet.spec) ||
+                  selectedPlacement.magnet.count !== suggestedMagnet.count)
+              "
+              type="button"
+              class="btn btn-xs btn-outline btn-accent"
+              @click="applySuggestedMagnet"
+            >
+              Use suggested
+            </button>
+            <span
+              v-if="!magnetChips.length"
+              class="text-[10.5px] text-base-content/40"
+            >
+              No magnets in your inventory — add some in Settings.
+            </span>
+          </div>
+          <div
+            v-if="selectedPlacement.magnet"
+            class="flex items-center gap-1.5"
+          >
+            <span class="text-[10.5px] text-base-content/50">Count</span>
+            <div class="flex gap-1">
+              <button
+                v-for="n in MAX_MAGNET_COUNT"
+                :key="n"
+                type="button"
+                class="btn btn-xs"
+                :class="
+                  selectedPlacement.magnet.count === n ? 'btn-primary' : ''
+                "
+                @click="setMagnetCount(n)"
+              >
+                {{ n }}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -1168,6 +1691,60 @@ const resultName = (index: number) =>
             >
           </li>
         </ul>
+
+        <div
+          v-if="hasSuccessfulResults"
+          class="flex flex-col gap-1.5 border-t border-base-content/10 pt-2 mt-1"
+        >
+          <span
+            class="font-mono text-[10px] tracking-widest text-base-content/40"
+            >ADD TO CATALOG</span
+          >
+          <template v-if="catalogRoots.length">
+            <select
+              class="select select-xs w-full font-mono"
+              v-model="exportRoot"
+              :disabled="exportBusy"
+            >
+              <option
+                v-for="root in catalogRoots"
+                :key="root.root"
+                :value="root.root"
+                :title="root.root"
+              >
+                {{ rootLabel(root.root) }}{{ root.primary ? " (primary)" : "" }}
+              </option>
+            </select>
+            <input
+              type="text"
+              class="input input-xs w-full"
+              placeholder="Group name"
+              :disabled="exportBusy"
+              v-model="exportGroupName"
+            />
+          </template>
+          <p v-else class="text-[10.5px] text-base-content/40">
+            No catalog folder configured — add one in Settings.
+          </p>
+          <button
+            type="button"
+            class="btn btn-xs btn-secondary"
+            :disabled="!canExportToCatalog"
+            :title="exportBlockedReason"
+            @click="exportToCatalog"
+          >
+            <template v-if="exportBusy">
+              <span class="loading loading-spinner loading-xs"></span>
+              <span>Adding…</span>
+            </template>
+            <span v-else
+              >Add {{ successfulOutPaths.length }} base{{
+                successfulOutPaths.length === 1 ? "" : "s"
+              }}
+              to catalog</span
+            >
+          </button>
+        </div>
       </div>
     </section>
 
