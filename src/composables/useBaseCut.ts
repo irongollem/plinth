@@ -18,6 +18,17 @@ export type BaseCutResult = {
   dims_mm?: [number, number, number];
   manifold?: boolean;
   reason?: string;
+  /** `false` = the plug/plinth union left loose shells behind (normal mode
+   * only); `null`/absent in topper mode or when the union fused cleanly. */
+  fused?: boolean | null;
+  /** Loose-shell count backing `fused`, present alongside it. */
+  shells?: number | null;
+  /** Present only when the job's requested `topper_mm` fell outside the
+   * script's clamp range — the effective value it used instead. */
+  topper_mm_clamped?: number | null;
+  /** `true` = this placement carried a magnet spec that topper mode
+   * ignored. */
+  magnet_ignored?: boolean | null;
 };
 
 /**
@@ -63,6 +74,10 @@ export function useBaseCut() {
           out_path: done.out_path,
           dims_mm: done.dims_mm,
           manifold: done.manifold,
+          fused: done.fused,
+          shells: done.shells,
+          topper_mm_clamped: done.topper_mm_clamped,
+          magnet_ignored: done.magnet_ignored,
         });
       }
       if ("CutFailed" in payload) {

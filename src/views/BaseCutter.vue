@@ -1192,6 +1192,24 @@ const canCut = computed(
     !debrisScatter.isRunning.value,
 );
 
+/** BASE TOPPER mode (docs/BASECUTTER.md "Pinned interfaces" topper_mm): no
+ * plinth at all — the plug is flat-trimmed and exported as a glue-on
+ * terrain slab for hard plastic bases. Lives in step 4 (it changes what
+ * gets built), not tucked into ADVANCED — PLINTH, whose contents don't
+ * apply in this mode (see that fold's disabled fieldset below). */
+const topperMode = ref(false);
+/** Thickness sent as `topper_mm` when topperMode is on — base_cut.py clamps
+ * to 1..3mm; 1.5 mirrors the script's own default. */
+const topperMm = ref(1.5);
+
+/** "Cut N bases" / "Cut N toppers" — the cut button's own label must say
+ * which flow topperMode will actually run, not just the count. */
+const cutButtonLabel = computed(() => {
+  const n = placements.value.length;
+  const noun = topperMode.value ? "topper" : "base";
+  return `Cut ${n} ${noun}${n === 1 ? "" : "s"}`;
+});
+
 // Names as they were when the job was submitted — progress/result labels
 // resolve from this snapshot, never the live `placements` array, so a name
 // stays stable even though editing is locked out anyway while running (see
@@ -1206,6 +1224,7 @@ const startCut = async () => {
     placements: placements.value,
     plinth: { ...plinth },
     out_dir: outDir.value,
+    topper_mm: topperMode.value ? topperMm.value : null,
   };
   const result = await baseCut.start(job);
   if (result.status === "error") {
@@ -2644,6 +2663,9 @@ watch(baseCut.finishedSummary, (summary) => {
                 class="font-mono text-[10px] tracking-widest text-base-content/40"
                 >MAGNET — {{ selectedPlacement.name }}</span
               >
+              <p v-if="topperMode" class="text-[10.5px] text-base-content/40">
+                topper mode ignores magnets
+              </p>
               <div class="flex flex-wrap gap-1.5 items-center">
                 <button
                   type="button"
@@ -2760,6 +2782,22 @@ watch(baseCut.finishedSummary, (summary) => {
           v-show="activeStep === 4"
           class="flex flex-col gap-3.5 px-3 pb-3.5"
         >
+          <div class="flex flex-col gap-1.5">
+            <Switch v-model="topperMode" label="Base topper only" />
+            <p class="text-[10.5px] text-base-content/40 -mt-1.5 px-2">
+              no plinth — a glue-on terrain slab for hard plastic bases
+            </p>
+            <NumberInput
+              v-if="topperMode"
+              id="topper-thickness"
+              label="Thickness (mm)"
+              :min="1"
+              :max="3"
+              :step="0.1"
+              v-model="topperMm"
+            />
+          </div>
+
           <details
             class="collapse collapse-arrow border border-base-content/10 bg-base-200/20 rounded-box"
           >
@@ -2771,7 +2809,15 @@ watch(baseCut.finishedSummary, (summary) => {
                 >ADVANCED — PLINTH</span
               >
             </summary>
-            <div class="collapse-content flex flex-col gap-2 px-3">
+            <fieldset
+              class="collapse-content flex flex-col gap-2 px-3"
+              :disabled="topperMode"
+              :title="
+                topperMode
+                  ? 'plinth options don\'t apply to toppers'
+                  : undefined
+              "
+            >
               <label class="flex items-center gap-2 text-[12px]">
                 <span class="w-28 shrink-0">Height (mm)</span>
                 <input
@@ -2825,7 +2871,7 @@ watch(baseCut.finishedSummary, (summary) => {
                   v-model.number="plinth.magnet_clearance_mm"
                 />
               </label>
-            </div>
+            </fieldset>
           </details>
 
           <div class="flex flex-col gap-1">
@@ -2855,11 +2901,7 @@ watch(baseCut.finishedSummary, (summary) => {
                 <span class="loading loading-spinner"></span>
                 <span>Cutting…</span>
               </template>
-              <span v-else
-                >Cut {{ placements.length }} base{{
-                  placements.length === 1 ? "" : "s"
-                }}</span
-              >
+              <span v-else>{{ cutButtonLabel }}</span>
             </button>
             <button
               v-if="baseCut.isRunning.value"
@@ -2903,7 +2945,7 @@ watch(baseCut.finishedSummary, (summary) => {
               <li
                 v-for="r in baseCut.results.value"
                 :key="r.index"
-                class="flex items-center gap-2"
+                class="flex items-center gap-2 flex-wrap"
               >
                 <span
                   :class="
@@ -2919,9 +2961,27 @@ watch(baseCut.finishedSummary, (summary) => {
                 <span v-if="!r.ok" class="text-error text-[11px] truncate">{{
                   r.reason
                 }}</span>
-                <span v-else-if="!r.manifold" class="text-warning text-[11px]"
-                  >non-manifold</span
-                >
+                <template v-else>
+                  <span v-if="!r.manifold" class="text-warning text-[11px]"
+                    >non-manifold</span
+                  >
+                  <span
+                    v-if="r.fused === false"
+                    class="badge badge-xs badge-warning"
+                    :title="`the plug didn't join the plinth — the STL holds ${r.shells} loose shell${r.shells === 1 ? '' : 's'}`"
+                    >not fused ({{ r.shells }} shells)</span
+                  >
+                  <span
+                    v-if="r.magnet_ignored"
+                    class="text-[10px] text-base-content/40"
+                    >magnet ignored</span
+                  >
+                  <span
+                    v-if="r.topper_mm_clamped != null"
+                    class="text-[10px] text-base-content/40"
+                    >clamped to {{ r.topper_mm_clamped }} mm</span
+                  >
+                </template>
               </li>
             </ul>
 
