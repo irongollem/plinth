@@ -1432,7 +1432,13 @@ export type MinihoardFinished = { job_id: string; success: boolean;
  * Present when the process couldn't run at all (spawn failure).
  */
 error: string | null }
-export type MinihoardInfo = { path: string; version: string }
+export type MinihoardInfo = { path: string; version: string;
+/**
+ * Whether this build speaks the `--json` protocol (>= 0.4.0). Below that,
+ * the view falls back to the legacy raw console with an "update" hint —
+ * the typed library UI has nothing to talk to.
+ */
+supports_json: boolean }
 export type MinihoardLine = { job_id: string; line: string; 
 /**
  * stderr lines render dimmer — minihoard uses stderr for progress
@@ -1658,6 +1664,11 @@ align_parts?: boolean;
  */
 look_config?: string | null; 
 /**
+ * Geometry-driven translucent resin: thickness-dependent SSS plus a
+ * warm rear-light boost. Intended for thin wings, cloth and foliage.
+ */
+translucent?: boolean;
+/**
  * Render the configured scale-reference figure beside the model
  * (settings supply the STL path + height; silently off when unset).
  */
@@ -1720,9 +1731,18 @@ export type ScatterFinishedStatus = { job_id: string; out_path: string; placed: 
  * A scatter job, as sent from the frontend and forwarded to
  * scatter_landscape.py verbatim — unlike `BaseCutJob`, no field is renamed:
  * the script reads `job["landscape_path"]`, `job["out_path"]`,
- * `job["params"]` directly (see its module docstring's job JSON example).
+ * `job["layers"]` directly (see its module docstring's job JSON example).
+ *
+ * `layers` is a STACK, not a single pass (docs/SCATTER.md "Layers — build
+ * the debris up, peel it back"): each entry is a full `ScatterParams`, and
+ * each places independently onto the TERRAIN from its own seed — adding or
+ * removing a layer never moves another layer's pieces. Must be non-empty;
+ * `start_scatter`/`validate_scatter_job` reject an empty stack before any
+ * Blender work, same as an empty `pieces` list within one layer. One layer
+ * is the common case. This replaces the old `params: ScatterParams` shape
+ * outright — no compat branch, per house rule (old === redundant).
  */
-export type ScatterJob = { landscape_path: string; out_path: string; params: ScatterParams }
+export type ScatterJob = { landscape_path: string; out_path: string; layers: ScatterParams[] }
 /**
  * Scatter placement parameters — see docs/SCATTER.md "Pinned interfaces"
  * and "Scale anchor: 28-32mm heroic". Defaults mirror

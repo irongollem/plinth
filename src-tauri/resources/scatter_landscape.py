@@ -1,9 +1,10 @@
-# Scatter — sprinkle debris (this spike: generated pebbles/rocks) onto a
-# landscape STL and boolean it in. See docs/SCATTER.md — this file implements
-# the pinned "landscape TRANSFORMER" pass: landscape.stl + ScatterParams ->
-# scatter_landscape.py -> landscape-scattered.stl. It is NOT part of the cut
-# job (docs/SCATTER.md "The architectural call"); base_cut.py runs unchanged
-# against whatever STL is handed to it, decorated or not.
+# Scatter — sprinkle debris (this spike: generated pebbles/rocks, plus
+# curated Asset pieces) onto a landscape STL as a STACK of independent
+# passes. See docs/SCATTER.md — this file implements the pinned "landscape
+# TRANSFORMER" pass: landscape.stl + layers -> scatter_landscape.py ->
+# landscape-scattered.stl. It is NOT part of the cut job (docs/SCATTER.md
+# "The architectural call"); base_cut.py runs unchanged against whatever STL
+# is handed to it, decorated or not.
 #
 # Job JSON (path after `--job`), all lengths in mm, landscape units = mm,
 # Z-up (same conventions as gen_landscape.py / base_cut.py):
@@ -13,37 +14,51 @@
 #   "asset_paths": {"skull-hesperocyon": "/path/to/skull-hesperocyon.stl"},
 #                                    # id -> absolute STL path for every
 #                                    # {"Asset": {"id": ...}} piece referenced
-#                                    # by params.pieces below (docs/SCATTER.md
-#                                    # "Bundled assets" / basecutter::scatter's
-#                                    # resolve_asset_paths). Rust resolves
-#                                    # bundled-vs-user-library and injects this
-#                                    # map at job-write time — mirrors how
-#                                    # base_cut.py's job JSON gets a "cut"
-#                                    # footprint injected per placement; this
-#                                    # script NEVER guesses a path from an id
-#                                    # itself. Omitted/empty when no Asset
-#                                    # piece is used.
-#   "params": {
-#     "seed": 7,
-#     "density_per_dm2": 25.0,        # pieces per 100x100mm (a "dm2" here)
-#     "scale": [0.85, 1.15],          # random range AROUND each piece kind's
-#                                      # canonical 28-32mm-scale size (see
-#                                      # CANONICAL_MM below) — docs/SCATTER.md
-#                                      # "Scale anchor: 28-32mm heroic"
-#     "scale_factor": 1.0,            # whole-pass rescale for non-28mm work
-#     "sink_mm": [0.0, 0.6],          # desired buried-depth range; the script
-#                                      # enforces a FLOOR regardless (see
-#                                      # "always buried" below) — this range
-#                                      # only adds variety ABOVE that floor
-#     "align_to_surface": true,       # tilt each piece to the local normal
-#     "max_slope_deg": 55.0,          # reject candidates on steeper ground
-#     "edge_margin_mm": 3.0,          # keep clear of the landscape's outer
-#                                      # planar (x,y) bounding box
-#     "pieces": [
-#       {"piece": {"Generated": {"kind": "pebble"}}, "weight": 0.6},
-#       {"piece": {"Generated": {"kind": "rock"}},   "weight": 0.4}
-#     ]
-#   }
+#                                    # by ANY layer's pieces below
+#                                    # (docs/SCATTER.md "Bundled assets" /
+#                                    # basecutter::scatter's
+#                                    # resolve_asset_paths — this map is the
+#                                    # UNION across every layer's ids). Rust
+#                                    # resolves bundled-vs-user-library and
+#                                    # injects this map at job-write time —
+#                                    # mirrors how base_cut.py's job JSON gets
+#                                    # a "cut" footprint injected per
+#                                    # placement; this script NEVER guesses a
+#                                    # path from an id itself. Omitted/empty
+#                                    # when no layer uses an Asset piece.
+#   "layers": [                     # a STACK, not a single pass
+#                                    # (docs/SCATTER.md "Layers") — each
+#                                    # entry is a full param set, applied
+#                                    # in order; ONE layer is the common
+#                                    # case, but the list itself must be
+#                                    # non-empty (Rust's start_scatter
+#                                    # rejects an empty list before this
+#                                    # script ever runs; this script checks
+#                                    # again as defense in depth against a
+#                                    # hand-edited job file — see scatter()).
+#     {
+#       "seed": 7,
+#       "density_per_dm2": 25.0,        # pieces per 100x100mm (a "dm2" here)
+#       "scale": [0.85, 1.15],          # random range AROUND each piece kind's
+#                                        # canonical 28-32mm-scale size (see
+#                                        # CANONICAL_MM below) — docs/SCATTER.md
+#                                        # "Scale anchor: 28-32mm heroic"
+#       "scale_factor": 1.0,            # whole-pass rescale for non-28mm work
+#       "sink_mm": [0.0, 0.6],          # desired buried-depth range; the script
+#                                        # enforces a FLOOR regardless (see
+#                                        # "always buried" below) — this range
+#                                        # only adds variety ABOVE that floor
+#       "align_to_surface": true,       # tilt each piece to the local normal
+#       "max_slope_deg": 55.0,          # reject candidates on steeper ground
+#       "edge_margin_mm": 3.0,          # keep clear of the landscape's outer
+#                                        # planar (x,y) bounding box
+#       "pieces": [
+#         {"piece": {"Generated": {"kind": "pebble"}}, "weight": 0.6},
+#         {"piece": {"Generated": {"kind": "rock"}},   "weight": 0.4}
+#       ]
+#     }
+#     # ... additional layers, same shape, own seed/density/pieces ...
+#   ]
 # }
 #
 # `piece` is externally tagged, one key names the source — matches Rust's
@@ -51,49 +66,87 @@
 # pinned in docs/SCATTER.md: {"Generated": {"kind": "pebble"|"rock"}} or
 # {"Asset": {"id": "..."}}. An Asset piece resolves via asset_paths (see
 # above): the id must be a key in that map AND the path it names must exist
-# on disk, checked in validate_pieces() BEFORE any Blender work — an unknown
-# id or a missing file is a clear SCATTER_FAILED, never a guess. Once
-# resolved, an Asset piece is imported ONCE per unique id (see
-# get_asset_template) and instanced per placement with the SAME
-# yaw/scale(scale range x scale_factor)/sink-floor treatment as a generated
-# piece (see build_asset_piece) — the piece's own imported size at scale 1.0
-# IS its canonical size (every bundled asset is normalized to it at curation,
-# docs/SCATTER.md "Scale anchor"), so there is no separate CANONICAL_MM
-# lookup for asset pieces the way there is for pebble/rock.
+# on disk, checked in validate_pieces() for EVERY layer BEFORE any Blender
+# work — an unknown id or a missing file is a clear SCATTER_FAILED, never a
+# guess, regardless of which layer in the stack referenced it. Once
+# resolved, an Asset piece is imported ONCE per unique id ACROSS THE WHOLE
+# STACK (see AssetTemplateCache, shared by every layer) and instanced per
+# placement with the SAME yaw/scale(scale range x scale_factor)/sink-floor
+# treatment as a generated piece (see build_asset_piece) — the piece's own
+# imported size at scale 1.0 IS its canonical size (every bundled asset is
+# normalized to it at curation, docs/SCATTER.md "Scale anchor"), so there is
+# no separate CANONICAL_MM lookup for asset pieces the way there is for
+# pebble/rock.
 #
-# stdout protocol (parsed by basecutter::scatter, S2):
+# stdout protocol (parsed by basecutter::scatter):
 #   SCATTER_START
 #   SCATTER_PROGRESS {"placed":i,"total":N}
+#     (placed/total span the WHOLE STACK, not one layer — docs/SCATTER.md
+#     "Layers": "SCATTER progress spans all layers". total is known up
+#     front: every layer's candidates are raycast-accepted before any piece
+#     in ANY layer is placed — see scatter()'s two-pass structure.)
 #   SCATTER_DONE {"out":...,"placed":N,"manifold":bool,
-#                 "non_manifold_edges":N,"total_edges":M,"shells":S}
+#                 "non_manifold_edges":N,"total_edges":M,"shells":S,
+#                 "layers":L}
 #     (manifold/edge counts are measured on the EXPORTED file via a
 #     re-import — see roundtrip_check — so they match what base_cut.py's
 #     validate will see; mild non-manifold-ness is warning-grade data here,
 #     the same lenient policy as base_cut.py's validate, and the job only
 #     FAILS above MAX_NON_MANIFOLD_RATIO. The Rust DonePayload currently
-#     parses out/placed/manifold and ignores the extra count fields.
-#     "shells" is NEW (docs/SCATTER.md "Pieces are placed as LOOSE
-#     SHELLS"): pieces are no longer boolean-unioned into the terrain, so
-#     the exported file is terrain + one closed shell per placed piece —
+#     parses out/placed/manifold/shells/layers and ignores the extra count
+#     fields.
+#     "shells" (docs/SCATTER.md "Pieces are placed as LOOSE SHELLS"): pieces
+#     are never boolean-unioned into the terrain, so the exported file is
+#     terrain + one closed shell per placed piece ACROSS EVERY LAYER —
 #     shells == 1 + placed by construction, but the number reported here is
 #     RE-MEASURED on the same re-imported file the edge counts come from
 #     (a flood-fill over face adjacency, see count_shells), not assumed —
 #     the same "report what downstream will actually see" discipline
 #     roundtrip_check already applies to manifoldness. Because nothing
 #     unions anymore, non_manifold_edges is expected to be exactly 0 by
-#     construction — see "Loose shells, not unions" below.)
+#     construction — see "Loose shells, not unions" below.
+#     "layers" is NEW (docs/SCATTER.md "Layers"): the number of layers in
+#     the stack that just ran, i.e. len(job["layers"]) — a plain count, not
+#     re-measured, since there is nothing to re-derive it FROM downstream
+#     the way shells/manifoldness are re-derived from the exported file.)
 #   SCATTER_FAILED {"reason":...}
-#   With --debug (after `--job <path>`), one extra line per placed piece:
-#   SCATTER_PIECE {"index":i,"kind":...,"x_mm":...,"y_mm":...,"z_mm":...,
-#                  "yaw_deg":...,"size_mm":...,"floor_mm":...,
+#   With --debug (after `--job <path>`), one extra line per placed piece,
+#   in placement order (layer 0's pieces first, then layer 1's, etc.):
+#   SCATTER_PIECE {"index":i,"layer":L,"kind":...,"x_mm":...,"y_mm":...,
+#                  "z_mm":...,"yaw_deg":...,"size_mm":...,"floor_mm":...,
 #                  "embed_depth_mm":...,"aligned_deg":...}
 #   (embed_depth_mm is the ACTUAL enforced sink; floor_mm is what the "always
 #   buried" rule required — embed_depth_mm >= floor_mm always, the sink-floor
-#   proof this line exists for.)
+#   proof this line exists for. "layer" is NEW: which entry of job["layers"]
+#   (0-indexed) placed this piece — this is what the independence test reads
+#   to isolate one layer's pieces regardless of how many other layers ran
+#   alongside it. "index" stays a GLOBAL running count across the whole
+#   stack, not reset per layer — since layers are processed in stack order,
+#   layer 0's indices are always 0..N0-1 whether or not later layers exist,
+#   which is itself a visible symptom of independence: adding layer 1 never
+#   renumbers layer 0's pieces.)
 # Exit code: 0 on success; a caught failure prints SCATTER_FAILED then
 # sys.exit(1); an uncaught exception propagates and Blender's own
 # `--python-exit-code 1` (the render_mini.py/base_cut.py/gen_landscape.py
 # convention) turns it into a non-zero exit regardless.
+#
+# Layers — independent stacking (docs/SCATTER.md "Layers — build the debris
+# up, peel it back"): every layer raycasts against the SAME BVH, built ONCE
+# from the landscape mesh as originally imported (src_bm/bvh in scatter()) —
+# placement never touches the terrain, so that BVH is never stale for a
+# later layer. Each layer also gets its OWN random.Random(layer["seed"])
+# stream, used for nothing but that layer's own candidate jitter and
+# per-piece draws. The consequence: layer K's whole placement — which
+# candidates are accepted, and every position/yaw/size/sink drawn for them —
+# is a pure function of (terrain, layer K's own params), with no dependency
+# on any other layer's params, presence, or position in the stack. Candidates
+# for EVERY layer are computed in a first pass (before any piece in any
+# layer is built) specifically so SCATTER_PROGRESS's total is known from the
+# very first tick and so the two passes can never accidentally interleave
+# rng draws between layers. This is verified directly against real Blender
+# by scatter.rs's ignored integration test: run layer 0 alone, then layer 0
+# plus a second layer, and diff layer 0's SCATTER_PIECE debug positions —
+# they must match exactly.
 #
 # Placement algorithm (deterministic from seed — docs/SCATTER.md "Placement
 # algorithm"): jittered-grid candidate points (poisson-flavoured, not pure
@@ -126,19 +179,24 @@
 # loop (see the historical tri-cost comments below); joining loose shells is
 # pure mesh-data concatenation (bpy.ops.object.join), no solver involved.
 #
-# Determinism: ONE seeded random.Random(seed) stream, drawn from in a FIXED
-# order (grid cells visited row-major; every cell draws its two jitter
-# numbers whether or not it's later accepted; every ACCEPTED candidate then
-# draws its piece pick / yaw / size / sink / mesh-noise numbers in that same
-# fixed order). Whether a candidate is accepted depends only on the
-# landscape mesh + its fixed (x,y) position, never on the RNG, so for the
-# same landscape STL + same seed + same params the accept/reject pattern —
-# and therefore the whole sequence of numbers drawn — is bit-identical
-# across runs. This mirrors gen_landscape.py's boulder layer (one seeded
-# stream, a fixed-order per-instance loop), not its stones layer (a position
-# hash) — the mechanism scatter needs is "for each of N discrete items",
-# exactly the boulders' case, not "evaluate this continuous field at an
-# arbitrary point".
+# Determinism: EACH layer gets its OWN seeded random.Random(layer["seed"])
+# stream (see parse_layer/scatter's per-layer rng), drawn from in a FIXED
+# order within that layer (grid cells visited row-major; every cell draws
+# its two jitter numbers whether or not it's later accepted; every ACCEPTED
+# candidate then draws its piece pick / yaw / size / sink / mesh-noise
+# numbers in that same fixed order). Whether a candidate is accepted depends
+# only on the landscape mesh + its fixed (x,y) position, never on the RNG,
+# so for the same landscape STL + same seed + same layer params the
+# accept/reject pattern — and therefore the whole sequence of numbers drawn —
+# is bit-identical across runs. Because layers are processed in a fixed
+# order (stack order) and each owns an independent rng stream that nothing
+# outside its own iteration ever touches, the SAME layers in the SAME order
+# reproduce the SAME whole-stack export byte-for-byte, exactly generalizing
+# the single-pass guarantee to N passes. This mirrors gen_landscape.py's
+# boulder layer (one seeded stream, a fixed-order per-instance loop), not its
+# stones layer (a position hash) — the mechanism scatter needs is "for each
+# of N discrete items", exactly the boulders' case, not "evaluate this
+# continuous field at an arbitrary point".
 #
 # Always buried: see docs/SCATTER.md's own section of that name. A piece
 # resting tangent on the surface prints as a weak kiss-joint and is exactly
@@ -871,25 +929,52 @@ def raycast_accept(bvh, x, y, ray_z, ray_distance, max_slope_deg):
 
 # --------------------------------------------------------------------- job
 
+def parse_layer(layer_json, asset_paths):
+    """Extract one layer's params from its job JSON entry, applying the same
+    `params.get(key, default)` fallbacks the single-pass shape always used —
+    see ScatterParams's own doc comment in scatter.rs for why each default
+    here must match Rust's `#[serde(default = ...)]` exactly. Returns a plain
+    dict the placement loop indexes by key, keeping `pieces` already resolved
+    via `validate_pieces` (unknown id / missing file raised HERE, before any
+    Blender work — same pin as the single-layer shape, now checked for every
+    layer up front in `scatter()` before the landscape is even imported).
+    """
+    return {
+        "seed": int(layer_json["seed"]),
+        "density_per_dm2": float(layer_json["density_per_dm2"]),
+        "scale": tuple(layer_json.get("scale", [0.85, 1.15])),
+        "scale_factor": float(layer_json.get("scale_factor", 1.0)),
+        "sink_mm": tuple(layer_json.get("sink_mm", [0.0, 0.6])),
+        "align_to_surface": bool(layer_json.get("align_to_surface", True)),
+        "max_slope_deg": float(layer_json.get("max_slope_deg", 55.0)),
+        "edge_margin_mm": float(layer_json.get("edge_margin_mm", 2.0)),
+        "pieces": validate_pieces(layer_json["pieces"], asset_paths),
+    }
+
+
 def scatter(job, debug):
     landscape_path = job["landscape_path"]
     out_path = job["out_path"]
-    params = job["params"]
     asset_paths = job.get("asset_paths", {})
 
-    seed = int(params["seed"])
-    density_per_dm2 = float(params["density_per_dm2"])
-    scale_lo, scale_hi = params.get("scale", [0.85, 1.15])
-    scale_factor = float(params.get("scale_factor", 1.0))
-    sink_lo, sink_hi = params.get("sink_mm", [0.0, 0.6])
-    align_to_surface = bool(params.get("align_to_surface", True))
-    max_slope_deg = float(params.get("max_slope_deg", 55.0))
-    edge_margin_mm = float(params.get("edge_margin_mm", 2.0))
+    layers_json = job.get("layers")
+    if not layers_json:
+        # Rust's start_scatter already rejects an empty/missing stack before
+        # this script ever runs (docs/SCATTER.md's ScatterJob pin: "must be
+        # non-empty") — this is defense in depth against a hand-edited or
+        # stale job file, same reasoning as validate_pieces' own id checks.
+        raise ValueError("job.layers is empty — nothing to scatter")
 
-    # Unknown id / missing file -> raised here, BEFORE any Blender work
-    # (docs/SCATTER.md's Asset-source validation pin) — see
-    # validate_pieces' docstring.
-    pieces = validate_pieces(params["pieces"], asset_paths)
+    # Parse + validate EVERY layer (including resolving its Asset pieces
+    # against asset_paths) before any Blender work — an unknown id in layer 2
+    # must fail before layer 0 ever places a single piece, extending
+    # validate_pieces' existing "before any Blender work" pin to the whole
+    # stack instead of just one params blob.
+    layers = [parse_layer(layer_json, asset_paths) for layer_json in layers_json]
+
+    # Asset templates are shared across the WHOLE stack (docs/SCATTER.md:
+    # "the script imports the STL once per unique id"): two layers pulling
+    # the same skull must not double-import it.
     template_cache = AssetTemplateCache(asset_paths)
 
     bpy.ops.object.select_all(action="SELECT")
@@ -903,72 +988,95 @@ def scatter(job, debug):
     ray_z = max_z + RAY_MARGIN_MM
     ray_distance = (max_z - min_z) + 2.0 * RAY_MARGIN_MM
 
-    rng = random.Random(seed)
-    grid_candidates = build_candidates(
-        rng, min_x, min_y, max_x, max_y, density_per_dm2, edge_margin_mm
-    )
-
-    accepted = []
-    for x, y in grid_candidates:
-        hit = raycast_accept(bvh, x, y, ray_z, ray_distance, max_slope_deg)
-        if hit is not None:
-            accepted.append(hit)
+    # Independence (docs/SCATTER.md "Layers", module docstring's own
+    # "Layers — independent stacking" section): every layer raycasts against
+    # THIS SAME bvh/src_bm — built ONCE from the landscape as originally
+    # imported, never mutated by placement below — and draws from its OWN
+    # random.Random(layer["seed"]) stream. Computing every layer's accepted
+    # candidates in this FIRST pass, before any piece in ANY layer is built,
+    # means (a) SCATTER_PROGRESS's total spans the whole stack from tick one,
+    # and (b) there is no way for one layer's placement loop to accidentally
+    # interleave rng draws with another's — each layer's rng object is only
+    # ever touched inside its own iteration below and in its own slice of
+    # the placement loop that follows.
+    layer_accepted = []
+    for layer in layers:
+        layer_rng = random.Random(layer["seed"])
+        grid_candidates = build_candidates(
+            layer_rng, min_x, min_y, max_x, max_y,
+            layer["density_per_dm2"], layer["edge_margin_mm"],
+        )
+        accepted = []
+        for x, y in grid_candidates:
+            hit = raycast_accept(bvh, x, y, ray_z, ray_distance, layer["max_slope_deg"])
+            if hit is not None:
+                accepted.append(hit)
+        layer_accepted.append((layer_rng, accepted))
     src_bm.free()
 
-    total = len(accepted)
+    total = sum(len(accepted) for _, accepted in layer_accepted)
     placed = 0
     piece_objects = []
-    for loc, normal in accepted:
-        source, key = pick_piece_kind(rng, pieces)
-        yaw = rng.uniform(0.0, 2.0 * math.pi)
-        if source == "generated":
-            bm, size_mm, bottom_local, height_local = build_generated_piece(
-                key, rng, (scale_lo, scale_hi), scale_factor
-            )
-            debug_kind = key
-        else:  # "asset" — see validate_pieces/build_asset_piece
-            bm, size_mm, bottom_local, height_local = build_asset_piece(
-                key, template_cache, rng, (scale_lo, scale_hi), scale_factor
-            )
-            debug_kind = f"asset:{key}"
+    for layer_index, (layer, (layer_rng, accepted)) in enumerate(zip(layers, layer_accepted)):
+        pieces = layer["pieces"]
+        scale_range = layer["scale"]
+        scale_factor = layer["scale_factor"]
+        sink_lo, sink_hi = layer["sink_mm"]
+        align_to_surface = layer["align_to_surface"]
 
-        floor_mm = max(MIN_SINK_MM, SINK_FLOOR_FRACTION * height_local)
-        raw_sink = rng.uniform(sink_lo, sink_hi)
-        final_sink = max(floor_mm, raw_sink)
+        for loc, normal in accepted:
+            source, key = pick_piece_kind(layer_rng, pieces)
+            yaw = layer_rng.uniform(0.0, 2.0 * math.pi)
+            if source == "generated":
+                bm, size_mm, bottom_local, height_local = build_generated_piece(
+                    key, layer_rng, scale_range, scale_factor
+                )
+                debug_kind = key
+            else:  # "asset" — see validate_pieces/build_asset_piece
+                bm, size_mm, bottom_local, height_local = build_asset_piece(
+                    key, template_cache, layer_rng, scale_range, scale_factor
+                )
+                debug_kind = f"asset:{key}"
 
-        world_origin = place_piece(bm, bottom_local, loc, normal, align_to_surface, final_sink, yaw)
+            floor_mm = max(MIN_SINK_MM, SINK_FLOOR_FRACTION * height_local)
+            raw_sink = layer_rng.uniform(sink_lo, sink_hi)
+            final_sink = max(floor_mm, raw_sink)
 
-        # No union: clean this piece as its OWN shell (see
-        # cleanup_shell_bm's docstring — this is what makes the later join
-        # provably safe) and keep the object around for join_shells instead
-        # of unioning it into the terrain and discarding it.
-        cleanup_shell_bm(bm)
-        piece_obj = new_object(f"scatter_piece_{placed}", bm)
-        piece_objects.append(piece_obj)
+            world_origin = place_piece(bm, bottom_local, loc, normal, align_to_surface, final_sink, yaw)
 
-        placed += 1
-        if debug:
-            tok(
-                "SCATTER_PIECE",
-                {
-                    "index": placed - 1,
-                    "kind": debug_kind,
-                    "x_mm": round(world_origin.x, 4),
-                    "y_mm": round(world_origin.y, 4),
-                    "z_mm": round(world_origin.z, 4),
-                    "yaw_deg": round(math.degrees(yaw), 3),
-                    "size_mm": round(size_mm, 4),
-                    "floor_mm": round(floor_mm, 4),
-                    "embed_depth_mm": round(final_sink, 4),
-                    "aligned_deg": round(math.degrees(math.acos(clamp(normal.z, -1.0, 1.0))), 3),
-                },
-            )
-        tok("SCATTER_PROGRESS", {"placed": placed, "total": total})
+            # No union: clean this piece as its OWN shell (see
+            # cleanup_shell_bm's docstring — this is what makes the later
+            # join provably safe) and keep the object around for
+            # join_shells instead of unioning it into the terrain and
+            # discarding it.
+            cleanup_shell_bm(bm)
+            piece_obj = new_object(f"scatter_piece_{placed}", bm)
+            piece_objects.append(piece_obj)
+
+            placed += 1
+            if debug:
+                tok(
+                    "SCATTER_PIECE",
+                    {
+                        "index": placed - 1,
+                        "layer": layer_index,
+                        "kind": debug_kind,
+                        "x_mm": round(world_origin.x, 4),
+                        "y_mm": round(world_origin.y, 4),
+                        "z_mm": round(world_origin.z, 4),
+                        "yaw_deg": round(math.degrees(yaw), 3),
+                        "size_mm": round(size_mm, 4),
+                        "floor_mm": round(floor_mm, 4),
+                        "embed_depth_mm": round(final_sink, 4),
+                        "aligned_deg": round(math.degrees(math.acos(clamp(normal.z, -1.0, 1.0))), 3),
+                    },
+                )
+            tok("SCATTER_PROGRESS", {"placed": placed, "total": total})
 
     # Cached Asset template objects were never selected and never entered
     # piece_objects — join_shells/export below can't see them — but they
     # must still be swept before the job ends (see AssetTemplateCache's
-    # docstring): a no-op when no Asset piece was ever placed.
+    # docstring): a no-op when no Asset piece was ever placed by any layer.
     template_cache.cleanup()
 
     # Terrain gets the identical per-shell cleanup every piece already got
@@ -1007,7 +1115,7 @@ def scatter(job, debug):
             f"({bad_edges} of {total_edges} edges)"
         )
 
-    return out_path, placed, bad_edges, total_edges, shells
+    return out_path, placed, bad_edges, total_edges, shells, len(layers)
 
 
 def main():
@@ -1019,22 +1127,22 @@ def main():
 
     tok("SCATTER_START")
     try:
-        out, placed, bad_edges, total_edges, shells = scatter(job, debug)
+        out, placed, bad_edges, total_edges, shells, num_layers = scatter(job, debug)
     except Exception as e:  # noqa: BLE001 — reported as a token, not a crash
         traceback.print_exc()
         tok("SCATTER_FAILED", {"reason": str(e)})
         sys.exit(1)
 
-    # non_manifold_edges/total_edges/shells are all ADDITIVE payload fields:
-    # mild non-manifold-ness (under MAX_NON_MANIFOLD_RATIO — above it
-    # scatter() already raised) rides along as a warning-grade detail, and
-    # shells is the new loose-shells honesty field (docs/SCATTER.md "Pieces
-    # are placed as LOOSE SHELLS") — terrain + one shell per placed piece,
-    # re-measured on the round-tripped file, not assumed. serde's default
-    # deserialize ignores unknown JSON fields, so basecutter::scatter's
-    # existing DonePayload {out, placed, manifold} keeps parsing this line
-    # unchanged — it just DISCARDS the extra fields until a later Rust pass
-    # grows fields for them (see this change's report).
+    # non_manifold_edges/total_edges/shells/layers are all ADDITIVE payload
+    # fields: mild non-manifold-ness (under MAX_NON_MANIFOLD_RATIO — above it
+    # scatter() already raised) rides along as a warning-grade detail, shells
+    # is the loose-shells honesty field (docs/SCATTER.md "Pieces are placed
+    # as LOOSE SHELLS") — terrain + one shell per placed piece across the
+    # whole stack, re-measured on the round-tripped file, not assumed — and
+    # "layers" is the new stack-size field (docs/SCATTER.md "Layers"). serde's
+    # default deserialize ignores unknown JSON fields, so basecutter::scatter's
+    # DonePayload {out, placed, manifold, shells, layers} keeps parsing this
+    # line whether or not it grows further fields later.
     tok(
         "SCATTER_DONE",
         {
@@ -1044,6 +1152,7 @@ def main():
             "non_manifold_edges": bad_edges,
             "total_edges": total_edges,
             "shells": shells,
+            "layers": num_layers,
         },
     )
 

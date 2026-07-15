@@ -186,12 +186,21 @@ pub struct ScatterParams {
 /// A scatter job, as sent from the frontend and forwarded to
 /// scatter_landscape.py verbatim — unlike `BaseCutJob`, no field is renamed:
 /// the script reads `job["landscape_path"]`, `job["out_path"]`,
-/// `job["params"]` directly (see its module docstring's job JSON example).
+/// `job["layers"]` directly (see its module docstring's job JSON example).
+///
+/// `layers` is a STACK, not a single pass (docs/SCATTER.md "Layers — build
+/// the debris up, peel it back"): each entry is a full `ScatterParams`, and
+/// each places independently onto the TERRAIN from its own seed — adding or
+/// removing a layer never moves another layer's pieces. Must be non-empty;
+/// `start_scatter`/`validate_scatter_job` reject an empty stack before any
+/// Blender work, same as an empty `pieces` list within one layer. One layer
+/// is the common case. This replaces the old `params: ScatterParams` shape
+/// outright — no compat branch, per house rule (old === redundant).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Type)]
 pub struct ScatterJob {
     pub landscape_path: String,
     pub out_path: String,
-    pub params: ScatterParams,
+    pub layers: Vec<ScatterParams>,
 }
 
 // ------------------------------------------------------------ token parsing
@@ -217,6 +226,11 @@ pub enum ScatterToken {
         /// `Option`: a payload that omits the field (an older script
         /// build) still parses, it just carries no shell count.
         shells: Option<u32>,
+        /// Additive (docs/SCATTER.md "Layers"): the number of layers in the
+        /// stack that just ran (`job["layers"]`'s length, as scatter_landscape.py
+        /// itself counted it). Same `Option`-for-forward-compat treatment as
+        /// `shells`.
+        layers: Option<u32>,
     },
     Failed { reason: String },
 }
@@ -234,6 +248,8 @@ pub fn parse_scatter_token(line: &str) -> Option<ScatterToken> {
         manifold: bool,
         #[serde(default)]
         shells: Option<u32>,
+        #[serde(default)]
+        layers: Option<u32>,
     }
     #[derive(Deserialize)]
     struct FailedPayload {
@@ -258,6 +274,7 @@ pub fn parse_scatter_token(line: &str) -> Option<ScatterToken> {
             placed: p.placed,
             manifold: p.manifold,
             shells: p.shells,
+            layers: p.layers,
         });
     }
     if let Some(json) = line.strip_prefix("SCATTER_FAILED ") {
@@ -285,8 +302,28 @@ fn asset_ids(pieces: &[PieceChoice]) -> Vec<String> {
     ids
 }
 
-/// Resolve every `Asset` piece referenced by `job.params.pieces` to an
-/// absolute path (bundled set first, then the user library — see
+/// Every unique asset id referenced across ALL layers' `pieces`, in
+/// first-seen order (layer order, then per-layer piece order) — the
+/// asset_paths union docs/SCATTER.md's `ScatterJob` pin calls for: "unions
+/// every layer's ids". Reuses `asset_ids`' own within-layer dedup, then
+/// dedups again across layers so an id shared by two layers (e.g. both a
+/// Boneyard and an Overgrown layer pulling the same skull) is only resolved
+/// once.
+fn layer_asset_ids(layers: &[ScatterParams]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut ids = Vec::new();
+    for layer in layers {
+        for id in asset_ids(&layer.pieces) {
+            if seen.insert(id.clone()) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+/// Resolve every `Asset` piece referenced by ANY of `job.layers`' `pieces`
+/// to an absolute path (bundled set first, then the user library — see
 /// `scatter_assets::resolve_asset_path`), returning the `id -> path` map
 /// `write_job_file` injects into the wire JSON. Fails BEFORE any Blender
 /// work if an id can't be resolved (docs/SCATTER.md's Asset-source
@@ -296,9 +333,9 @@ fn asset_ids(pieces: &[PieceChoice]) -> Vec<String> {
 /// against a hand-edited or stale job file).
 pub fn resolve_asset_paths(
     app_handle: &AppHandle,
-    pieces: &[PieceChoice],
+    layers: &[ScatterParams],
 ) -> Result<std::collections::HashMap<String, String>, AppError> {
-    asset_ids(pieces)
+    layer_asset_ids(layers)
         .into_iter()
         .map(|id| {
             let path = crate::basecutter::scatter_assets::resolve_asset_path(app_handle, &id)?;
@@ -489,7 +526,10 @@ where
 /// job. Deliberately checks the same conditions scatter_landscape.py itself
 /// would reject (bad density, bad scale range, no usable pieces) so the
 /// error surfaces before a Blender launch instead of as an opaque
-/// `SCATTER_FAILED`/non-zero-exit round trip.
+/// `SCATTER_FAILED`/non-zero-exit round trip. Runs the same per-layer sanity
+/// check (`validate_layer`) against EVERY entry in `job.layers` — one bad
+/// layer anywhere in the stack fails the whole job before Blender launches,
+/// same as one bad piece used to fail the single `params` shape.
 pub fn validate_scatter_job(job: &ScatterJob) -> Result<(), AppError> {
     if !Path::new(&job.landscape_path).is_file() {
         return Err(AppError::NotFoundError(format!(
@@ -505,27 +545,44 @@ pub fn validate_scatter_job(job: &ScatterJob) -> Result<(), AppError> {
             )));
         }
     }
-    if job.params.density_per_dm2 <= 0.0 {
+    if job.layers.is_empty() {
         return Err(AppError::InvalidInput(
-            "density_per_dm2 must be > 0".to_string(),
+            "layers is empty — nothing to scatter".to_string(),
         ));
     }
-    let (scale_lo, scale_hi) = job.params.scale;
+    for (index, layer) in job.layers.iter().enumerate() {
+        validate_layer(index, layer)?;
+    }
+    Ok(())
+}
+
+/// The per-layer half of `validate_scatter_job` — same three checks the
+/// single-layer `ScatterParams` shape always ran, now applied to one entry
+/// of the stack at a time. `index` is folded into the error message so a
+/// bad layer 2-of-3 doesn't read as "the job" failed with no clue which
+/// layer.
+fn validate_layer(index: usize, params: &ScatterParams) -> Result<(), AppError> {
+    if params.density_per_dm2 <= 0.0 {
+        return Err(AppError::InvalidInput(format!(
+            "layer {index}: density_per_dm2 must be > 0"
+        )));
+    }
+    let (scale_lo, scale_hi) = params.scale;
     if scale_lo <= 0.0 || scale_hi <= 0.0 || scale_lo > scale_hi {
         return Err(AppError::InvalidInput(format!(
-            "scale range must be positive and ordered (min <= max), got ({}, {})",
+            "layer {index}: scale range must be positive and ordered (min <= max), got ({}, {})",
             scale_lo, scale_hi
         )));
     }
-    if job.params.pieces.is_empty() {
-        return Err(AppError::InvalidInput(
-            "params.pieces is empty — nothing to scatter".to_string(),
-        ));
+    if params.pieces.is_empty() {
+        return Err(AppError::InvalidInput(format!(
+            "layer {index}: pieces is empty — nothing to scatter"
+        )));
     }
-    if !job.params.pieces.iter().any(|p| p.weight > 0.0) {
-        return Err(AppError::InvalidInput(
-            "every piece has weight <= 0 — nothing to scatter".to_string(),
-        ));
+    if !params.pieces.iter().any(|p| p.weight > 0.0) {
+        return Err(AppError::InvalidInput(format!(
+            "layer {index}: every piece has weight <= 0 — nothing to scatter"
+        )));
     }
     Ok(())
 }
@@ -662,7 +719,7 @@ async fn run_scatter_job(
     // Resolved once, up front — a failure here (unknown id, missing user-
     // library file) is reported the same way any other pre-flight failure
     // is, before write_job_file or Blender ever runs.
-    let asset_paths = match resolve_asset_paths(&app_handle, &job.params.pieces) {
+    let asset_paths = match resolve_asset_paths(&app_handle, &job.layers) {
         Ok(paths) => paths,
         Err(e) => {
             release_active_job(&ACTIVE_SCATTER, &job_id);
@@ -734,6 +791,15 @@ mod tests {
         }
     }
 
+    fn rock(weight: f64) -> PieceChoice {
+        PieceChoice {
+            piece: ScatterPieceSource::Generated {
+                kind: GeneratedPieceKind::Rock,
+            },
+            weight,
+        }
+    }
+
     fn valid_params() -> ScatterParams {
         ScatterParams {
             seed: 7,
@@ -766,13 +832,18 @@ mod tests {
         let job = ScatterJob {
             landscape_path: "/path/to/landscape.stl".to_string(),
             out_path: "/path/to/landscape-scattered.stl".to_string(),
-            params: valid_params(),
+            layers: vec![valid_params()],
         };
         let json = serde_json::to_value(&job).unwrap();
 
         assert_eq!(json["landscape_path"], "/path/to/landscape.stl");
         assert_eq!(json["out_path"], "/path/to/landscape-scattered.stl");
         assert!(json.get("landscape").is_none(), "must not use base_cut.py's renamed key");
+        // The old single-params shape is gone outright, not kept alongside
+        // layers (house rule: old === redundant, no compat branch).
+        assert!(json.get("params").is_none(), "the single-params shape must not survive");
+        assert!(json["layers"].is_array());
+        assert_eq!(json["layers"].as_array().unwrap().len(), 1);
 
         for key in [
             "seed",
@@ -786,27 +857,48 @@ mod tests {
             "pieces",
         ] {
             assert!(
-                json["params"].get(key).is_some(),
-                "params.{key} missing from wire JSON — scatter_landscape.py's docstring pins this key"
+                json["layers"][0].get(key).is_some(),
+                "layers[0].{key} missing from wire JSON — scatter_landscape.py's docstring pins this key"
             );
         }
-        assert_eq!(json["params"]["seed"], 7);
-        assert_eq!(json["params"]["density_per_dm2"], 25.0);
-        assert_eq!(json["params"]["scale"][0], 0.85);
-        assert_eq!(json["params"]["scale"][1], 1.15);
-        assert_eq!(json["params"]["sink_mm"][0], 0.0);
-        assert_eq!(json["params"]["sink_mm"][1], 0.6);
-        assert_eq!(json["params"]["align_to_surface"], true);
-        assert_eq!(json["params"]["max_slope_deg"], 55.0);
-        assert_eq!(json["params"]["edge_margin_mm"], 3.0);
+        assert_eq!(json["layers"][0]["seed"], 7);
+        assert_eq!(json["layers"][0]["density_per_dm2"], 25.0);
+        assert_eq!(json["layers"][0]["scale"][0], 0.85);
+        assert_eq!(json["layers"][0]["scale"][1], 1.15);
+        assert_eq!(json["layers"][0]["sink_mm"][0], 0.0);
+        assert_eq!(json["layers"][0]["sink_mm"][1], 0.6);
+        assert_eq!(json["layers"][0]["align_to_surface"], true);
+        assert_eq!(json["layers"][0]["max_slope_deg"], 55.0);
+        assert_eq!(json["layers"][0]["edge_margin_mm"], 3.0);
 
-        assert_eq!(json["params"]["pieces"][0]["piece"]["Generated"]["kind"], "pebble");
-        assert_eq!(json["params"]["pieces"][0]["weight"], 0.6);
-        assert_eq!(json["params"]["pieces"][1]["piece"]["Generated"]["kind"], "rock");
-        assert_eq!(json["params"]["pieces"][1]["weight"], 0.4);
+        assert_eq!(json["layers"][0]["pieces"][0]["piece"]["Generated"]["kind"], "pebble");
+        assert_eq!(json["layers"][0]["pieces"][0]["weight"], 0.6);
+        assert_eq!(json["layers"][0]["pieces"][1]["piece"]["Generated"]["kind"], "rock");
+        assert_eq!(json["layers"][0]["pieces"][1]["weight"], 0.4);
 
         let back: ScatterJob = serde_json::from_value(json).unwrap();
         assert_eq!(back.landscape_path, "/path/to/landscape.stl");
+        assert_eq!(back.layers.len(), 1);
+    }
+
+    /// The stack shape the whole task is about: multiple layers, in order,
+    /// each carrying its own full ScatterParams — not just a one-layer
+    /// convenience wrapper.
+    #[test]
+    fn job_serializes_multiple_layers_in_order() {
+        let mut layer_two = valid_params();
+        layer_two.seed = 99;
+        layer_two.density_per_dm2 = 5.0;
+        let job = ScatterJob {
+            landscape_path: "/l.stl".to_string(),
+            out_path: "/out.stl".to_string(),
+            layers: vec![valid_params(), layer_two],
+        };
+        let json = serde_json::to_value(&job).unwrap();
+        assert_eq!(json["layers"].as_array().unwrap().len(), 2);
+        assert_eq!(json["layers"][0]["seed"], 7);
+        assert_eq!(json["layers"][1]["seed"], 99);
+        assert_eq!(json["layers"][1]["density_per_dm2"], 5.0);
     }
 
     /// The `Asset` variant is a recognized, well-formed part of the pinned
@@ -860,7 +952,7 @@ mod tests {
             Some(ScatterToken::Progress { placed: 3, total: 10 })
         );
         assert_eq!(
-            // No "shells" key — an older-script-shaped payload must still parse.
+            // No "shells"/"layers" key — an older-script-shaped payload must still parse.
             parse_scatter_token(
                 r#"SCATTER_DONE {"out": "/l-scattered.stl", "placed": 10, "manifold": true}"#
             ),
@@ -869,18 +961,20 @@ mod tests {
                 placed: 10,
                 manifold: true,
                 shells: None,
+                layers: None,
             })
         );
         assert_eq!(
             parse_scatter_token(
                 r#"SCATTER_DONE {"out": "/l.stl", "placed": 5, "manifold": true, "shells": 6,
-                   "non_manifold_edges": 0, "total_edges": 900}"#
+                   "non_manifold_edges": 0, "total_edges": 900, "layers": 2}"#
             ),
             Some(ScatterToken::Done {
                 out: "/l.stl".to_string(),
                 placed: 5,
                 manifold: true,
                 shells: Some(6),
+                layers: Some(2),
             })
         );
         assert_eq!(
@@ -952,7 +1046,7 @@ mod tests {
         let job = ScatterJob {
             landscape_path: "/l.stl".to_string(),
             out_path: "/out/l-scattered.stl".to_string(),
-            params: valid_params(),
+            layers: vec![valid_params()],
         };
         let path = write_job_file(&dir, &job, "abc123", &std::collections::HashMap::new()).unwrap();
         assert!(path.is_file());
@@ -983,7 +1077,7 @@ mod tests {
         let job = ScatterJob {
             landscape_path: "/l.stl".to_string(),
             out_path: "/out/l-scattered.stl".to_string(),
-            params,
+            layers: vec![params],
         };
         let mut asset_paths = std::collections::HashMap::new();
         asset_paths.insert(
@@ -1027,6 +1121,28 @@ mod tests {
         assert_eq!(asset_ids(&pieces), vec!["b".to_string(), "a".to_string()]);
     }
 
+    /// The asset_paths union the ScatterJob doc comment pins: an id
+    /// referenced by more than one layer appears once, in first-seen order
+    /// across the WHOLE stack (layer order, then within-layer piece order).
+    #[test]
+    fn layer_asset_ids_unions_across_layers() {
+        let mut layer_one = valid_params();
+        layer_one.pieces = vec![
+            pebble(1.0),
+            PieceChoice { piece: ScatterPieceSource::Asset { id: "skull-a".to_string() }, weight: 1.0 },
+        ];
+        let mut layer_two = valid_params();
+        layer_two.pieces = vec![
+            PieceChoice { piece: ScatterPieceSource::Asset { id: "skull-b".to_string() }, weight: 1.0 },
+            // Same id as layer one — must not be resolved/listed twice.
+            PieceChoice { piece: ScatterPieceSource::Asset { id: "skull-a".to_string() }, weight: 1.0 },
+        ];
+        assert_eq!(
+            layer_asset_ids(&[layer_one, layer_two]),
+            vec!["skull-a".to_string(), "skull-b".to_string()]
+        );
+    }
+
     // --------------------------------------------------------- validation --
 
     #[test]
@@ -1034,7 +1150,7 @@ mod tests {
         let job = ScatterJob {
             landscape_path: "/definitely/not/a/real/path.stl".to_string(),
             out_path: std::env::temp_dir().to_string_lossy().into_owned() + "/out.stl",
-            params: valid_params(),
+            layers: vec![valid_params()],
         };
         assert!(matches!(
             validate_scatter_job(&job),
@@ -1056,7 +1172,7 @@ mod tests {
                 .join("out.stl")
                 .to_string_lossy()
                 .into_owned(),
-            params: valid_params(),
+            layers: vec![valid_params()],
         };
         assert!(matches!(
             validate_scatter_job(&job),
@@ -1077,28 +1193,71 @@ mod tests {
 
         let mut params = valid_params();
         params.density_per_dm2 = 0.0;
-        let job = ScatterJob { landscape_path: landscape_path.clone(), out_path: out_path.clone(), params };
+        let job = ScatterJob { landscape_path: landscape_path.clone(), out_path: out_path.clone(), layers: vec![params] };
         assert!(matches!(validate_scatter_job(&job), Err(AppError::InvalidInput(_))));
 
         let mut params = valid_params();
         params.scale = (1.2, 0.8); // min > max
-        let job = ScatterJob { landscape_path: landscape_path.clone(), out_path: out_path.clone(), params };
+        let job = ScatterJob { landscape_path: landscape_path.clone(), out_path: out_path.clone(), layers: vec![params] };
         assert!(matches!(validate_scatter_job(&job), Err(AppError::InvalidInput(_))));
 
         let mut params = valid_params();
         params.scale = (0.0, 1.15); // not > 0
-        let job = ScatterJob { landscape_path: landscape_path.clone(), out_path: out_path.clone(), params };
+        let job = ScatterJob { landscape_path: landscape_path.clone(), out_path: out_path.clone(), layers: vec![params] };
         assert!(matches!(validate_scatter_job(&job), Err(AppError::InvalidInput(_))));
 
         let mut params = valid_params();
         params.pieces = vec![];
-        let job = ScatterJob { landscape_path: landscape_path.clone(), out_path: out_path.clone(), params };
+        let job = ScatterJob { landscape_path: landscape_path.clone(), out_path: out_path.clone(), layers: vec![params] };
         assert!(matches!(validate_scatter_job(&job), Err(AppError::InvalidInput(_))));
 
         let mut params = valid_params();
         params.pieces = vec![pebble(0.0)];
-        let job = ScatterJob { landscape_path: landscape_path.clone(), out_path: out_path.clone(), params };
+        let job = ScatterJob { landscape_path: landscape_path.clone(), out_path: out_path.clone(), layers: vec![params] };
         assert!(matches!(validate_scatter_job(&job), Err(AppError::InvalidInput(_))));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_scatter_job_rejects_an_empty_layer_stack() {
+        let dir = std::env::temp_dir().join(format!("stlpack_scatter_validate_nolayers_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let landscape = dir.join("landscape.stl");
+        std::fs::write(&landscape, b"not a real stl, just needs to exist").unwrap();
+
+        let job = ScatterJob {
+            landscape_path: landscape.to_string_lossy().into_owned(),
+            out_path: dir.join("out.stl").to_string_lossy().into_owned(),
+            layers: vec![],
+        };
+        assert!(matches!(
+            validate_scatter_job(&job),
+            Err(AppError::InvalidInput(_))
+        ));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A bad layer anywhere in the stack — not just the first — must fail
+    /// the whole job before Blender launches.
+    #[test]
+    fn validate_scatter_job_rejects_a_bad_second_layer() {
+        let dir = std::env::temp_dir().join(format!("stlpack_scatter_validate_badlayer2_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let landscape = dir.join("landscape.stl");
+        std::fs::write(&landscape, b"not a real stl, just needs to exist").unwrap();
+
+        let mut bad_layer = valid_params();
+        bad_layer.pieces = vec![];
+        let job = ScatterJob {
+            landscape_path: landscape.to_string_lossy().into_owned(),
+            out_path: dir.join("out.stl").to_string_lossy().into_owned(),
+            layers: vec![valid_params(), bad_layer],
+        };
+        let err = validate_scatter_job(&job).expect_err("second layer's empty pieces must be rejected");
+        assert!(matches!(err, AppError::InvalidInput(_)));
+        assert!(err.to_string().contains("layer 1"), "error should name which layer failed: {err}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1113,7 +1272,26 @@ mod tests {
         let job = ScatterJob {
             landscape_path: landscape.to_string_lossy().into_owned(),
             out_path: dir.join("out.stl").to_string_lossy().into_owned(),
-            params: valid_params(),
+            layers: vec![valid_params()],
+        };
+        assert!(validate_scatter_job(&job).is_ok());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn validate_scatter_job_accepts_a_well_formed_multi_layer_job() {
+        let dir = std::env::temp_dir().join(format!("stlpack_scatter_validate_multi_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let landscape = dir.join("landscape.stl");
+        std::fs::write(&landscape, b"not a real stl, just needs to exist").unwrap();
+
+        let mut layer_two = valid_params();
+        layer_two.seed = 42;
+        let job = ScatterJob {
+            landscape_path: landscape.to_string_lossy().into_owned(),
+            out_path: dir.join("out.stl").to_string_lossy().into_owned(),
+            layers: vec![valid_params(), layer_two],
         };
         assert!(validate_scatter_job(&job).is_ok());
 
@@ -1169,31 +1347,61 @@ mod tests {
 
     // ------------------------------------------------------- integration --
 
+    /// Run scatter_landscape.py directly (bypassing spawn_and_parse, which
+    /// deliberately never models `--debug`'s SCATTER_PIECE line — see
+    /// ScatterToken::Done's own doc comment) and capture the FULL raw
+    /// stdout, so the independence test below can inspect per-piece debug
+    /// positions no production code path ever needs.
+    async fn run_scatter_debug(blender: &BlenderInfo, script: &Path, job_path: &Path) -> String {
+        let mut cmd = build_scatter_command(blender, script, job_path);
+        cmd.arg("--debug");
+        let output = cmd.output().await.expect("failed to launch blender for scatter");
+        assert!(
+            output.status.success(),
+            "scatter (debug) failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// Every `SCATTER_PIECE {...}` payload in a debug run's stdout, in
+    /// emission order.
+    fn scatter_piece_lines(stdout: &str) -> Vec<serde_json::Value> {
+        stdout
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("SCATTER_PIECE "))
+            .map(|json| serde_json::from_str(json).expect("SCATTER_PIECE payload must be valid JSON"))
+            .collect()
+    }
+
     /// End-to-end: generate a small watertight landscape with Blender itself
     /// (see basecutter::job's identical helper for why an imported/hand-
-    /// authored mesh is avoided — junk meshes fake unrelated symptoms), run
-    /// a scatter job mixing ONE bundled Asset piece (a real curated skull,
-    /// its bytes taken straight from BUNDLED_ASSETS via the test-only
-    /// accessor rather than via a Tauri AppHandle — see
-    /// `scatter_assets::resolve_asset_path`'s doc comment for why the
-    /// bundled-materialization path itself isn't unit-testable without one)
-    /// with generated pebbles, through spawn_and_parse (NOT the tauri
-    /// command layer), and assert Finished-shaped output: a decorated STL
-    /// exists, is manifold, placed at least one piece of EACH kind (via
-    /// SCATTER_DONE's placed count and a --debug per-piece pass), and the
-    /// run is deterministic (same seed -> byte-identical export, run
-    /// twice).
+    /// authored mesh is avoided — junk meshes fake unrelated symptoms), then
+    /// exercise the LAYER STACK docs/SCATTER.md pins:
     ///
-    /// Run with: cargo test -- --ignored scatters_end_to_end_with_real_blender
+    ///   1. a 2-layer job (layer 0: generated pebbles+rocks; layer 1: a
+    ///      bundled skull Asset + generated rocks) through spawn_and_parse
+    ///      (the production path) — Finished-shaped output, manifold,
+    ///      shells == 1 + total placed, `layers` == 2 on SCATTER_DONE;
+    ///   2. determinism — the identical 2-layer job run twice exports
+    ///      byte-identical STLs;
+    ///   3. independence — layer 0's own SCATTER_PIECE positions (x/y/z/yaw/
+    ///      size/kind) are IDENTICAL whether it runs alone or as the first
+    ///      layer of the 2-layer stack, proving a later layer never perturbs
+    ///      an earlier one's placement (docs/SCATTER.md "Layers": "adding a
+    ///      rocks layer must not move where the Boneyard skulls fell").
+    ///
+    /// Run with: cargo test -- --ignored scatters_layers_independently_and_deterministically
     #[tokio::test]
     #[ignore = "requires a local Blender install and ~30s"]
-    async fn scatters_end_to_end_with_real_blender() {
+    async fn scatters_layers_independently_and_deterministically_with_real_blender() {
         let blender = crate::render::engine::detect_blender()
             .await
             .expect("Blender not found — install it or set BLENDER_BIN");
         let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/scatter_landscape.py");
 
-        let dir = std::env::temp_dir().join(format!("stlpack_scatter_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("stlpack_scatter_layers_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let landscape = dir.join("landscape.stl");
         generate_test_landscape(&blender, &dir, &landscape).await;
@@ -1210,51 +1418,68 @@ mod tests {
         let mut asset_paths = std::collections::HashMap::new();
         asset_paths.insert(asset_id.to_string(), asset_path.to_string_lossy().into_owned());
 
-        let build_job = |out_path: &Path| ScatterJob {
-            landscape_path: landscape.to_string_lossy().into_owned(),
-            out_path: out_path.to_string_lossy().into_owned(),
-            params: ScatterParams {
-                seed: 7,
-                density_per_dm2: 8.0,
-                scale: (0.85, 1.15),
-                scale_factor: 1.0,
-                sink_mm: (0.0, 0.6),
-                align_to_surface: true,
-                max_slope_deg: 55.0,
-                edge_margin_mm: 3.0,
-                pieces: vec![
-                    pebble(0.7),
-                    PieceChoice {
-                        piece: ScatterPieceSource::Asset {
-                            id: asset_id.to_string(),
-                        },
-                        weight: 0.3,
+        // Layer 0: pebbles + rocks, generous density so independence has
+        // several pieces to compare, not just one.
+        let layer_pebbles_and_rocks = ScatterParams {
+            seed: 7,
+            density_per_dm2: 8.0,
+            scale: (0.85, 1.15),
+            scale_factor: 1.0,
+            sink_mm: (0.0, 0.6),
+            align_to_surface: true,
+            max_slope_deg: 55.0,
+            edge_margin_mm: 3.0,
+            pieces: vec![pebble(0.6), rock(0.4)],
+        };
+        // Layer 1: the bundled skull + more rocks, a DIFFERENT seed and
+        // density — layers are independent passes, not clones of each other.
+        let layer_skull_and_rocks = ScatterParams {
+            seed: 42,
+            density_per_dm2: 4.0,
+            scale: (0.85, 1.15),
+            scale_factor: 1.0,
+            sink_mm: (0.0, 0.6),
+            align_to_surface: true,
+            max_slope_deg: 55.0,
+            edge_margin_mm: 3.0,
+            pieces: vec![
+                PieceChoice {
+                    piece: ScatterPieceSource::Asset {
+                        id: asset_id.to_string(),
                     },
-                ],
-            },
+                    weight: 0.5,
+                },
+                rock(0.5),
+            ],
         };
 
-        let out_path = dir.join("landscape-scattered.stl");
-        let job = build_job(&out_path);
-        let job_path = write_job_file(&dir, &job, "test-job", &asset_paths).expect("write job file");
+        // ---- 1. production path: 2-layer job through spawn_and_parse ----
+        let stacked_out = dir.join("stacked.stl");
+        let stacked_job = ScatterJob {
+            landscape_path: landscape.to_string_lossy().into_owned(),
+            out_path: stacked_out.to_string_lossy().into_owned(),
+            layers: vec![layer_pebbles_and_rocks.clone(), layer_skull_and_rocks.clone()],
+        };
+        let stacked_job_path =
+            write_job_file(&dir, &stacked_job, "stacked-job", &asset_paths).expect("write job file");
 
         let cancel_token = Notify::new();
         let mut tokens: Vec<ScatterToken> = Vec::new();
-        let result = spawn_and_parse(&blender, &script, &job_path, &cancel_token, |token| {
+        let result = spawn_and_parse(&blender, &script, &stacked_job_path, &cancel_token, |token| {
             tokens.push(token.clone());
         })
         .await;
 
         let (out, placed, manifold) = match result {
             Ok(v) => v,
-            Err((e, tail)) => panic!("scatter job failed: {e}\nstdout tail:\n{tail}"),
+            Err((e, tail)) => panic!("stacked scatter job failed: {e}\nstdout tail:\n{tail}"),
         };
 
         assert!(Path::new(&out).is_file(), "expected a scattered STL at {:?}", out);
         assert!(manifold, "scattered landscape is not manifold");
         assert!(
             placed > 0,
-            "expected at least one piece placed on a ~40x40mm plate at density 8/dm2"
+            "expected at least one piece placed across both layers"
         );
         assert!(tokens.iter().any(|t| matches!(t, ScatterToken::Started)));
         assert!(tokens.iter().any(|t| matches!(t, ScatterToken::Progress { .. })));
@@ -1265,20 +1490,18 @@ mod tests {
         );
 
         // Loose shells (docs/SCATTER.md): terrain + one shell per placed
-        // piece, so with placed > 0 pieces (mixed generated + one bundled
-        // asset kind) the exported file must carry more than the bare
-        // terrain shell. Read straight off the SCATTER_DONE token's
-        // additive `shells` field (re-measured on the round-tripped export
-        // by scatter_landscape.py's own roundtrip_check) rather than
-        // duplicating that measurement here.
-        let done_token = tokens
+        // piece ACROSS THE WHOLE STACK. Read straight off SCATTER_DONE's
+        // additive `shells`/`layers` fields (re-measured on the
+        // round-tripped export by scatter_landscape.py's own
+        // roundtrip_check) rather than duplicating that measurement here.
+        let (shells, layers_reported) = tokens
             .iter()
             .find_map(|t| match t {
-                ScatterToken::Done { shells, .. } => Some(*shells),
+                ScatterToken::Done { shells, layers, .. } => Some((*shells, *layers)),
                 _ => None,
             })
-            .flatten();
-        let shells = done_token.expect("SCATTER_DONE must report a shells count");
+            .expect("SCATTER_DONE token must be present");
+        let shells = shells.expect("SCATTER_DONE must report a shells count");
         assert!(
             shells > 1,
             "expected terrain + at least one piece shell, got {shells} shell(s)"
@@ -1286,31 +1509,86 @@ mod tests {
         assert_eq!(
             shells,
             1 + placed,
-            "shells must equal terrain (1) + placed pieces by construction"
+            "shells must equal terrain (1) + placed pieces by construction, across the whole stack"
+        );
+        assert_eq!(
+            layers_reported,
+            Some(2),
+            "SCATTER_DONE must report the 2-layer stack that actually ran"
         );
 
-        // Determinism (docs/SCATTER.md "Placement algorithm"): same
-        // landscape + seed + params must reproduce byte-identically,
-        // Asset pieces included — a real imported mesh's placement math
-        // must draw from the same fixed-order rng stream as generated
-        // pieces, not introduce its own nondeterminism (extra rng draws,
-        // scene-state leakage from the template-caching mechanism, etc).
-        let out_path_2 = dir.join("landscape-scattered-2.stl");
-        let job_2 = build_job(&out_path_2);
-        let job_path_2 =
-            write_job_file(&dir, &job_2, "test-job-2", &asset_paths).expect("write job file 2");
-        let result_2 = spawn_and_parse(&blender, &script, &job_path_2, &Notify::new(), |_| {}).await;
+        // ---- 2. determinism: the SAME 2-layer job run twice ----
+        let stacked_out_2 = dir.join("stacked-2.stl");
+        let stacked_job_2 = ScatterJob {
+            landscape_path: landscape.to_string_lossy().into_owned(),
+            out_path: stacked_out_2.to_string_lossy().into_owned(),
+            layers: vec![layer_pebbles_and_rocks.clone(), layer_skull_and_rocks.clone()],
+        };
+        let stacked_job_path_2 =
+            write_job_file(&dir, &stacked_job_2, "stacked-job-2", &asset_paths).expect("write job file 2");
+        let result_2 = spawn_and_parse(&blender, &script, &stacked_job_path_2, &Notify::new(), |_| {}).await;
         let (out_2, placed_2, _manifold_2) = match result_2 {
             Ok(v) => v,
-            Err((e, tail)) => panic!("second scatter run failed: {e}\nstdout tail:\n{tail}"),
+            Err((e, tail)) => panic!("second stacked scatter run failed: {e}\nstdout tail:\n{tail}"),
         };
-        assert_eq!(placed, placed_2, "same seed must place the same piece count");
+        assert_eq!(placed, placed_2, "same layers must place the same piece count");
         let bytes_1 = std::fs::read(&out).unwrap();
         let bytes_2 = std::fs::read(&out_2).unwrap();
         assert_eq!(
             bytes_1, bytes_2,
-            "same landscape + seed + params must export byte-identical STLs"
+            "the same layer stack must export byte-identical STLs across runs"
         );
+
+        // ---- 3. independence: layer 0 alone vs. layer 0 as part of the stack ----
+        let single_out = dir.join("single.stl");
+        let single_job = ScatterJob {
+            landscape_path: landscape.to_string_lossy().into_owned(),
+            out_path: single_out.to_string_lossy().into_owned(),
+            layers: vec![layer_pebbles_and_rocks.clone()],
+        };
+        let single_job_path =
+            write_job_file(&dir, &single_job, "single-job", &asset_paths).expect("write single job file");
+        let single_stdout = run_scatter_debug(&blender, &script, &single_job_path).await;
+        let single_pieces = scatter_piece_lines(&single_stdout);
+
+        let stacked_debug_out = dir.join("stacked-debug.stl");
+        let stacked_debug_job = ScatterJob {
+            landscape_path: landscape.to_string_lossy().into_owned(),
+            out_path: stacked_debug_out.to_string_lossy().into_owned(),
+            layers: vec![layer_pebbles_and_rocks, layer_skull_and_rocks],
+        };
+        let stacked_debug_job_path = write_job_file(&dir, &stacked_debug_job, "stacked-debug-job", &asset_paths)
+            .expect("write stacked debug job file");
+        let stacked_stdout = run_scatter_debug(&blender, &script, &stacked_debug_job_path).await;
+        let stacked_pieces = scatter_piece_lines(&stacked_stdout);
+
+        let layer0_from_single: Vec<&serde_json::Value> = single_pieces
+            .iter()
+            .filter(|p| p["layer"] == 0)
+            .collect();
+        let layer0_from_stacked: Vec<&serde_json::Value> = stacked_pieces
+            .iter()
+            .filter(|p| p["layer"] == 0)
+            .collect();
+
+        assert!(
+            !layer0_from_single.is_empty(),
+            "expected layer 0 to place at least one piece on a ~40x40mm plate at density 8/dm2"
+        );
+        assert_eq!(
+            layer0_from_single.len(),
+            layer0_from_stacked.len(),
+            "layer 0's placed-piece COUNT must not change when layer 1 is added"
+        );
+        for (alone, stacked) in layer0_from_single.iter().zip(layer0_from_stacked.iter()) {
+            for field in ["kind", "x_mm", "y_mm", "z_mm", "yaw_deg", "size_mm", "floor_mm", "embed_depth_mm", "aligned_deg"] {
+                assert_eq!(
+                    alone[field], stacked[field],
+                    "layer 0's piece field {field:?} moved when layer 1 was added \
+                     (alone: {alone}, stacked: {stacked}) — independence is broken"
+                );
+            }
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }
