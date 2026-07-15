@@ -109,21 +109,30 @@ pub struct ScatterAsset {
     pub path: String,
     pub footprint_mm: f64,
     pub height_mm: f64,
+    /// Additive to the pinned shape (docs/SCATTER.md "Scale anchor": "the
+    /// user-library scan applies the same lens: it warns (not blocks) when
+    /// a piece's footprint suggests it's a mini, not debris"). `None` for
+    /// every bundled asset (curated and normalized, never warns) and for a
+    /// user-library piece under the heuristic; `Some(message)` is advisory
+    /// only — the piece is still usable, never dropped from the returned
+    /// list on this account alone. See
+    /// `scatter_assets::MINI_FOOTPRINT_WARNING_MM` for the exact threshold
+    /// and reasoning, and `scatter_assets::unparseable_stl_warning` for the
+    /// other case this field carries (a file that failed to parse at all).
+    pub warning: Option<String>,
 }
 
-/// Bundled scatter asset set — S4 work (docs/SCATTER.md "Execution phases":
-/// curation from the scout list, manifold vetting, embedding, credits
-/// panel). Returns an empty list for now so the frontend's piece picker can
-/// wire up against the real command/return shape today (generated kinds
-/// still work standalone) and light up automatically once curated assets
-/// land, with no signature change needed.
-///
-/// `scan_scatter_library` (the user-library counterpart) is ALSO S4 and is
-/// deliberately not stubbed here at all — see docs/SCATTER.md's phase list.
+/// Bundled scatter asset set (docs/SCATTER.md "Bundled assets"): S4a
+/// curation output — see `scatter_assets::BUNDLED_ASSETS` for the pinned
+/// id/label/footprint/height/license table this reads, and its own doc
+/// comment for how that table is kept from drifting off the curated
+/// manifest.json shipped alongside the STLs. Each asset is materialized
+/// lazily (same as the embedded scripts) on every call, so a stale
+/// materialized copy can never survive a rebuild.
 #[tauri::command]
 #[specta::specta]
-pub fn get_scatter_assets() -> Vec<ScatterAsset> {
-    Vec::new()
+pub fn get_scatter_assets(app_handle: AppHandle) -> Result<Vec<ScatterAsset>, AppError> {
+    crate::basecutter::scatter_assets::get_bundled_assets(&app_handle)
 }
 
 // ----------------------------------------------------------------- params
@@ -197,7 +206,18 @@ pub struct ScatterJob {
 pub enum ScatterToken {
     Started,
     Progress { placed: u32, total: u32 },
-    Done { out: String, placed: u32, manifold: bool },
+    Done {
+        out: String,
+        placed: u32,
+        manifold: bool,
+        /// Additive (docs/SCATTER.md "events"): re-measured loose-shell
+        /// count on the round-tripped export (terrain + one per placed
+        /// piece, by construction — see scatter_landscape.py's
+        /// `roundtrip_check`). `#[serde(default)]`-equivalent here via
+        /// `Option`: a payload that omits the field (an older script
+        /// build) still parses, it just carries no shell count.
+        shells: Option<u32>,
+    },
     Failed { reason: String },
 }
 
@@ -212,6 +232,8 @@ pub fn parse_scatter_token(line: &str) -> Option<ScatterToken> {
         out: String,
         placed: u32,
         manifold: bool,
+        #[serde(default)]
+        shells: Option<u32>,
     }
     #[derive(Deserialize)]
     struct FailedPayload {
@@ -235,6 +257,7 @@ pub fn parse_scatter_token(line: &str) -> Option<ScatterToken> {
             out: p.out,
             placed: p.placed,
             manifold: p.manifold,
+            shells: p.shells,
         });
     }
     if let Some(json) = line.strip_prefix("SCATTER_FAILED ") {
@@ -246,13 +269,81 @@ pub fn parse_scatter_token(line: &str) -> Option<ScatterToken> {
 
 // ---------------------------------------------------------------- job file
 
+/// Every unique asset id referenced by `pieces`' `Asset { id }` entries, in
+/// first-seen order (a `HashSet` would work too, but a stable order keeps
+/// the injected `asset_paths` JSON and any log output deterministic).
+fn asset_ids(pieces: &[PieceChoice]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut ids = Vec::new();
+    for choice in pieces {
+        if let ScatterPieceSource::Asset { id } = &choice.piece {
+            if seen.insert(id.clone()) {
+                ids.push(id.clone());
+            }
+        }
+    }
+    ids
+}
+
+/// Resolve every `Asset` piece referenced by `job.params.pieces` to an
+/// absolute path (bundled set first, then the user library — see
+/// `scatter_assets::resolve_asset_path`), returning the `id -> path` map
+/// `write_job_file` injects into the wire JSON. Fails BEFORE any Blender
+/// work if an id can't be resolved (docs/SCATTER.md's Asset-source
+/// validation pin: "unknown id or missing file -> clear SCATTER_FAILED
+/// before any Blender work" — this is the Rust-side half of that guard;
+/// scatter_landscape.py re-checks `asset_paths` itself as defense in depth
+/// against a hand-edited or stale job file).
+pub fn resolve_asset_paths(
+    app_handle: &AppHandle,
+    pieces: &[PieceChoice],
+) -> Result<std::collections::HashMap<String, String>, AppError> {
+    asset_ids(pieces)
+        .into_iter()
+        .map(|id| {
+            let path = crate::basecutter::scatter_assets::resolve_asset_path(app_handle, &id)?;
+            Ok((id, path.to_string_lossy().into_owned()))
+        })
+        .collect()
+}
+
+/// Serialize `job` and inject the resolved `asset_paths` map under an
+/// `"asset_paths"` key — same "Rust stays the single owner of derived
+/// data, the script never guesses" shape as `job::write_job_file`'s "cut"
+/// footprint injection, but at the top level (one map for the whole job)
+/// rather than per-placement, since asset identity — unlike a cut footprint
+/// — isn't a per-placement-derived value, just a lookup shared across every
+/// placement that references the same id.
+fn job_json_with_asset_paths(
+    job: &ScatterJob,
+    asset_paths: &std::collections::HashMap<String, String>,
+) -> Result<serde_json::Value, AppError> {
+    let mut value = serde_json::to_value(job)
+        .map_err(|e| AppError::JsonError(format!("Failed to encode scatter job: {}", e)))?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "asset_paths".to_string(),
+            serde_json::to_value(asset_paths)
+                .map_err(|e| AppError::JsonError(format!("Failed to encode asset_paths: {}", e)))?,
+        );
+    }
+    Ok(value)
+}
+
 /// Write the job JSON into `dir` (the materialized script's directory in
 /// production; a scratch dir in tests) so Blender can read it via `--job`.
-/// Unlike `job::write_job_file`, `ScatterJob` serializes directly to the
-/// wire shape scatter_landscape.py expects — no derived-field injection.
-pub fn write_job_file(dir: &Path, job: &ScatterJob, job_id: &str) -> Result<PathBuf, AppError> {
+/// `asset_paths` is the already-resolved `id -> path` map (see
+/// `resolve_asset_paths`) — pass an empty map for a job with no `Asset`
+/// pieces, exactly what every Generated-only test below does.
+pub fn write_job_file(
+    dir: &Path,
+    job: &ScatterJob,
+    job_id: &str,
+    asset_paths: &std::collections::HashMap<String, String>,
+) -> Result<PathBuf, AppError> {
     let path = dir.join(format!("scatter_job_{job_id}.json"));
-    let json = serde_json::to_string_pretty(job)
+    let value = job_json_with_asset_paths(job, asset_paths)?;
+    let json = serde_json::to_string_pretty(&value)
         .map_err(|e| AppError::JsonError(format!("Failed to encode scatter job: {}", e)))?;
     std::fs::write(&path, json)
         .map_err(|e| AppError::IoError(format!("Failed to write scatter job file: {}", e)))?;
@@ -318,7 +409,7 @@ where
     let run_result = crate::render::engine::run_blender_lines(cmd, Some(cancel_token), |line| {
         if let Some(token) = parse_scatter_token(line) {
             match &token {
-                ScatterToken::Done { out, placed, manifold } => {
+                ScatterToken::Done { out, placed, manifold, .. } => {
                     done = Some((out.clone(), *placed, *manifold))
                 }
                 ScatterToken::Failed { reason } => failure_reason = Some(reason.clone()),
@@ -568,7 +659,25 @@ async fn run_scatter_job(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let result = match write_job_file(&script_dir, &job, &job_id) {
+    // Resolved once, up front — a failure here (unknown id, missing user-
+    // library file) is reported the same way any other pre-flight failure
+    // is, before write_job_file or Blender ever runs.
+    let asset_paths = match resolve_asset_paths(&app_handle, &job.params.pieces) {
+        Ok(paths) => paths,
+        Err(e) => {
+            release_active_job(&ACTIVE_SCATTER, &job_id);
+            ScatterStatus::Failed(ScatterFailedStatus {
+                job_id,
+                message: e.to_string(),
+                stdout_tail: String::new(),
+            })
+            .emit(&app_handle)
+            .ok();
+            return;
+        }
+    };
+
+    let result = match write_job_file(&script_dir, &job, &job_id, &asset_paths) {
         Ok(job_path) => {
             let app_handle_ref = &app_handle;
             let job_id_ref = &job_id;
@@ -751,6 +860,7 @@ mod tests {
             Some(ScatterToken::Progress { placed: 3, total: 10 })
         );
         assert_eq!(
+            // No "shells" key — an older-script-shaped payload must still parse.
             parse_scatter_token(
                 r#"SCATTER_DONE {"out": "/l-scattered.stl", "placed": 10, "manifold": true}"#
             ),
@@ -758,6 +868,19 @@ mod tests {
                 out: "/l-scattered.stl".to_string(),
                 placed: 10,
                 manifold: true,
+                shells: None,
+            })
+        );
+        assert_eq!(
+            parse_scatter_token(
+                r#"SCATTER_DONE {"out": "/l.stl", "placed": 5, "manifold": true, "shells": 6,
+                   "non_manifold_edges": 0, "total_edges": 900}"#
+            ),
+            Some(ScatterToken::Done {
+                out: "/l.stl".to_string(),
+                placed: 5,
+                manifold: true,
+                shells: Some(6),
             })
         );
         assert_eq!(
@@ -831,13 +954,77 @@ mod tests {
             out_path: "/out/l-scattered.stl".to_string(),
             params: valid_params(),
         };
-        let path = write_job_file(&dir, &job, "abc123").unwrap();
+        let path = write_job_file(&dir, &job, "abc123", &std::collections::HashMap::new()).unwrap();
         assert!(path.is_file());
         let contents = std::fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
         assert_eq!(value["landscape_path"], "/l.stl");
         assert_eq!(value["out_path"], "/out/l-scattered.stl");
+        assert_eq!(value["asset_paths"], serde_json::json!({}));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Pins the `asset_paths` wire shape the task calls for: a top-level
+    /// `{"id": "path", ...}` map injected alongside `landscape_path` /
+    /// `out_path` / `params`, exactly what scatter_landscape.py's
+    /// `job.get("asset_paths", {})` reads. Mirrors
+    /// `job::wire_json_carries_the_derived_cut_footprint`'s pinning style.
+    #[test]
+    fn write_job_file_injects_asset_paths_at_the_top_level() {
+        let dir = std::env::temp_dir().join(format!("stlpack_scatter_assetpaths_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut params = valid_params();
+        params.pieces.push(PieceChoice {
+            piece: ScatterPieceSource::Asset {
+                id: "skull-hesperocyon".to_string(),
+            },
+            weight: 0.3,
+        });
+        let job = ScatterJob {
+            landscape_path: "/l.stl".to_string(),
+            out_path: "/out/l-scattered.stl".to_string(),
+            params,
+        };
+        let mut asset_paths = std::collections::HashMap::new();
+        asset_paths.insert(
+            "skull-hesperocyon".to_string(),
+            "/materialized/scatter/skull-hesperocyon.stl".to_string(),
+        );
+
+        let path = write_job_file(&dir, &job, "assetpaths123", &asset_paths).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(
+            value["asset_paths"]["skull-hesperocyon"],
+            "/materialized/scatter/skull-hesperocyon.stl"
+        );
+        // The frontend-facing ScatterJob type itself must not gain an
+        // "asset_paths" field — same non-pollution rule job.rs's own test
+        // pins for "cut".
+        let plain = serde_json::to_value(&job).unwrap();
+        assert!(plain.get("asset_paths").is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn asset_ids_collects_unique_ids_in_first_seen_order() {
+        let pieces = vec![
+            pebble(1.0),
+            PieceChoice {
+                piece: ScatterPieceSource::Asset { id: "b".to_string() },
+                weight: 1.0,
+            },
+            PieceChoice {
+                piece: ScatterPieceSource::Asset { id: "a".to_string() },
+                weight: 1.0,
+            },
+            PieceChoice {
+                piece: ScatterPieceSource::Asset { id: "b".to_string() },
+                weight: 1.0,
+            },
+        ];
+        assert_eq!(asset_ids(&pieces), vec!["b".to_string(), "a".to_string()]);
     }
 
     // --------------------------------------------------------- validation --
@@ -971,19 +1158,31 @@ mod tests {
 
     // --------------------------------------------------------------- misc --
 
-    #[test]
-    fn get_scatter_assets_returns_empty_until_s4() {
-        assert!(get_scatter_assets().is_empty());
-    }
+    // get_scatter_assets (and get_bundled_assets/resolve_asset_path's
+    // bundled branch) all need a real `AppHandle` to materialize bytes —
+    // same "AppHandle-dependent wrapper stays untested at the unit level"
+    // split as materialize_render_script/materialize_scatter_script (see
+    // this file's and engine.rs's doc comments). The BUNDLED_ASSETS table
+    // it serves IS unit-tested directly, exhaustively, in
+    // scatter_assets.rs's manifest-drift tests; the materialization itself
+    // is exercised for real by the ignored end-to-end test below.
 
     // ------------------------------------------------------- integration --
 
     /// End-to-end: generate a small watertight landscape with Blender itself
     /// (see basecutter::job's identical helper for why an imported/hand-
     /// authored mesh is avoided — junk meshes fake unrelated symptoms), run
-    /// a scatter job through spawn_and_parse (NOT the tauri command layer),
-    /// and assert Finished-shaped output: a decorated STL exists, is
-    /// manifold, and placed at least one piece.
+    /// a scatter job mixing ONE bundled Asset piece (a real curated skull,
+    /// its bytes taken straight from BUNDLED_ASSETS via the test-only
+    /// accessor rather than via a Tauri AppHandle — see
+    /// `scatter_assets::resolve_asset_path`'s doc comment for why the
+    /// bundled-materialization path itself isn't unit-testable without one)
+    /// with generated pebbles, through spawn_and_parse (NOT the tauri
+    /// command layer), and assert Finished-shaped output: a decorated STL
+    /// exists, is manifold, placed at least one piece of EACH kind (via
+    /// SCATTER_DONE's placed count and a --debug per-piece pass), and the
+    /// run is deterministic (same seed -> byte-identical export, run
+    /// twice).
     ///
     /// Run with: cargo test -- --ignored scatters_end_to_end_with_real_blender
     #[tokio::test]
@@ -1000,8 +1199,18 @@ mod tests {
         generate_test_landscape(&blender, &dir, &landscape).await;
         assert!(landscape.is_file(), "landscape generation failed");
 
-        let out_path = dir.join("landscape-scattered.stl");
-        let job = ScatterJob {
+        // The same bytes get_scatter_assets/resolve_asset_path would
+        // materialize for real — written directly here since this test has
+        // no Tauri AppHandle to materialize through.
+        let asset_id = "skull-hesperocyon";
+        let asset_bytes = crate::basecutter::scatter_assets::bundled_asset_bytes_for_test(asset_id)
+            .expect("skull-hesperocyon is in BUNDLED_ASSETS");
+        let asset_path = dir.join(format!("{asset_id}.stl"));
+        std::fs::write(&asset_path, asset_bytes).unwrap();
+        let mut asset_paths = std::collections::HashMap::new();
+        asset_paths.insert(asset_id.to_string(), asset_path.to_string_lossy().into_owned());
+
+        let build_job = |out_path: &Path| ScatterJob {
             landscape_path: landscape.to_string_lossy().into_owned(),
             out_path: out_path.to_string_lossy().into_owned(),
             params: ScatterParams {
@@ -1013,10 +1222,21 @@ mod tests {
                 align_to_surface: true,
                 max_slope_deg: 55.0,
                 edge_margin_mm: 3.0,
-                pieces: vec![pebble(1.0)],
+                pieces: vec![
+                    pebble(0.7),
+                    PieceChoice {
+                        piece: ScatterPieceSource::Asset {
+                            id: asset_id.to_string(),
+                        },
+                        weight: 0.3,
+                    },
+                ],
             },
         };
-        let job_path = write_job_file(&dir, &job, "test-job").expect("write job file");
+
+        let out_path = dir.join("landscape-scattered.stl");
+        let job = build_job(&out_path);
+        let job_path = write_job_file(&dir, &job, "test-job", &asset_paths).expect("write job file");
 
         let cancel_token = Notify::new();
         let mut tokens: Vec<ScatterToken> = Vec::new();
@@ -1042,6 +1262,54 @@ mod tests {
             matches!(tokens.last(), Some(ScatterToken::Done { .. })),
             "expected the token sequence to end with SCATTER_DONE, got: {:?}",
             tokens
+        );
+
+        // Loose shells (docs/SCATTER.md): terrain + one shell per placed
+        // piece, so with placed > 0 pieces (mixed generated + one bundled
+        // asset kind) the exported file must carry more than the bare
+        // terrain shell. Read straight off the SCATTER_DONE token's
+        // additive `shells` field (re-measured on the round-tripped export
+        // by scatter_landscape.py's own roundtrip_check) rather than
+        // duplicating that measurement here.
+        let done_token = tokens
+            .iter()
+            .find_map(|t| match t {
+                ScatterToken::Done { shells, .. } => Some(*shells),
+                _ => None,
+            })
+            .flatten();
+        let shells = done_token.expect("SCATTER_DONE must report a shells count");
+        assert!(
+            shells > 1,
+            "expected terrain + at least one piece shell, got {shells} shell(s)"
+        );
+        assert_eq!(
+            shells,
+            1 + placed,
+            "shells must equal terrain (1) + placed pieces by construction"
+        );
+
+        // Determinism (docs/SCATTER.md "Placement algorithm"): same
+        // landscape + seed + params must reproduce byte-identically,
+        // Asset pieces included — a real imported mesh's placement math
+        // must draw from the same fixed-order rng stream as generated
+        // pieces, not introduce its own nondeterminism (extra rng draws,
+        // scene-state leakage from the template-caching mechanism, etc).
+        let out_path_2 = dir.join("landscape-scattered-2.stl");
+        let job_2 = build_job(&out_path_2);
+        let job_path_2 =
+            write_job_file(&dir, &job_2, "test-job-2", &asset_paths).expect("write job file 2");
+        let result_2 = spawn_and_parse(&blender, &script, &job_path_2, &Notify::new(), |_| {}).await;
+        let (out_2, placed_2, _manifold_2) = match result_2 {
+            Ok(v) => v,
+            Err((e, tail)) => panic!("second scatter run failed: {e}\nstdout tail:\n{tail}"),
+        };
+        assert_eq!(placed, placed_2, "same seed must place the same piece count");
+        let bytes_1 = std::fs::read(&out).unwrap();
+        let bytes_2 = std::fs::read(&out_2).unwrap();
+        assert_eq!(
+            bytes_1, bytes_2,
+            "same landscape + seed + params must export byte-identical STLs"
         );
 
         std::fs::remove_dir_all(&dir).ok();

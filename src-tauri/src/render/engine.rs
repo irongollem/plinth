@@ -19,28 +19,61 @@ use tokio::sync::Notify;
 /// script edits silently kept rendering with a stale copy during dev.
 const RENDER_SCRIPT: &str = include_str!("../../resources/render_mini.py");
 
-/// Write an embedded Blender script where Blender can read it. Always
-/// overwrites, so the file on disk can never drift from the built app — the
-/// trap this avoids: as a bundled resource the script was only re-copied
-/// next to the binary when the Rust code rebuilt, so pure script edits
-/// silently kept running a stale copy during dev. Shared by every embedded
-/// script (render_mini.py, base_cut.py, ...) so the fix lives in one place.
-pub(crate) fn materialize_embedded_script(
+/// Write embedded bytes where Blender (or anything else) can read them.
+/// Always overwrites, so the file on disk can never drift from the built
+/// app — the trap this avoids: as a bundled resource a file was only
+/// re-copied next to the binary when the Rust code rebuilt, so a pure
+/// resource edit silently kept running a stale copy during dev. Shared by
+/// every materialize_embedded_* wrapper below, and takes bytes rather than
+/// `&str` so it doubles as the binary-asset path (scatter's bundled STLs)
+/// without a second copy of the write/overwrite logic. `file_name` may
+/// itself contain subdirectory components (e.g. "scatter/skull.stl") — the
+/// full parent chain under the app dir is created, not just the app dir
+/// itself, so callers can namespace their materialized files without each
+/// hand-rolling a create_dir_all.
+fn materialize_embedded_bytes(
     app_handle: &AppHandle,
     file_name: &str,
-    contents: &str,
+    contents: &[u8],
 ) -> Result<PathBuf, AppError> {
     let dir = app_handle
         .path()
         .app_cache_dir()
         .or_else(|_| app_handle.path().app_data_dir())
         .map_err(|e| AppError::ConfigError(format!("No writable app dir: {}", e)))?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| AppError::IoError(format!("Failed to create app dir: {}", e)))?;
     let path = dir.join(file_name);
+    let parent = path.parent().unwrap_or(&dir);
+    std::fs::create_dir_all(parent)
+        .map_err(|e| AppError::IoError(format!("Failed to create app dir: {}", e)))?;
     std::fs::write(&path, contents)
         .map_err(|e| AppError::IoError(format!("Failed to write {}: {}", file_name, e)))?;
     Ok(path)
+}
+
+/// Write an embedded Blender script where Blender can read it — the `&str`
+/// (text) wrapper over `materialize_embedded_bytes`. See that function's
+/// doc comment for the always-overwrite rationale, shared by every embedded
+/// script (render_mini.py, base_cut.py, scatter_landscape.py, ...).
+pub(crate) fn materialize_embedded_script(
+    app_handle: &AppHandle,
+    file_name: &str,
+    contents: &str,
+) -> Result<PathBuf, AppError> {
+    materialize_embedded_bytes(app_handle, file_name, contents.as_bytes())
+}
+
+/// Write an embedded binary asset (a bundled scatter STL, its manifest,
+/// credits file, ...) where it can be read from an absolute path — the
+/// binary-asset sibling of `materialize_embedded_script`, see its doc
+/// comment. Public within the crate: `basecutter::scatter_assets` is the
+/// first consumer, and any future embedded binary resource reuses this
+/// instead of duplicating the write/overwrite logic a third time.
+pub(crate) fn materialize_embedded_asset(
+    app_handle: &AppHandle,
+    file_name: &str,
+    contents: &[u8],
+) -> Result<PathBuf, AppError> {
+    materialize_embedded_bytes(app_handle, file_name, contents)
 }
 
 /// Write the embedded render script where Blender can read it. Always

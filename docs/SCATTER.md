@@ -46,7 +46,12 @@ start_scatter(job: ScatterJob) -> Result<String /* job_id */>
 cancel_scatter(job_id) -> Result<()>
 
 ScatterAsset  = { id, label, source: "bundled" | "user", path,
-                  footprint_mm, height_mm }         // dims measured at scan
+                  footprint_mm, height_mm,          // dims measured at scan
+                  warning: Option<String> }         // additive; advisory
+                                                    // only, never drops the
+                                                    // piece — see "Scale
+                                                    // anchor" for the exact
+                                                    // heuristic
 PieceChoice   = { piece: Generated { kind: "pebble" | "rock" }
                         | Asset { id }, weight: f64 }
 ScatterParams = { seed: u32,
@@ -63,7 +68,18 @@ ScatterParams = { seed: u32,
                   max_slope_deg: f64,               // skip cliff walls
                   edge_margin_mm: f64,
                   pieces: Vec<PieceChoice> }
-ScatterJob    = { landscape_path, out_path, params }
+ScatterJob    = { landscape_path, out_path, params } // the frontend-facing
+                                                    // shape; the wire JSON
+                                                    // scatter_landscape.py
+                                                    // actually reads ALSO
+                                                    // carries a Rust-derived
+                                                    // "asset_paths": {id:
+                                                    // path} map, injected at
+                                                    // job-write time the
+                                                    // same way base_cut.py's
+                                                    // "cut" footprint is —
+                                                    // ScatterJob itself never
+                                                    // grows this field
 // events: ScatterStatus = Started | Progress { placed, total }
 //   | Finished { out } | Failed | Cancelled — user cancel is Cancelled.
 // SCATTER_DONE carries additive honesty fields: {"manifold": bool,
@@ -106,7 +122,14 @@ global `scale_factor` (default 1.0) lets the exceptions — 15 mm gaming,
 54 mm display plinths — scale the whole pass without retuning per piece.
 The user-library scan applies the same lens: it warns (not blocks) when a
 piece's footprint suggests it's a mini, not debris, at the current scale
-factor.
+factor — the exact gate (`scatter_assets::MINI_FOOTPRINT_WARNING_MM`) is
+**footprint > 40mm at scale 1**: comfortably above the bundled set's own
+largest legitimate piece (the whale-mandible statement piece at 16mm) and
+comfortably below a typical 28-32mm-heroic miniature's own footprint (a
+round base alone starts at 25mm across), so neither a big rock nor a
+stag skull with antlers false-positives while an actual mini dropped in the
+folder reliably clears it. Advisory only: a warned piece still scans in and
+is still usable, `ScatterAsset.warning` just tells the picker why.
 
 ## Bundled assets
 

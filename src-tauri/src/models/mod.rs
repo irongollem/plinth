@@ -75,6 +75,13 @@ pub struct Settings {
     /// known_designers. serde(default): an older store has no such key.
     #[serde(default)]
     pub magnet_inventory: Option<Vec<MagnetSpec>>,
+    /// The user's scatter asset library folder (docs/SCATTER.md "User
+    /// library"): a flat folder of `*.stl` pieces `scan_scatter_library`
+    /// reads non-recursively. None = no user library configured yet, the
+    /// piece picker only offers generated + bundled sources.
+    /// serde(default): an older store has no such key.
+    #[serde(default)]
+    pub scatter_library_dir: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

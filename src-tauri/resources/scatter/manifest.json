@@ -1,0 +1,176 @@
+{
+  "note": "Plinth bundled scatter-asset set — phase S4a curation output. See docs/SCATTER.md (\"Bundled assets\", \"Scale anchor: 28-32 mm heroic\") and docs/SCATTER-ASSETS.md (\"Curation verdict\", \"Scan-quality pass result\") in the stl-pack repo for the admission gate this set was built against. All pieces: CC0, single manifold shell, binary STL, <=15k tris, normalized Z-up/centered-XY/floored-Z0 in Blender 5.1.2.",
+  "assets": [
+    {
+      "id": "skull-hesperocyon",
+      "label": "Hesperocyon skull",
+      "source_file": "skull-hesperocyon.stl",
+      "origin": {
+        "collection": "Smithsonian Open Access, NMNH Paleobiology",
+        "specimen": "Hesperocyon sp. (extinct dawn-dog canid)",
+        "record_url": "http://n2t.net/ark:/65665/3c6da70bf-20aa-4906-9593-6b7e7f162f9c",
+        "source_variant": "Low resolution 3D mesh, obj, scale in m (150k tris)"
+      },
+      "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
+      "canonical": { "footprint_mm": { "x": 7.0, "y": 2.776 }, "height_mm": 2.704 },
+      "size_reasoning": "Small predator canid skull; picked 7mm (mid-low end of the 5-9mm skull band) to read as a modest beast skull beside 28mm scale.",
+      "tris": 15000,
+      "tris_before_decimate": 150000,
+      "byte_size": 750084,
+      "manifold": true,
+      "voxel_remesh_used": false
+    },
+    {
+      "id": "skull-pseudocynodictis",
+      "label": "Pseudocynodictis skull",
+      "source_file": "skull-pseudocynodictis.stl",
+      "origin": {
+        "collection": "Smithsonian Open Access, NMNH Paleobiology",
+        "specimen": "Pseudocynodictis sp. (extinct canid)",
+        "record_url": "http://n2t.net/ark:/65665/39df7f8a3-b7fe-40de-91f0-fa361dca8173",
+        "source_variant": "Low resolution 3D mesh, obj, scale in m (150k tris)"
+      },
+      "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
+      "canonical": { "footprint_mm": { "x": 6.0, "y": 3.131 }, "height_mm": 2.284 },
+      "size_reasoning": "Smallest of the real-scan skulls (raw specimen 87mm vs Hesperocyon's 96mm); picked 6mm, the low end of the 5-9mm band.",
+      "tris": 15000,
+      "tris_before_decimate": 150000,
+      "byte_size": 750084,
+      "manifold": true,
+      "voxel_remesh_used": false
+    },
+    {
+      "id": "skull-leptophoca-seal",
+      "label": "Leptophoca seal skull",
+      "source_file": "skull-leptophoca-seal.stl",
+      "origin": {
+        "collection": "Smithsonian Open Access, NMNH Paleobiology",
+        "specimen": "Leptophoca lenis (extinct seal)",
+        "record_url": "http://n2t.net/ark:/65665/3741ffec8-61d7-4af4-af46-d681d2c5a871",
+        "source_variant": "Low resolution 3D mesh, obj, scale in m (150k tris)"
+      },
+      "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
+      "canonical": { "footprint_mm": { "x": 8.0, "y": 6.535 }, "height_mm": 4.411 },
+      "size_reasoning": "Largest raw skull length in the set after the deer (171mm) and a heavier-boned predator silhouette; picked 8mm, upper-mid of the 5-9mm band.",
+      "tris": 15000,
+      "tris_before_decimate": 150000,
+      "byte_size": 750084,
+      "manifold": true,
+      "voxel_remesh_used": false
+    },
+    {
+      "id": "skull-deer",
+      "label": "White-tailed deer skull",
+      "source_file": "skull-deer.stl",
+      "origin": {
+        "collection": "Smithsonian Open Access, NMNH Education & Outreach",
+        "specimen": "White-tailed deer (Odocoileus virginianus) skull",
+        "record_url": "http://n2t.net/ark:/65665/3c5df1823-689c-44bd-8ca5-4c748c234ea2",
+        "source_variant": "Medium resolution 3D mesh, obj, scale in m (100k tris)"
+      },
+      "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
+      "canonical": { "footprint_mm": { "x": 4.61, "y": 9.0 }, "height_mm": 3.846 },
+      "size_reasoning": "Longest raw skull in the set (266mm) and the only herbivore/game-animal read; picked 9mm, the top of the 5-9mm band, so it reads as the largest 'ordinary' skull short of the boomerang-head exception.",
+      "tris": 15000,
+      "tris_before_decimate": 100000,
+      "byte_size": 750084,
+      "manifold": true,
+      "voxel_remesh_used": false
+    },
+    {
+      "id": "skull-diplocaulus",
+      "label": "Diplocaulus (boomerang-head) skull",
+      "source_file": "skull-diplocaulus.stl",
+      "origin": {
+        "collection": "Smithsonian Open Access, NMNH Paleobiology",
+        "specimen": "Diplocaulus magnicornis (extinct lepospondyl amphibian)",
+        "record_url": "http://n2t.net/ark:/65665/37c497201-5f67-4f76-8459-39ad82a45682",
+        "source_variant": "Low resolution 3D mesh, obj, scale in m (150k tris)"
+      },
+      "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
+      "canonical": { "footprint_mm": { "x": 11.0, "y": 7.638 }, "height_mm": 1.362 },
+      "size_reasoning": "Doc-flagged exception: the exotic flat 'boomerang' horn silhouette is unrecognizable at normal skull scale, so it earns the ~10-12mm allowance; picked 11mm.",
+      "tris": 15000,
+      "tris_before_decimate": 150000,
+      "byte_size": 750084,
+      "manifold": true,
+      "voxel_remesh_used": false
+    },
+    {
+      "id": "bone-deer-mandible",
+      "label": "Deer mandible",
+      "source_file": "bone-deer-mandible.stl",
+      "origin": {
+        "collection": "Smithsonian Open Access, NMNH Education & Outreach",
+        "specimen": "White-tailed deer (Odocoileus virginianus) mandible/jawbone",
+        "record_url": "http://n2t.net/ark:/65665/3c5df1823-689c-44bd-8ca5-4c748c234ea2",
+        "source_variant": "Medium resolution 3D mesh, obj, scale in m (100k tris)"
+      },
+      "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
+      "canonical": { "footprint_mm": { "x": 3.5, "y": 9.0 }, "height_mm": 4.82 },
+      "size_reasoning": "Mid-large loose bone; picked 9mm (mid-high end of the 6-12mm bone band) to read clearly as a full jaw with both rami and tooth rows.",
+      "tris": 15000,
+      "tris_before_decimate": 99996,
+      "byte_size": 750084,
+      "manifold": true,
+      "voxel_remesh_used": false
+    },
+    {
+      "id": "bone-deer-forelimb",
+      "label": "Deer forelimb bone",
+      "source_file": "bone-deer-forelimb.stl",
+      "origin": {
+        "collection": "Smithsonian Open Access, NMNH Education & Outreach",
+        "specimen": "White-tailed deer (Odocoileus virginianus) forelimb bone",
+        "record_url": "http://n2t.net/ark:/65665/3c5df1823-689c-44bd-8ca5-4c748c234ea2",
+        "source_variant": "Medium resolution 3D mesh, obj, scale in m (100k tris)"
+      },
+      "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
+      "canonical": { "footprint_mm": { "x": 3.052, "y": 12.0 }, "height_mm": 1.284 },
+      "size_reasoning": "Longest real specimen in the whole set (676mm raw); picked 12mm, the top of the 6-12mm bone band, to preserve its elongated long-bone read.",
+      "tris": 15000,
+      "tris_before_decimate": 99992,
+      "byte_size": 750084,
+      "manifold": true,
+      "voxel_remesh_used": false
+    },
+    {
+      "id": "bone-pilot-whale-mandible",
+      "label": "Pilot whale mandible",
+      "source_file": "bone-pilot-whale-mandible.stl",
+      "origin": {
+        "collection": "Smithsonian Open Access, NMNH Vertebrate Zoology, Mammals Division",
+        "specimen": "Globicephala melas melas (pilot whale) mandible",
+        "record_url": "http://n2t.net/ark:/65665/3dd176d5a-0c9d-4259-bdc8-ccde6b2b9fe6",
+        "source_variant": "Medium resolution 3D mesh, obj, scale in m (100k tris)"
+      },
+      "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
+      "canonical": { "footprint_mm": { "x": 11.815, "y": 16.0 }, "height_mm": 4.699 },
+      "size_reasoning": "Deliberate statement piece per the doc's whale-mandible anchor (~15-18mm); picked 16mm, well above the ordinary bone band.",
+      "tris": 15000,
+      "tris_before_decimate": 100000,
+      "byte_size": 750084,
+      "manifold": true,
+      "voxel_remesh_used": false
+    },
+    {
+      "id": "mushroom",
+      "label": "Mushroom",
+      "source_file": "mushroom.stl",
+      "origin": {
+        "collection": "OpenGameArt",
+        "author": "JeremyWoods",
+        "record_url": "https://opengameart.org/content/mushroom-3",
+        "source_variant": "Mushroom.blend, sculpted low-poly asset"
+      },
+      "license": "CC0 (as recorded in opengameart-mushroom/LICENSE.txt)",
+      "canonical": { "footprint_mm": { "x": 6.369, "y": 6.369 }, "height_mm": 6.0 },
+      "size_reasoning": "Doc anchor is 5-7mm tall; picked 6mm, the midpoint.",
+      "tris": 3100,
+      "tris_before_decimate": 3584,
+      "byte_size": 155084,
+      "manifold": true,
+      "voxel_remesh_used": false
+    }
+  ]
+}

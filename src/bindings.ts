@@ -861,18 +861,48 @@ async cancelLandscapeGeneration(jobId: string) : Promise<Result<null, AppError>>
 }
 },
 /**
- * Bundled scatter asset set — S4 work (docs/SCATTER.md "Execution phases":
- * curation from the scout list, manifold vetting, embedding, credits
- * panel). Returns an empty list for now so the frontend's piece picker can
- * wire up against the real command/return shape today (generated kinds
- * still work standalone) and light up automatically once curated assets
- * land, with no signature change needed.
- * 
- * `scan_scatter_library` (the user-library counterpart) is ALSO S4 and is
- * deliberately not stubbed here at all — see docs/SCATTER.md's phase list.
+ * Bundled scatter asset set (docs/SCATTER.md "Bundled assets"): S4a
+ * curation output — see `scatter_assets::BUNDLED_ASSETS` for the pinned
+ * id/label/footprint/height/license table this reads, and its own doc
+ * comment for how that table is kept from drifting off the curated
+ * manifest.json shipped alongside the STLs. Each asset is materialized
+ * lazily (same as the embedded scripts) on every call, so a stale
+ * materialized copy can never survive a rebuild.
  */
-async getScatterAssets() : Promise<ScatterAsset[]> {
-    return await TAURI_INVOKE("get_scatter_assets");
+async getScatterAssets() : Promise<Result<ScatterAsset[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_scatter_assets") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The curated CREDITS.md, embedded verbatim (docs/SCATTER.md "Bundled
+ * assets": "listed in an in-app credits panel + CREDITS file when
+ * attribution is owed"). Every bundled piece is CC0 (nothing legally
+ * owed), but the file records the source institutions/authors anyway —
+ * see the file itself. Exposed as its own command rather than folded into
+ * `ScatterAsset` since it's one shared document, not a per-asset field.
+ */
+async getScatterCredits() : Promise<string> {
+    return await TAURI_INVOKE("get_scatter_credits");
+},
+/**
+ * Scan `dir` (non-recursive) for `*.stl` files and measure each one's
+ * bounding box in pure Rust — no Blender (docs/SCATTER.md "User library").
+ * A file that fails to parse is not dropped from the result: it's returned
+ * with zeroed dims and a `warning` explaining why, so the UI can still
+ * list it (and the user can see WHY it's unusable) instead of a silent
+ * gap between "files in the folder" and "pieces offered".
+ */
+async scanScatterLibrary(dir: string) : Promise<Result<ScatterAsset[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("scan_scatter_library", { dir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
 async startScatter(job: ScatterJob) : Promise<Result<string, AppError>> {
     try {
@@ -1657,7 +1687,20 @@ export type ScanFailedStatus = { job_id: string; error: string }
 export type ScanProgressStatus = { job_id: string; files_indexed: number; current_dir: string }
 export type ScanStartedStatus = { job_id: string; root: string }
 export type ScanStatus = { Started: ScanStartedStatus } | { Progress: ScanProgressStatus } | { Completed: ScanCompletedStatus } | { Failed: ScanFailedStatus } | { Cancelled: ScanCancelledStatus }
-export type ScatterAsset = { id: string; label: string; source: ScatterAssetSource; path: string; footprint_mm: number; height_mm: number }
+export type ScatterAsset = { id: string; label: string; source: ScatterAssetSource; path: string; footprint_mm: number; height_mm: number; 
+/**
+ * Additive to the pinned shape (docs/SCATTER.md "Scale anchor": "the
+ * user-library scan applies the same lens: it warns (not blocks) when
+ * a piece's footprint suggests it's a mini, not debris"). `None` for
+ * every bundled asset (curated and normalized, never warns) and for a
+ * user-library piece under the heuristic; `Some(message)` is advisory
+ * only — the piece is still usable, never dropped from the returned
+ * list on this account alone. See
+ * `scatter_assets::MINI_FOOTPRINT_WARNING_MM` for the exact threshold
+ * and reasoning, and `scatter_assets::unparseable_stl_warning` for the
+ * other case this field carries (a file that failed to parse at all).
+ */
+warning: string | null }
 /**
  * Where a bundled/user-library scatter asset lives, at scan time
  * (docs/SCATTER.md "Bundled assets" / "Scale anchor"). `footprint_mm` and
@@ -1820,7 +1863,15 @@ licence_path?: string | null;
  * (see settings::default_magnet_inventory), same pattern as
  * known_designers. serde(default): an older store has no such key.
  */
-magnet_inventory?: MagnetSpec[] | null }
+magnet_inventory?: MagnetSpec[] | null; 
+/**
+ * The user's scatter asset library folder (docs/SCATTER.md "User
+ * library"): a flat folder of `*.stl` pieces `scan_scatter_library`
+ * reads non-recursively. None = no user library configured yet, the
+ * piece picker only offers generated + bundled sources.
+ * serde(default): an older store has no such key.
+ */
+scatter_library_dir?: string | null }
 export type StartedStatus = { job_id: string; total_files: number; total_size_kb: number }
 /**
  * A model as the release builder stages it and `model.json` records it.

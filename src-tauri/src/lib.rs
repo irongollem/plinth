@@ -16,6 +16,7 @@ use basecutter::generator::{
     cancel_landscape_generation, get_landscape_presets, start_landscape_generation,
 };
 use basecutter::scatter::{cancel_scatter, get_scatter_assets, start_scatter};
+use basecutter::scatter_assets::{get_scatter_credits, scan_scatter_library};
 use catalog::commands::{
     add_catalog_root, add_catalog_tag, add_group_tag, apply_normalize, assign_files_to_pose,
     batch_move_models, cancel_catalog_job, cleanup_ephemeral_files, clear_file_pose,
@@ -153,6 +154,8 @@ fn create_specta_builder() -> Builder {
             start_landscape_generation,
             cancel_landscape_generation,
             get_scatter_assets,
+            get_scatter_credits,
+            scan_scatter_library,
             start_scatter,
             cancel_scatter,
         ])

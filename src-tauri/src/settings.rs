@@ -27,6 +27,7 @@ pub(crate) static SETTINGS_CACHE: Lazy<Mutex<Settings>> = Lazy::new(|| {
         scale_reference_height_mm: None,
         licence_path: None,
         magnet_inventory: None,
+        scatter_library_dir: None,
     })
 });
 
@@ -172,6 +173,10 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         .get("licence_path")
         .and_then(|v| v.as_str().map(String::from));
 
+    let scatter_library_dir = store
+        .get("scatter_library_dir")
+        .and_then(|v| v.as_str().map(String::from));
+
     // Seed the lexicon on first load so the UI has something to show and the
     // scanner has something to match; the user's saved list wins thereafter.
     let known_designers = store
@@ -214,6 +219,7 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         scale_reference_height_mm,
         licence_path,
         magnet_inventory: Some(magnet_inventory),
+        scatter_library_dir,
     };
 
     {
@@ -337,6 +343,11 @@ pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(
         &store,
         "magnet_inventory",
         settings.magnet_inventory.as_ref().map(|v| json!(v)),
+    );
+    set_or_delete(
+        &store,
+        "scatter_library_dir",
+        settings.scatter_library_dir.as_deref().map(|v| json!(v)),
     );
 
     store.save().map_err(|e| e.to_string())?;

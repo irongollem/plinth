@@ -10,6 +10,19 @@
 # {
 #   "landscape_path": "/path/to/landscape.stl",
 #   "out_path": "/path/to/landscape-scattered.stl",
+#   "asset_paths": {"skull-hesperocyon": "/path/to/skull-hesperocyon.stl"},
+#                                    # id -> absolute STL path for every
+#                                    # {"Asset": {"id": ...}} piece referenced
+#                                    # by params.pieces below (docs/SCATTER.md
+#                                    # "Bundled assets" / basecutter::scatter's
+#                                    # resolve_asset_paths). Rust resolves
+#                                    # bundled-vs-user-library and injects this
+#                                    # map at job-write time — mirrors how
+#                                    # base_cut.py's job JSON gets a "cut"
+#                                    # footprint injected per placement; this
+#                                    # script NEVER guesses a path from an id
+#                                    # itself. Omitted/empty when no Asset
+#                                    # piece is used.
 #   "params": {
 #     "seed": 7,
 #     "density_per_dm2": 25.0,        # pieces per 100x100mm (a "dm2" here)
@@ -36,9 +49,17 @@
 # `piece` is externally tagged, one key names the source — matches Rust's
 # default serde derive (no #[serde(tag=...)]) for the PieceChoice.piece enum
 # pinned in docs/SCATTER.md: {"Generated": {"kind": "pebble"|"rock"}} or
-# {"Asset": {"id": "..."}}. Asset sources are S4 work (a curated/user-library
-# mesh); this script recognizes the shape so the job format already matches
-# the pinned interface, but FAILS GRACEFULLY on it — see validate_pieces().
+# {"Asset": {"id": "..."}}. An Asset piece resolves via asset_paths (see
+# above): the id must be a key in that map AND the path it names must exist
+# on disk, checked in validate_pieces() BEFORE any Blender work — an unknown
+# id or a missing file is a clear SCATTER_FAILED, never a guess. Once
+# resolved, an Asset piece is imported ONCE per unique id (see
+# get_asset_template) and instanced per placement with the SAME
+# yaw/scale(scale range x scale_factor)/sink-floor treatment as a generated
+# piece (see build_asset_piece) — the piece's own imported size at scale 1.0
+# IS its canonical size (every bundled asset is normalized to it at curation,
+# docs/SCATTER.md "Scale anchor"), so there is no separate CANONICAL_MM
+# lookup for asset pieces the way there is for pebble/rock.
 #
 # stdout protocol (parsed by basecutter::scatter, S2):
 #   SCATTER_START
@@ -129,6 +150,7 @@
 
 import json
 import math
+import os
 import random
 import sys
 import traceback
@@ -528,13 +550,22 @@ def clamp(x, lo, hi):
 CANONICAL_MM = {"pebble": PEBBLE_CANONICAL_MM, "rock": ROCK_CANONICAL_MM}
 
 
-def validate_pieces(pieces_json):
-    """Parse the pinned PieceChoice shape and return [(kind, weight), ...]
-    for Generated pieces only. An Asset entry is a recognized, well-formed
-    part of the pinned interface (S4 will implement it) — so it must NOT
-    look like a parse error. It fails with a clear, specific reason instead,
-    exactly the case docs/SCATTER.md's task calls out: "parse the shape but
-    fail gracefully"."""
+def validate_pieces(pieces_json, asset_paths):
+    """Parse the pinned PieceChoice shape and return
+    [((source, key), weight), ...] where `source` is "generated" (`key` is
+    the CANONICAL_MM kind, "pebble"/"rock") or "asset" (`key` is the asset
+    id) — a single uniform shape `pick_piece_kind` and the placement loop
+    both consume without caring which source a given entry is.
+
+    An Asset entry's id is resolved against `asset_paths` (the {id: path}
+    map Rust injects into the job JSON — see this module's docstring) RIGHT
+    HERE, before any Blender work: an unknown id (not a key in the map) or a
+    resolved path that doesn't exist on disk both raise a clear ValueError,
+    matching docs/SCATTER.md's Asset-source validation pin ("unknown id or
+    missing file -> clear SCATTER_FAILED before any Blender work"). The
+    script never guesses a path from an id itself — asset_paths is the only
+    source of truth, exactly as Rust intends it.
+    """
     if not pieces_json:
         raise ValueError("params.pieces is empty — nothing to scatter")
     out = []
@@ -542,14 +573,22 @@ def validate_pieces(pieces_json):
         piece = entry["piece"]
         weight = float(entry.get("weight", 1.0))
         if "Asset" in piece:
-            raise ValueError("assets not supported yet (S4)")
+            asset_id = piece["Asset"]["id"]
+            path = asset_paths.get(asset_id)
+            if path is None:
+                raise ValueError(f"unknown scatter asset id: {asset_id!r} (not in asset_paths)")
+            if not os.path.isfile(path):
+                raise ValueError(f"scatter asset {asset_id!r} file not found: {path}")
+            if weight > 0.0:
+                out.append((("asset", asset_id), weight))
+            continue
         if "Generated" not in piece:
             raise ValueError(f"unknown piece source: {list(piece.keys())}")
         kind = piece["Generated"]["kind"]
         if kind not in CANONICAL_MM:
             raise ValueError(f"unknown generated piece kind: {kind}")
         if weight > 0.0:
-            out.append((kind, weight))
+            out.append((("generated", kind), weight))
     if not out:
         raise ValueError("every piece has weight <= 0 — nothing to scatter")
     return out
@@ -676,6 +715,69 @@ def build_generated_piece(kind, rng, scale_range, scale_factor):
     return bm, size_mm, bottom_local, height_local
 
 
+class AssetTemplateCache:
+    """Imports each unique Asset id's STL ONCE (docs/SCATTER.md's Asset
+    source pin: "Script imports the STL once per unique id (cache)") and
+    hands out a fresh bmesh COPY per placement via `bm.from_mesh` — copying
+    mesh data out of the cached object's `.data`, never touching the cached
+    object itself, so N placements of the same id cost one import + N cheap
+    data copies instead of N imports. The cached import objects are kept
+    alive (never selected, never added to `piece_objects`) until
+    `cleanup()` runs at the end of the job — they must never reach
+    `join_shells`/the final export.
+    """
+
+    def __init__(self, asset_paths):
+        self.asset_paths = asset_paths
+        self._templates = {}
+
+    def get(self, asset_id):
+        obj = self._templates.get(asset_id)
+        if obj is None:
+            path = self.asset_paths[asset_id]  # presence already checked by validate_pieces
+            obj = import_landscape(path)
+            obj.name = f"__scatter_asset_template_{asset_id}"
+            self._templates[asset_id] = obj
+        return obj
+
+    def cleanup(self):
+        for obj in self._templates.values():
+            delete_object(obj)
+        self._templates.clear()
+
+
+def build_asset_piece(asset_id, template_cache, rng, scale_range, scale_factor):
+    """A fresh bmesh copy of a cached, imported Asset template — the
+    Asset-source sibling of `build_generated_piece`, returning the exact
+    same `(bm, size_mm, bottom_local, height_local)` shape so the placement
+    loop and `place_piece` treat both sources identically.
+
+    Every bundled asset is normalized ONCE at curation to its canonical
+    28-32mm-scale size (docs/SCATTER.md "Scale anchor") — the imported
+    mesh's OWN size at scale 1.0 already IS that canonical size, so unlike
+    `build_generated_piece` there is no CANONICAL_MM lookup or
+    PIECE_SIZE_JITTER here: `scale_range x scale_factor` is the only size
+    knob, applied as a uniform scale about the template's own local origin
+    (the copied bmesh's vertex coordinates are exactly the cached template's
+    — bm.from_mesh does not re-center or re-orient anything).
+    """
+    template = template_cache.get(asset_id)
+    bm = bmesh.new()
+    bm.from_mesh(template.data)
+
+    user_scale = rng.uniform(scale_range[0], scale_range[1])
+    factor = max(1e-6, user_scale * scale_factor)
+    bmesh.ops.scale(bm, vec=Vector((factor, factor, factor)), verts=bm.verts)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+    min_z = min((v.co.z for v in bm.verts), default=0.0)
+    max_z = max((v.co.z for v in bm.verts), default=0.0)
+    bottom_local = -min_z
+    height_local = max(1e-6, max_z - min_z)
+    size_mm = height_local
+    return bm, size_mm, bottom_local, height_local
+
+
 def place_piece(bm, bottom_local, hit_loc, normal, align_to_surface, final_sink, yaw):
     """Bake world placement directly into the bmesh's vertex coordinates
     (the same "mesh data is ground truth, object stays identity" convention
@@ -773,6 +875,7 @@ def scatter(job, debug):
     landscape_path = job["landscape_path"]
     out_path = job["out_path"]
     params = job["params"]
+    asset_paths = job.get("asset_paths", {})
 
     seed = int(params["seed"])
     density_per_dm2 = float(params["density_per_dm2"])
@@ -783,7 +886,11 @@ def scatter(job, debug):
     max_slope_deg = float(params.get("max_slope_deg", 55.0))
     edge_margin_mm = float(params.get("edge_margin_mm", 2.0))
 
-    pieces = validate_pieces(params["pieces"])
+    # Unknown id / missing file -> raised here, BEFORE any Blender work
+    # (docs/SCATTER.md's Asset-source validation pin) — see
+    # validate_pieces' docstring.
+    pieces = validate_pieces(params["pieces"], asset_paths)
+    template_cache = AssetTemplateCache(asset_paths)
 
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
@@ -812,11 +919,18 @@ def scatter(job, debug):
     placed = 0
     piece_objects = []
     for loc, normal in accepted:
-        kind = pick_piece_kind(rng, pieces)
+        source, key = pick_piece_kind(rng, pieces)
         yaw = rng.uniform(0.0, 2.0 * math.pi)
-        bm, size_mm, bottom_local, height_local = build_generated_piece(
-            kind, rng, (scale_lo, scale_hi), scale_factor
-        )
+        if source == "generated":
+            bm, size_mm, bottom_local, height_local = build_generated_piece(
+                key, rng, (scale_lo, scale_hi), scale_factor
+            )
+            debug_kind = key
+        else:  # "asset" — see validate_pieces/build_asset_piece
+            bm, size_mm, bottom_local, height_local = build_asset_piece(
+                key, template_cache, rng, (scale_lo, scale_hi), scale_factor
+            )
+            debug_kind = f"asset:{key}"
 
         floor_mm = max(MIN_SINK_MM, SINK_FLOOR_FRACTION * height_local)
         raw_sink = rng.uniform(sink_lo, sink_hi)
@@ -838,7 +952,7 @@ def scatter(job, debug):
                 "SCATTER_PIECE",
                 {
                     "index": placed - 1,
-                    "kind": kind,
+                    "kind": debug_kind,
                     "x_mm": round(world_origin.x, 4),
                     "y_mm": round(world_origin.y, 4),
                     "z_mm": round(world_origin.z, 4),
@@ -850,6 +964,12 @@ def scatter(job, debug):
                 },
             )
         tok("SCATTER_PROGRESS", {"placed": placed, "total": total})
+
+    # Cached Asset template objects were never selected and never entered
+    # piece_objects — join_shells/export below can't see them — but they
+    # must still be swept before the job ends (see AssetTemplateCache's
+    # docstring): a no-op when no Asset piece was ever placed.
+    template_cache.cleanup()
 
     # Terrain gets the identical per-shell cleanup every piece already got
     # (not a bulk cleanup of a unioned whole — there is no such thing any
