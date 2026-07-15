@@ -37,8 +37,8 @@ use file::commands::{
 };
 use minihoard::{
     cancel_minihoard, cancel_minihoard_download, detect_minihoard, minihoard_list,
-    minihoard_status, run_minihoard, start_minihoard_download, MinihoardDownloadStatus,
-    MinihoardStatus,
+    minihoard_object, minihoard_status, run_minihoard, start_minihoard_download,
+    MinihoardDownloadStatus, MinihoardStatus,
 };
 use models::events::{
     BaseCutStatus, BatchRenderStatus, BlenderProvisionStatus, CompressionStatus, DuplicateStatus,
@@ -151,6 +151,7 @@ fn create_specta_builder() -> Builder {
             cancel_minihoard,
             minihoard_status,
             minihoard_list,
+            minihoard_object,
             start_minihoard_download,
             cancel_minihoard_download,
             get_cutter_library,

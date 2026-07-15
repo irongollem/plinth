@@ -826,6 +826,19 @@ async minihoardList(binaryPath: string) : Promise<Result<MinihoardEntry[], Minih
 }
 },
 /**
+ * Fetch one object's detail (page url + preview image) for a row expand.
+ * Needs minihoard >= 0.4.1 (the `object` subcommand); on an older binary this
+ * fails, and the caller simply shows the row without a preview.
+ */
+async minihoardObject(binaryPath: string, id: number) : Promise<Result<MinihoardObject, MinihoardError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("minihoard_object", { binaryPath, id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Start a typed download of the given object ids. Returns a job id immediately;
  * progress arrives as `MinihoardDownloadStatus` events. One run at a time.
  */
@@ -1568,6 +1581,23 @@ export type MinihoardLine = { job_id: string; line: string;
  * chatter, stdout for the actual answers.
  */
 is_err: boolean }
+/**
+ * One object's on-demand detail (minihoard `object <id> --json`) — the bits a
+ * library row needs when expanded. Fetched lazily, one row at a time.
+ */
+export type MinihoardObject = { id: number; name: string; 
+/**
+ * The official MyMiniFactory page (open externally).
+ */
+url: string | null; 
+/**
+ * A small (~230px) preview image URL.
+ */
+thumbnail_url: string | null; 
+/**
+ * A larger (~720px) image URL.
+ */
+image_url: string | null }
 export type MinihoardStatus = { Line: MinihoardLine } | { Finished: MinihoardFinished }
 export type ModelLocation = { Local: string } | { External: string }
 /**

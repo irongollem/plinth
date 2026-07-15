@@ -501,6 +501,43 @@ pub async fn minihoard_list(binary_path: String) -> Result<Vec<MinihoardEntry>, 
     .map_err(|e| MinihoardError::Failed(format!("list task failed: {e}")))?
 }
 
+/// One object's on-demand detail (minihoard `object <id> --json`) — the bits a
+/// library row needs when expanded. Fetched lazily, one row at a time.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct MinihoardObject {
+    pub id: u64,
+    pub name: String,
+    /// The official MyMiniFactory page (open externally).
+    pub url: Option<String>,
+    /// A small (~230px) preview image URL.
+    pub thumbnail_url: Option<String>,
+    /// A larger (~720px) image URL.
+    pub image_url: Option<String>,
+}
+
+/// Fetch one object's detail (page url + preview image) for a row expand.
+/// Needs minihoard >= 0.4.1 (the `object` subcommand); on an older binary this
+/// fails, and the caller simply shows the row without a preview.
+#[tauri::command]
+#[specta::specta]
+pub async fn minihoard_object(
+    binary_path: String,
+    id: u64,
+) -> Result<MinihoardObject, MinihoardError> {
+    let binary = resolve_binary(&binary_path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let values = run_json(&binary, &["object", &id.to_string()])?;
+        let object = values
+            .into_iter()
+            .find(|v| v["event"] == "object")
+            .ok_or_else(|| MinihoardError::Failed("minihoard printed no object".to_string()))?;
+        serde_json::from_value::<MinihoardObject>(object)
+            .map_err(|e| MinihoardError::Failed(format!("could not parse object: {e}")))
+    })
+    .await
+    .map_err(|e| MinihoardError::Failed(format!("object task failed: {e}")))?
+}
+
 /// Streaming status for a typed download run, shaped like `BaseCutStatus`: a
 /// `Started`, a run of per-object events, then exactly one terminal
 /// (`Finished` | `Failed` | `Cancelled`). User cancel is `Cancelled`, never

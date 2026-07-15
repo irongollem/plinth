@@ -7,6 +7,8 @@ import {
   commands,
   events,
 } from "../bindings";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import type { MinihoardObject } from "../bindings";
 import { useMinihoard } from "../composables/useMinihoard";
 import { useMinihoardDownload } from "../composables/useMinihoardDownload";
 import { useToastStore } from "../stores/toastStore";
@@ -297,6 +299,44 @@ const selectAllFiltered = () => {
 };
 const clearSelection = () => selectedIds.value.clear();
 const selectedCount = computed(() => selectedIds.value.size);
+
+/* --- row expansion: lazy per-object detail (page url + preview image) --- */
+
+type ObjectDetail = {
+  loading: boolean;
+  data: MinihoardObject | null;
+  error: boolean;
+};
+const expandedIds = ref<Set<number>>(new Set());
+const objectCache = ref<Record<number, ObjectDetail>>({});
+
+const toggleExpand = (id: number) => {
+  if (expandedIds.value.has(id)) {
+    expandedIds.value.delete(id);
+    return;
+  }
+  expandedIds.value.add(id);
+  // The listing has no image or page url — fetch detail once per row, on
+  // demand (never an eager sweep over the whole library).
+  if (!objectCache.value[id] && info.value) {
+    fetchObjectDetail(id);
+  }
+};
+
+const fetchObjectDetail = async (id: number) => {
+  if (!info.value) return;
+  objectCache.value[id] = { loading: true, data: null, error: false };
+  const result = await commands.minihoardObject(info.value.path, id);
+  objectCache.value[id] =
+    result.status === "ok"
+      ? { loading: false, data: result.data, error: false }
+      : { loading: false, data: null, error: true };
+};
+
+const openObjectPage = (id: number) => {
+  const url = objectCache.value[id]?.data?.url;
+  if (url) openUrl(url);
+};
 
 /* --- download queue --- */
 
@@ -698,27 +738,100 @@ watch(
           </tr>
         </thead>
         <tbody>
-          <tr v-for="e in visibleEntries" :key="e.id">
-            <td>
-              <input
-                type="checkbox"
-                class="checkbox checkbox-xs"
-                :checked="isSelected(e.id)"
-                @change="toggleSelect(e.id)"
-              />
-            </td>
-            <td class="truncate max-w-72" :title="e.name">{{ e.name }}</td>
-            <td class="text-base-content/60">{{ e.creator ?? "—" }}</td>
-            <td class="font-mono text-[10.5px] text-base-content/50">
-              {{ e.yearmonth ? formatMonth(e.yearmonth) : "—" }}
-            </td>
-            <td>
-              <span v-if="e.source" class="badge badge-xs badge-ghost">{{
-                e.source
-              }}</span>
-            </td>
-            <td class="text-success text-center">{{ e.downloaded ? "✓" : "" }}</td>
-          </tr>
+          <template v-for="e in visibleEntries" :key="e.id">
+            <tr
+              class="hover cursor-pointer"
+              :class="expandedIds.has(e.id) ? 'bg-base-200/40' : ''"
+              @click="toggleExpand(e.id)"
+            >
+              <td @click.stop>
+                <input
+                  type="checkbox"
+                  class="checkbox checkbox-xs"
+                  :checked="isSelected(e.id)"
+                  @change="toggleSelect(e.id)"
+                />
+              </td>
+              <td class="truncate max-w-72" :title="e.name">
+                <span
+                  class="inline-block w-3 text-base-content/40 transition-transform"
+                  :class="expandedIds.has(e.id) ? 'rotate-90' : ''"
+                  >›</span
+                >
+                {{ e.name }}
+              </td>
+              <td class="text-base-content/60">{{ e.creator ?? "—" }}</td>
+              <td class="font-mono text-[10.5px] text-base-content/50">
+                {{ e.yearmonth ? formatMonth(e.yearmonth) : "—" }}
+              </td>
+              <td>
+                <span v-if="e.source" class="badge badge-xs badge-ghost">{{
+                  e.source
+                }}</span>
+              </td>
+              <td class="text-success text-center">
+                {{ e.downloaded ? "✓" : "" }}
+              </td>
+            </tr>
+            <tr v-if="expandedIds.has(e.id)" class="bg-base-200/40">
+              <td :colspan="6" class="p-0">
+                <div class="flex gap-3 p-3">
+                  <!-- preview image (lazy) -->
+                  <div
+                    class="w-28 h-28 shrink-0 rounded-box overflow-hidden bg-base-300 border border-base-content/10 flex items-center justify-center"
+                  >
+                    <span
+                      v-if="objectCache[e.id]?.loading"
+                      class="loading loading-spinner loading-sm text-base-content/30"
+                    ></span>
+                    <img
+                      v-else-if="objectCache[e.id]?.data?.thumbnail_url"
+                      :src="objectCache[e.id]?.data?.thumbnail_url ?? undefined"
+                      :alt="e.name"
+                      class="w-full h-full object-cover"
+                      loading="lazy"
+                    />
+                    <span v-else class="text-[10px] text-base-content/30"
+                      >no preview</span
+                    >
+                  </div>
+
+                  <div class="flex-1 min-w-0 flex flex-col gap-2">
+                    <div v-if="e.tags.length" class="flex flex-wrap gap-1">
+                      <span
+                        v-for="tag in e.tags.slice(0, 12)"
+                        :key="tag"
+                        class="badge badge-xs badge-ghost"
+                        >{{ tag }}</span
+                      >
+                    </div>
+                    <span v-else class="text-[11px] text-base-content/40"
+                      >no tags</span
+                    >
+
+                    <div class="flex items-center gap-2 mt-auto">
+                      <button
+                        type="button"
+                        class="btn btn-xs"
+                        :disabled="!objectCache[e.id]?.data?.url"
+                        @click.stop="openObjectPage(e.id)"
+                      >
+                        View on MyMiniFactory ↗
+                      </button>
+                      <span
+                        v-if="objectCache[e.id]?.error"
+                        class="text-[10.5px] text-error"
+                        >couldn't load details (needs minihoard 0.4.1+)</span
+                      >
+                      <span class="font-mono text-[10px] text-base-content/30"
+                        >#{{ e.id }}</span
+                      >
+                    </div>
+                  </div>
+                </div>
+              </td>
+            </tr>
+          </template>
         </tbody>
       </table>
       <div
