@@ -282,7 +282,12 @@ const loadLandscape = async () => {
     const bytes = await readFile(props.landscapePath);
     if (token !== loadToken) return;
     const buffer = toTransferableBuffer(bytes);
-    const [part] = await stlDecode.decodeInWorker(token, [buffer]);
+    // Ask the worker to tint disjoint shells apart: scattered landscapes
+    // are multi-component (terrain + each loose piece), and grey-on-grey
+    // hides the debris the user is placing cutters around.
+    const [part] = await stlDecode.decodeInWorker(token, [buffer], {
+      splitComponents: true,
+    });
     if (token !== loadToken || !part) return;
 
     const geometry = new THREE.BufferGeometry();
@@ -302,6 +307,18 @@ const loadLandscape = async () => {
     geometry.computeBoundingBox();
 
     if (!landscapeMaterial || !landscapeGroup) return;
+    // With per-vertex colours the attribute IS the albedo, so the material
+    // goes white and lets them through; without, back to the plain grey.
+    // Toggling vertexColors needs a shader recompile (needsUpdate).
+    if (part.color) {
+      geometry.setAttribute("color", new THREE.BufferAttribute(part.color, 3));
+      landscapeMaterial.vertexColors = true;
+      landscapeMaterial.color.setHex(0xffffff);
+    } else {
+      landscapeMaterial.vertexColors = false;
+      landscapeMaterial.color.setHex(0x8a8f86);
+    }
+    landscapeMaterial.needsUpdate = true;
     landscapeMesh = new THREE.Mesh(geometry, landscapeMaterial);
     landscapeGroup.add(landscapeMesh);
 
@@ -328,6 +345,26 @@ const loadLandscape = async () => {
 };
 
 watch(() => [props.landscapePath, props.reloadToken], loadLandscape);
+
+// The [ ] / Delete keys are scoped to this container's focus (so they never
+// steal keys from the sidebar's inputs). Clicking a placement in the
+// viewport focuses it — but selecting one from the sidebar PLACEMENTS list
+// doesn't, leaving the keys mysteriously dead. Pull focus here when a
+// selection appears, UNLESS the user is mid-typing in a field (renaming a
+// placement, editing a number), which we must never interrupt.
+watch(
+  () => props.selectedIndex,
+  (index) => {
+    if (index === null) return;
+    const active = document.activeElement;
+    const typing =
+      active instanceof HTMLElement &&
+      (active.tagName === "INPUT" ||
+        active.tagName === "TEXTAREA" ||
+        active.isContentEditable);
+    if (!typing) container.value?.focus();
+  },
+);
 
 /** Local-space (unrotated, uncentered) polygon points for a cutter kind. */
 const footprintPoints = (kind: CutterKind): [number, number][] => {
@@ -669,12 +706,30 @@ let dragIndex: number | null = null;
 let dragOffset = new THREE.Vector2();
 let lastX = 0;
 let lastY = 0;
+// Left-drag on empty ground pans, but only after the pointer actually
+// moves — a plain click on empty ground must still deselect. `maybePan`
+// arms that: set on empty-ground pointerdown, promoted to a real pan once
+// movement crosses PAN_THRESHOLD_PX, and if the pointer comes up still
+// armed (never moved) it deselects instead.
+let maybePan = false;
+let downX = 0;
+let downY = 0;
+const PAN_THRESHOLD_PX = 4;
+
+/** A modifier held at pointerdown means "pan, whatever's under the cursor"
+ * — the escape hatch for panning when a placement fills the view. Shift is
+ * free here: its only other role is the rotation-handle 15° snap, which is
+ * read live during a handle drag, never at pointerdown. */
+const isPanModifier = (e: PointerEvent) => e.shiftKey || e.metaKey || e.ctrlKey;
 
 const onPointerDown = (e: PointerEvent) => {
   container.value?.focus();
   dragButton = e.button;
   lastX = e.clientX;
   lastY = e.clientY;
+  downX = e.clientX;
+  downY = e.clientY;
+  maybePan = false;
   (e.target as HTMLElement).setPointerCapture(e.pointerId);
 
   if (e.button === 1) {
@@ -693,6 +748,13 @@ const onPointerDown = (e: PointerEvent) => {
   isPanning = false;
 
   if (e.button === 0) {
+    // Modifier+left-drag pans over anything — checked before hit-testing so
+    // it wins over grabbing a placement or handle underneath.
+    if (isPanModifier(e)) {
+      isPanning = true;
+      dragIndex = null;
+      return;
+    }
     const world = pointerWorld(e);
 
     // The rotation handle of the selected placement wins over footprint
@@ -734,8 +796,10 @@ const onPointerDown = (e: PointerEvent) => {
       }
       if (hit !== props.selectedIndex) emit("select", hit);
     } else {
+      // Empty ground: don't deselect yet — arm a pan. A real drag pans; a
+      // plain click (no movement) deselects in onPointerUp.
       dragIndex = null;
-      if (props.selectedIndex !== null) emit("select", null);
+      maybePan = true;
     }
   }
 };
@@ -746,6 +810,16 @@ const onPointerMove = (e: PointerEvent) => {
   const dy = e.clientY - lastY;
   lastX = e.clientX;
   lastY = e.clientY;
+
+  // Promote an armed empty-ground press to a pan once it's clearly a drag.
+  if (maybePan && !isPanning) {
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) >= PAN_THRESHOLD_PX) {
+      maybePan = false;
+      isPanning = true;
+    } else {
+      return;
+    }
+  }
 
   if (isTilting) {
     tiltDeg = Math.min(TILT_MAX_DEG, Math.max(0, tiltDeg + dy * 0.4));
@@ -796,6 +870,9 @@ const onPointerUp = (e: PointerEvent) => {
   // started (matches the `gesture-start` emit sites above one-to-one) —
   // pan/tilt/plain-select never emitted a start, so they don't emit an end.
   const hadGesture = dragIndex !== null || rotateIndex !== null;
+  // Armed pan that never moved = a plain click on empty ground = deselect.
+  if (maybePan && props.selectedIndex !== null) emit("select", null);
+  maybePan = false;
   dragButton = null;
   isPanning = false;
   dragIndex = null;
@@ -906,9 +983,9 @@ onBeforeUnmount(() => {
       v-else
       class="absolute bottom-2 left-2 text-xs text-base-content/40 pointer-events-none"
     >
-      drag: move · handle: rotate (shift snaps 15°) · [ / ]: rotate · delete:
-      remove · middle-drag: pan · right-drag: tilt/rotate peek · wheel: zoom ·
-      ctrl/cmd+z: undo
+      drag: move · empty-drag or ⇧/⌘-drag: pan · handle: rotate (⇧ snaps 15°) ·
+      [ and ] keys: rotate selection · delete: remove · right-drag: tilt/rotate
+      peek · wheel: zoom · ⌘Z: undo
     </div>
   </div>
 </template>

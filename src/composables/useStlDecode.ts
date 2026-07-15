@@ -66,13 +66,20 @@ export function useStlDecode() {
     pending = null;
   };
 
-  const decodeInWorker = (id: number, buffers: ArrayBuffer[]) => {
+  const decodeInWorker = (
+    id: number,
+    buffers: ArrayBuffer[],
+    opts?: { splitComponents?: boolean },
+  ) => {
     abortDecode();
     worker ??= spawnWorker();
     return new Promise<StlPartPayload[]>((resolve, reject) => {
       pending = { id, resolve, reject };
       // buffers transfer, not copy — the worker owns them from here
-      worker?.postMessage({ id, buffers }, buffers);
+      worker?.postMessage(
+        { id, buffers, splitComponents: opts?.splitComponents },
+        buffers,
+      );
     });
   };
 
