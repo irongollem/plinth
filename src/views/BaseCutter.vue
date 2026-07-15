@@ -1806,6 +1806,24 @@ const exportToCatalog = async () => {
               :disabled="debrisScatter.isRunning.value"
               v-model.number="debrisParams.density_per_dm2"
             />
+            <!-- Front-row, not an advanced knob: like the terrain's own
+                 feature_scale, this is the "what scale am I basing for"
+                 dial — 1 = the 28-32mm heroic anchor every piece size is
+                 canonical at (docs/SCATTER.md "Scale anchor"); 15mm gaming
+                 wants ~0.5, 54mm display work ~2. -->
+            <span
+              class="text-[11px] text-base-content/50 shrink-0"
+              title="Whole-pass piece rescale — 1 = 28-32mm heroic"
+              >Scale ×</span
+            >
+            <input
+              type="number"
+              class="input input-xs w-16 font-mono"
+              min="0.1"
+              step="0.05"
+              :disabled="debrisScatter.isRunning.value"
+              v-model.number="debrisParams.scale_factor"
+            />
           </div>
 
           <div class="flex items-center gap-1.5">
@@ -1903,16 +1921,6 @@ const exportToCatalog = async () => {
                 :step="0.05"
                 :min="0.1"
                 v-model="debrisParams.scale_max"
-              />
-              <!-- Whole-pass rescale for non-28mm work (docs/SCATTER.md
-                   "Scale anchor: 28-32mm heroic") — leave at 1 for the
-                   default heroic scale. -->
-              <NumberInput
-                id="scatter-scale-factor"
-                label="Scale factor ×"
-                :step="0.05"
-                :min="0.1"
-                v-model="debrisParams.scale_factor"
               />
               <NumberInput
                 id="scatter-sink-min"
