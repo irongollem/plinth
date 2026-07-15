@@ -27,6 +27,7 @@ import {
   useStlDecode,
 } from "../composables/useStlDecode";
 import { insetShrink, shrinkKind } from "../utils/cutFootprint";
+import { footprintDims } from "../utils/cutterKinds";
 
 const props = defineProps<{
   landscapePath: string;
@@ -174,10 +175,11 @@ const applyCamera = () => {
     -Math.sin(radT) * dist,
     Math.cos(radT) * dist,
   ).applyAxisAngle(zAxis, radS);
-  const up = new THREE.Vector3(0, Math.cos(radT), Math.sin(radT)).applyAxisAngle(
-    zAxis,
-    radS,
-  );
+  const up = new THREE.Vector3(
+    0,
+    Math.cos(radT),
+    Math.sin(radT),
+  ).applyAxisAngle(zAxis, radS);
   camera.position.set(
     camX + offset.x,
     camY + offset.y,
@@ -395,16 +397,7 @@ const plinthKeyOf = (plinth: PlinthParams): string =>
 
 /** Local +X half-extent of a footprint — where the rotation handle sits
  * (along the shape's own major axis, so it rotates with the placement). */
-const plusXExtent = (kind: CutterKind): number => {
-  switch (kind.kind) {
-    case "circle":
-      return kind.diameter_mm / 2;
-    case "ellipse":
-      return kind.major_mm / 2;
-    case "rect":
-      return kind.width_mm / 2;
-  }
-};
+const plusXExtent = (kind: CutterKind): number => footprintDims(kind).width / 2;
 
 const HANDLE_STEM_MM = 3;
 const HANDLE_RADIUS_MM = 1.4;
@@ -446,7 +439,10 @@ const buildOverlayLoops = (
     Array.from({ length: 24 }, (_, i): [number, number] => {
       const a = (i / 24) * Math.PI * 2;
       return [
-        xEdge + HANDLE_STEM_MM + HANDLE_RADIUS_MM + Math.cos(a) * HANDLE_RADIUS_MM,
+        xEdge +
+          HANDLE_STEM_MM +
+          HANDLE_RADIUS_MM +
+          Math.cos(a) * HANDLE_RADIUS_MM,
         Math.sin(a) * HANDLE_RADIUS_MM,
       ];
     }),
@@ -729,8 +725,7 @@ const onPointerMove = (e: PointerEvent) => {
     if (!world || !p) return;
     // The handle rides local +X, so the pointer's bearing from the center
     // IS the rotation. Shift snaps to 15° for rank-and-flank neatness.
-    let deg =
-      (Math.atan2(world.y - p.y_mm, world.x - p.x_mm) * 180) / Math.PI;
+    let deg = (Math.atan2(world.y - p.y_mm, world.x - p.x_mm) * 180) / Math.PI;
     if (e.shiftKey) deg = Math.round(deg / 15) * 15;
     emit("update", rotateIndex, { rotation_deg: Math.round(deg * 10) / 10 });
     return;
