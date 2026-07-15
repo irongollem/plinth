@@ -46,6 +46,21 @@ pebbles already shipped in scatter_landscape.py; bones and tufts join as
 generated kinds) — zero bundle bytes and no aesthetic clash. Real premium
 scatter enters through the user-library door, which is S4's other half.
 
+**Scan-quality pass result (same day):** the Smithsonian Open Access API
+(`api.si.edu/openaccess` — the 3d.si.edu front-end WAF-blocks bots, the
+API doesn't) delivered 10 machine-tagged-CC0 photogrammetry pieces: 7
+fossil/animal skulls + 3 genuine loose bones (deer mandible, deer
+forelimb, pilot whale mandible) — so BONES, previously the driest
+category, is now covered by real scans, not procedural fallback. Two
+pieces arrived mesh-corrupted at the served resolution tier and are
+excluded (flagged in `smithsonian-3d/LICENSE.txt`). Gotcha for the S4
+curation pass: Smithsonian OBJs are authored in METERS — a naive convert
+ships a 96 mm skull as a 0.096 mm STL; use the ×1000 converter variant
+saved beside them. Three D Scans was dropped (no license text exists
+anywhere on the site to quote); Scan The World re-check confirmed
+blocked/NC. Files + renders: `~/Downloads/plinth-scatter-curation/`
+("Scan-quality pass" section of curation-report.html).
+
 ## Summary
 
 | Category                       | Verdict           | Notes                                                                                                                 |
