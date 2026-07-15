@@ -244,10 +244,25 @@ presets as data:
   mushrooms sprinkled onto the terrain — raycast placement with random
   rotation/scale/sink, then boolean-union during the cut, which the
   pipeline already does for magnet bosses (a scattered skull is
-  geometrically a magnet boss upside down). Pebbles/rocks are procedural
-  (noise-displaced icospheres, no assets); organic pieces need a small
-  bundled library of watertight meshes. Works on ANY landscape,
-  including designer sculpts.
+  geometrically a magnet boss upside down). Works on ANY landscape,
+  including designer sculpts. Three scatter SOURCES, one placement
+  mechanism (sources are data, like cutters — a new source is a new row,
+  never a new pipeline):
+  1. **Generated** — procedural pebbles/rocks (noise-displaced
+     icospheres), no assets, always available.
+  2. **Bundled starter assets** — a small library of watertight organic
+     pieces (bones, skulls, mushrooms, plants) shipped with the app.
+     Sourced from the community ONLY under licenses that survive
+     redistribution inside an installer: CC0/public domain preferred;
+     CC-BY acceptable when attribution can live in an in-app credits
+     panel + a CREDITS file (nothing per-print). Hard NOs: NC (we can't
+     police downstream commercial use), ND (we remesh/decimate =
+     derivative), SA (viral into the bundle), and "free to download" ≠
+     "free to redistribute" — the license must explicitly allow it.
+     Candidates get a manifold/watertight check before admission.
+  3. **User library** — point the tool at your own folder of scatter
+     STLs; same validation gate as landscapes (the "cuttable" spec),
+     scale sanity-checked (a scatter piece is mm-scale, not a mini).
 - **Relief painting** (phase 8, "draw your trenches"): because generated
   landscapes are heightfields, painting terrain is painting the
   heightmap — a 2D brush (radius, strength, raise/lower/smooth) editing
