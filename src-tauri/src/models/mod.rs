@@ -124,7 +124,7 @@ pub struct RenderOptions {
     pub zoom: Option<f64>,
     pub resolution: Option<u32>,
     pub samples: Option<u32>,
-    /// Tonal look: "rich" (promo contrast) or "flat" (even lighting)
+    /// Tonal look: "flat", "resin", "rich", or "marmoset" (Toolbag-style contrast)
     pub look: Option<String>,
     /// Output PNG path (None = next to the first STL part)
     pub output_path: Option<String>,

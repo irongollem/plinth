@@ -172,7 +172,8 @@
           >
             <option value="flat">Classic (locked look)</option>
             <option value="resin">Resin (glossy coat)</option>
-            <option value="rich">Rich (experimental)</option>
+            <option value="rich">Rich (soft studio)</option>
+            <option value="marmoset">Marmoset (high contrast)</option>
           </select>
         </div>
         <div>
@@ -556,7 +557,13 @@
           {{ branding.title || "Untitled" }}
         </div>
         <div
-          class="font-mono text-[9.5px] tracking-[0.18em] text-base-content/60 mt-0.5"
+          class="text-base-content/80 mt-0.5"
+          :style="{
+            fontFamily: fontCss,
+            fontSize: `${branding.size * 0.55}px`,
+            fontWeight: 400,
+            letterSpacing: '0.04em',
+          }"
         >
           {{ branding.credit }}
         </div>
@@ -700,8 +707,9 @@ watch(
   renderParts,
   async (paths) => {
     if (!paths.length) return;
+    const nextTarget = paths.join("\n");
     parts.value = await filesFromPaths(paths);
-    previewTargetParts = paths.join("\n");
+    previewTargetParts = nextTarget;
     renderParts.value = [];
   },
   // immediate: this view mounts lazily on first visit, AFTER the catalog
@@ -750,7 +758,7 @@ const resolution = ref(1600);
 const samples = ref(96);
 // "flat" (the handover's locked look) won the three-way comparison against
 // the DTL reference; "resin" adds the physical-print sheen on top of it
-const look = ref<"rich" | "flat" | "resin">("flat");
+const look = ref<"rich" | "flat" | "resin" | "marmoset">("flat");
 // sRGB of the default linear resin color (0.85, 0.65, 0.43) — pale warm
 // cream, matched against formal DTL product renders
 const DEFAULT_RESIN_HEX = "#edd3af";
@@ -875,14 +883,26 @@ type TextPos = "tl" | "tc" | "tr" | "bl" | "bc" | "br";
 const cornerPositions: CornerPos[] = ["tl", "tr", "bl", "br"];
 const textPositions: TextPos[] = ["tl", "tc", "tr", "bl", "bc", "br"];
 const fontOptions: { value: string; label: string; css: string }[] = [
-  { value: "Archivo", label: "Grotesk", css: "'Archivo', sans-serif" },
-  { value: "Bebas Neue", label: "Display", css: "'Bebas Neue', sans-serif" },
+  {
+    value: "Archivo",
+    label: "Archivo",
+    css: "'Archivo', sans-serif",
+  },
+  {
+    value: "Bebas Neue",
+    label: "Bebas Neue",
+    css: "'Bebas Neue', sans-serif",
+  },
   {
     value: "Cormorant Garamond",
-    label: "Serif",
+    label: "Cormorant",
     css: "'Cormorant Garamond', serif",
   },
-  { value: "IBM Plex Mono", label: "Mono", css: "'IBM Plex Mono', monospace" },
+  {
+    value: "IBM Plex Mono",
+    label: "IBM Plex Mono",
+    css: "'IBM Plex Mono', monospace",
+  },
 ];
 
 const BRANDING_DEFAULTS = {
@@ -897,6 +917,15 @@ const BRANDING_DEFAULTS = {
   size: 20,
 };
 const branding = reactive({ ...BRANDING_DEFAULTS });
+
+watch(partPaths, (paths, previous) => {
+  if (!previous?.length || paths.join("\n") === previous.join("\n")) return;
+  // Overlay copy belongs to the subject, unlike reusable studio choices
+  // such as font, position and size. Never carry one model's title into the
+  // next model loaded while the studio remains mounted.
+  branding.title = "";
+  branding.credit = "";
+});
 
 const logoFileName = computed(
   () => branding.logoPath.split(/[/\\]/).pop() ?? "",
@@ -978,7 +1007,7 @@ const bakeBranding = async (path: string) => {
     // canvas silently substitutes whatever is loaded at that instant
     await Promise.all([
       document.fonts.load(`700 32px ${fontCss.value}`),
-      document.fonts.load("500 16px 'IBM Plex Mono', monospace"),
+      document.fonts.load(`400 16px ${fontCss.value}`),
     ]).catch(() => {
       /* offline: canvas falls back exactly like the preview does */
     });
@@ -1037,9 +1066,12 @@ const VIEW_DEFAULTS = { azimuth: -15, elevation: 0.22, zoom: 1.15 };
 // Valid values for restore/import — must match the <select> options above
 const RESOLUTION_OPTIONS = new Set([512, 1024, 1600, 2048]);
 const SAMPLES_OPTIONS = new Set([32, 96, 256]);
-const LOOK_OPTIONS = new Set(["rich", "flat", "resin"]);
+const LOOK_OPTIONS = new Set(["rich", "flat", "resin", "marmoset"]);
 
 const persistRenderSettings = () => {
+  // Copy is model-specific. Persist only reusable branding presentation;
+  // otherwise the next model silently inherits the previous one's title.
+  const { title: _title, credit: _credit, ...brandingPreferences } = branding;
   localStorage.setItem(
     STICKY_KEY,
     JSON.stringify({
@@ -1052,7 +1084,7 @@ const persistRenderSettings = () => {
       look: look.value,
       colorHex: colorHex.value,
       advanced: advanced.value,
-      branding: { ...branding },
+      branding: brandingPreferences,
     }),
   );
 };
@@ -1092,6 +1124,8 @@ const loadRenderSettings = () => {
       for (const key of Object.keys(BRANDING_DEFAULTS) as Array<
         keyof typeof BRANDING_DEFAULTS
       >) {
+        // Older builds persisted model copy. Deliberately do not restore it.
+        if (key === "title" || key === "credit") continue;
         if (typeof saved.branding[key] === typeof BRANDING_DEFAULTS[key]) {
           // biome/oxlint: keyed assignment keeps both sides' types aligned
           (branding as Record<string, unknown>)[key] = saved.branding[key];
@@ -1187,7 +1221,7 @@ const importLook = async () => {
       "look",
     )
   ) {
-    look.value = file.look as "rich" | "flat" | "resin";
+    look.value = file.look as "rich" | "flat" | "resin" | "marmoset";
   }
   if (
     applyIf(

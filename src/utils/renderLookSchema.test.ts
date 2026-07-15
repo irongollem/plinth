@@ -26,13 +26,13 @@ describe("renderLookSchema", () => {
   it("sanitizes: keeps valid, clamps out-of-range, drops unknown/malformed", () => {
     const { overrides, dropped } = sanitizeOverrides({
       "key.energy": 5000,
-      "rich.gamma": 99, // clamps to max 1.5
+      "marmoset.fill_energy_mult": 99, // clamps to max 2
       "key.loc": [0, 0, "up"], // malformed vec3
       "not.a.knob": 1,
       roughness: Number.NaN,
     });
     expect(overrides["key.energy"]).toBe(5000);
-    expect(overrides["rich.gamma"]).toBe(1.5);
+    expect(overrides["marmoset.fill_energy_mult"]).toBe(2);
     expect(dropped.sort()).toEqual(["key.loc", "not.a.knob", "roughness"]);
   });
 
@@ -43,9 +43,9 @@ describe("renderLookSchema", () => {
   });
 
   it("drops values that clamp back onto the default", () => {
-    // key_energy_mult default 1.0, min 0.1 — 0.0000000001 clamps to 0.1,
+    // key_energy_mult default 0.82, min 0.1 — 0.0000000001 clamps to 0.1,
     // stays; but exactly the default must NOT be stored as a tweak
-    const { overrides } = sanitizeOverrides({ "rich.key_energy_mult": 1.0 });
+    const { overrides } = sanitizeOverrides({ "rich.key_energy_mult": 0.82 });
     expect(overrides).toEqual({});
   });
 
@@ -65,12 +65,12 @@ describe("renderLookSchema", () => {
         roughness: 0.4,
         "key.energy": 1500,
         "key.size": 8,
-        "rich.gamma": 0.85,
+        "marmoset.sss_weight_mult": 0.15,
       }),
     ).toEqual({
       roughness: 0.4,
       key: { energy: 1500, size: 8 },
-      rich: { gamma: 0.85 },
+      marmoset: { sss_weight_mult: 0.15 },
     });
   });
 });

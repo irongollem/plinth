@@ -94,7 +94,8 @@ LOOK = dict(
     exposure = 0.0,
     # Look-variant constants, gathered here so the WHOLE recipe lives in one
     # overridable place. "resin" = glossy coat + speckle + dim studio
-    # reflections; "rich" = harder key, deep shadows, gentle contrast curve.
+    # reflections; "rich" = harder key, deep shadows, gentle contrast curve;
+    # "marmoset" = Toolbag-style product lighting and filmic highlight rolloff.
     resin = dict(
         coat_weight    = 0.3,
         coat_roughness = 0.12,
@@ -110,20 +111,42 @@ LOOK = dict(
         rim_color      = (0.85, 0.90, 1.0),
     ),
     rich = dict(
-        # Light color stays close to white — the warmth should come from
-        # the resin, not from orange lamps stacking onto an orange material.
-        key_color        = (1.0, 0.92, 0.80),
-        fill_color       = (1.0, 0.90, 0.78),
-        rim_color        = (1.0, 0.92, 0.82),
-        # Key energy stays at 1.0: with the pale resin a boosted key blows
-        # the lit side out to clipping. Hardness comes from the smaller
-        # size alone; the low fill is what deepens the shadow side.
-        key_energy_mult  = 1.0,
-        key_size_mult    = 0.55,
-        fill_energy_mult = 0.3,
-        sss_weight_mult  = 0.6,
-        gamma            = 0.9,
-        exposure_shift   = -0.25,
+        # Broad, neutral studio light for scenic bases and low relief. These
+        # subjects point most normals at the key simultaneously, so a small
+        # dramatic source turns the top white and leaves the wall black.
+        key_color        = (1.0, 0.90, 0.76),
+        key_loc          = (4.5, -5.5, 3.0),
+        fill_color       = (0.92, 0.86, 0.78),
+        rim_color        = (0.90, 0.92, 1.0),
+        key_energy_mult  = 0.82,
+        key_size_mult    = 0.38,
+        fill_energy_mult = 1.05,
+        rim_energy_mult  = 0.45,
+        rim_size_mult    = 1.40,
+        sss_weight_mult  = 0.55,
+        exposure_shift   = -0.05,
+        world_color      = (0.78, 0.76, 0.74),
+        world_strength   = 0.13,
+    ),
+    marmoset = dict(
+        # Toolbag commonly pairs an ACES display transform with a compact
+        # studio rig. AgX is Blender's available filmic equivalent: unlike
+        # Standard it keeps the hot cream highlights detailed while its
+        # high-contrast look lets unfilled cavities stay genuinely dark.
+        key_color        = (1.0, 0.78, 0.52),
+        fill_color       = (0.86, 0.62, 0.40),
+        rim_color        = (1.0, 0.56, 0.30),
+        key_energy_mult  = 1.08,
+        key_size_mult    = 0.42,
+        fill_energy_mult = 0.16,
+        rim_energy_mult  = 0.75,
+        rim_size_mult    = 0.55,
+        sss_weight_mult  = 0.30,
+        exposure_shift   = -0.20,
+        # A dim studio environment reaches cavities that all three area
+        # lights can be occluded from. Camera rays still see pure black.
+        world_color      = (0.72, 0.62, 0.52),
+        world_strength   = 0.14,
     ),
 )
 
@@ -445,7 +468,8 @@ def resin_material(obj, color, look="flat"):
     b.inputs["Roughness"].default_value = LOOK["roughness"]
     # SSS wraps light around into the shadow side; the rich look keeps just
     # enough for the resin read while letting shadows actually go dark
-    sss_weight = LOOK["sss_weight"] * (LOOK["rich"]["sss_weight_mult"] if look == "rich" else 1.0)
+    variant = LOOK.get(look, {})
+    sss_weight = LOOK["sss_weight"] * variant.get("sss_weight_mult", 1.0)
     for name, val in (("Subsurface Weight", sss_weight),
                       ("Subsurface Radius", LOOK["sss_radius"]),
                       ("Subsurface Scale",  LOOK["sss_scale"])):
@@ -473,14 +497,17 @@ def lights(look="flat"):
     # against a low fill, so the form rolls from pale cream through warm
     # midtones into deep shadow. All constants live in LOOK["rich"] /
     # LOOK["resin"] — see the recipe comments there for the why.
-    rich = LOOK["rich"]; resin = LOOK["resin"]
-    key_scale, key_size, fill_scale = (
-        (rich["key_energy_mult"], rich["key_size_mult"], rich["fill_energy_mult"])
-        if look == "rich" else (1.0, 1.0, 1.0))
-    rich_colors = {
-        "Key":  rich["key_color"],
-        "Fill": rich["fill_color"],
-        "Rim":  rich["rim_color"],
+    resin = LOOK["resin"]
+    variant = LOOK.get(look, {}) if look in ("rich", "marmoset") else {}
+    key_scale = variant.get("key_energy_mult", 1.0)
+    key_size = variant.get("key_size_mult", 1.0)
+    fill_scale = variant.get("fill_energy_mult", 1.0)
+    rim_scale = variant.get("rim_energy_mult", 1.0)
+    rim_size = variant.get("rim_size_mult", 1.0)
+    variant_colors = {
+        "Key":  variant.get("key_color"),
+        "Fill": variant.get("fill_color"),
+        "Rim":  variant.get("rim_color"),
     }
     resin_colors = {
         "Key":  LOOK["key"]["color"],
@@ -489,14 +516,15 @@ def lights(look="flat"):
     }
     def mk(spec, name, energy_scale=1.0, size_scale=1.0):
         d = bpy.data.lights.new(name, "AREA"); d.energy=spec["energy"]*energy_scale; d.size=spec["size"]*size_scale
-        if look == "rich":   d.color = rich_colors[name]
+        if variant:           d.color = variant_colors[name]
         elif look == "resin": d.color = resin_colors[name]
         else:                d.color = spec["color"]
-        o = bpy.data.objects.new(name, d); o.location = spec["loc"]
+        loc = variant.get(name.lower() + "_loc", spec["loc"])
+        o = bpy.data.objects.new(name, d); o.location = loc
         bpy.context.collection.objects.link(o)
-        v = Vector((0,0,0.6)) - Vector(spec["loc"])
+        v = Vector((0,0,0.6)) - Vector(loc)
         o.rotation_euler = v.to_track_quat("-Z","Y").to_euler()
-    mk(LOOK["key"],"Key",key_scale,key_size); mk(LOOK["fill"],"Fill",fill_scale); mk(LOOK["rim"],"Rim")
+    mk(LOOK["key"],"Key",key_scale,key_size); mk(LOOK["fill"],"Fill",fill_scale); mk(LOOK["rim"],"Rim",rim_scale,rim_size)
 
 def black_world(look="flat"):
     # same deprecated-use_nodes story as resin_material() above
@@ -504,13 +532,14 @@ def black_world(look="flat"):
     nt = w.node_tree
     bg = nt.nodes.get("Background")
     bg.inputs["Color"].default_value = (0,0,0,1); bg.inputs["Strength"].default_value = 0.0
-    if look == "resin":
+    if look in ("resin", "rich", "marmoset"):
         # The backdrop stays pure black for CAMERA rays, but the surface
         # gets to reflect a dim neutral studio — with a void-black world the
         # speculars contain only three lamps, which is the big "CG" tell.
         env = nt.nodes.new("ShaderNodeBackground")
-        env.inputs["Color"].default_value = tuple(LOOK["resin"]["world_color"]) + (1.0,)
-        env.inputs["Strength"].default_value = LOOK["resin"]["world_strength"]
+        studio = LOOK[look]
+        env.inputs["Color"].default_value = tuple(studio["world_color"]) + (1.0,)
+        env.inputs["Strength"].default_value = studio["world_strength"]
         lp = nt.nodes.new("ShaderNodeLightPath")
         mix = nt.nodes.new("ShaderNodeMixShader")
         out = nt.nodes.get("World Output")
@@ -573,12 +602,20 @@ def setup_render(res, samples, look="flat"):
     except Exception: pass
     sc.view_settings.exposure = LOOK["exposure"]
     if look == "rich":
-        # gamma < 1 is a cheap contrast curve: deepens shadows while the
-        # near-white key side barely moves. Kept gentle — pushing it also
-        # over-saturates midtones, which reads "digital"
-        sc.view_settings.gamma = LOOK["rich"]["gamma"]
-        # pull the highlights back off the clipping point
+        # Gentle AgX contrast keeps broad upward surfaces and vertical base
+        # walls within the same readable range.
+        sc.view_settings.view_transform = "AgX"
+        try: sc.view_settings.look = "AgX - Medium Low Contrast"
+        except Exception: pass
         sc.view_settings.exposure = LOOK["exposure"] + LOOK["rich"]["exposure_shift"]
+    elif look == "marmoset":
+        # Toolbag's ACES output is better approximated by Blender's AgX than
+        # by crushing Standard/gamma: the highlight shoulder preserves fine
+        # sculpt detail while the high-contrast look anchors the shadows.
+        sc.view_settings.view_transform = "AgX"
+        try: sc.view_settings.look = "AgX - Medium High Contrast"
+        except Exception: pass
+        sc.view_settings.exposure = LOOK["exposure"] + LOOK["marmoset"]["exposure_shift"]
     sc.render.resolution_x = res; sc.render.resolution_y = res
     sc.render.resolution_percentage = 100
     sc.render.image_settings.file_format = "PNG"

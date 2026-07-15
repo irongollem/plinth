@@ -22,7 +22,16 @@ describe("overlayLayout", () => {
     expect(large.scale).toBe(small.scale * 4);
     expect(large.logo?.box).toBe(small.logo!.box * 4);
     expect(large.text?.titlePx).toBe(small.text!.titlePx * 4);
+    expect(large.text?.creditPx).toBe(small.text!.creditPx * 4);
     expect(large.text?.x).toBe(small.text!.x * 4);
+  });
+
+  it("sizes the subtitle from the selected title size", () => {
+    const small = overlayLayout(512, 512, spec({ size: 20 })).text!;
+    const large = overlayLayout(512, 512, spec({ size: 40 })).text!;
+    expect(small.creditPx).toBe(11);
+    expect(large.creditPx).toBe(22);
+    expect(large.creditPx).toBe(small.creditPx * 2);
   });
 
   it("places the logo in each corner inside the margins", () => {

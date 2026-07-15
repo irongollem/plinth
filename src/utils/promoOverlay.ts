@@ -16,7 +16,7 @@ export type OverlaySpec = {
   textPos: TextPos;
   title: string;
   credit: string;
-  /** CSS font-family stack for the title, e.g. `'Archivo', sans-serif` */
+  /** CSS font-family stack shared by title and subtitle. */
   fontCss: string;
   /** Title size in design px (the studio slider value, 12–48) */
   size: number;
@@ -33,11 +33,11 @@ export type OverlayLayout = {
     align: CanvasTextAlign;
     /** top of the title line (textBaseline "top"); null = title empty */
     titleY: number | null;
-    /** top of the credit line; null = credit empty */
+    /** top of the subtitle line; null = subtitle empty */
     creditY: number | null;
     titlePx: number;
     creditPx: number;
-    /** letter-spacing for the credit line, in output px */
+    /** letter-spacing for the subtitle line, in output px */
     tracking: number;
   } | null;
 };
@@ -49,7 +49,8 @@ const DESIGN_WIDTH = 512;
 const MARGIN = 18; // top/side inset, matches the preview's 18px
 const BOTTOM_MARGIN = 24; // preview's 46px includes viewport chrome; the image needs less
 const LOGO_BOX = 52; // preview placeholder is 52px (w-13)
-const CREDIT_PX = 9.5;
+/** A subtitle is subordinate, but still governed by the user's size. */
+const SUBTITLE_RATIO = 0.55;
 const LINE_GAP = 4;
 /** Title line-height factor — canvas has no line box, so we make one. */
 const TITLE_LINE = 1.15;
@@ -80,7 +81,7 @@ export const overlayLayout = (
   const hasCredit = spec.textOn && spec.credit.trim().length > 0;
   if (hasTitle || hasCredit) {
     const titlePx = spec.size * scale;
-    const creditPx = CREDIT_PX * scale;
+    const creditPx = spec.size * SUBTITLE_RATIO * scale;
     const gap = LINE_GAP * scale;
     const titleH = hasTitle ? titlePx * TITLE_LINE : 0;
     const creditH = hasCredit ? creditPx : 0;
@@ -96,7 +97,7 @@ export const overlayLayout = (
       creditY: hasCredit ? top + titleH + (hasTitle ? gap : 0) : null,
       titlePx,
       creditPx,
-      tracking: creditPx * 0.18, // the preview's tracking-[0.18em]
+      tracking: creditPx * 0.04,
     };
   }
 
@@ -182,10 +183,10 @@ export const drawOverlay = (
     ctx.fillText(spec.title.trim(), text.x, text.titleY);
   }
   if (text.creditY !== null) {
-    ctx.font = `500 ${text.creditPx}px 'IBM Plex Mono', monospace`;
-    ctx.globalAlpha = 0.7;
+    ctx.font = `400 ${text.creditPx}px ${spec.fontCss}`;
+    ctx.globalAlpha = 0.82;
     // letterSpacing shipped in WebKit/Chromium recently enough that the
-    // bundled webview may lack it — the credit just loses its tracking
+    // bundled webview may lack it — the subtitle just loses its tracking
     if ("letterSpacing" in ctx) {
       ctx.letterSpacing = `${text.tracking}px`;
     }

@@ -324,9 +324,16 @@ const updateCamera = () => {
     -Math.cos(az),
     view.elevation,
   ).normalize();
-  const half = Math.tan((camera.fov * Math.PI) / 360);
+  const viewportHalf = Math.tan((camera.fov * Math.PI) / 360);
+  // The render is square, but the interactive viewport usually is not.
+  // Its square crop occupies the full short axis and only the matching
+  // length of the long axis. In a portrait viewport Three's horizontal
+  // field of view is narrower by `aspect`; fitting with the full vertical
+  // FOV therefore made the preview look ~1/aspect closer than Blender.
+  // This is the half-angle of the square crop on either axis.
+  const cropHalf = viewportHalf * Math.min(1, camera.aspect);
 
-  let distance = (Math.sqrt(3) / half) * view.zoom; // empty-scene fallback
+  let distance = (Math.sqrt(3) / cropHalf) * view.zoom; // empty-scene fallback
   if (worldBox) {
     worldBox.getCenter(target);
     // Exact fit, same algorithm as render_mini.py camera(): the distance at
@@ -347,7 +354,7 @@ const updateCamera = () => {
             needed,
             corner.dot(direction) +
               Math.max(Math.abs(corner.dot(right)), Math.abs(corner.dot(up))) /
-                half,
+                cropHalf,
           );
         }
       }
@@ -793,7 +800,9 @@ onMounted(() => {
     renderer.setSize(clientWidth, clientHeight);
     camera.aspect = clientWidth / clientHeight;
     camera.updateProjectionMatrix();
-    requestRender();
+    // Aspect changes alter the square render crop's effective field of
+    // view, so the matching camera distance must be solved again too.
+    updateCamera();
   });
   resizeObserver.observe(container.value);
   loadParts();

@@ -1635,7 +1635,7 @@ rotate: [number, number, number];
  */
 color: [number, number, number] | null; azimuth: number | null; elevation: number | null; zoom: number | null; resolution: number | null; samples: number | null; 
 /**
- * Tonal look: "rich" (promo contrast) or "flat" (even lighting)
+ * Tonal look: "flat", "resin", "rich", or "marmoset" (Toolbag-style contrast)
  */
 look: string | null; 
 /**
