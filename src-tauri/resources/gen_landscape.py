@@ -318,52 +318,88 @@ def _stones_layer(seed, params, resolution_mm):
 
 
 def _boulders_layer(seed, width_mm, depth_mm, params, resolution_mm):
-    """N seeded ROCKS — half-buried stones, not smooth domes. A gaussian
+    """N seeded ROCKS — angular broken chunks, not smooth domes. A gaussian
     bump (the original implementation) is a perfect circle in plan and an
     all-shoulder, no-plateau profile — at miniature scale that reads as a
-    pimple, not a rock. Fixing that took two attempts worth recording:
+    pimple, not a rock. Fixing that took three attempts worth recording:
 
-    A single warped-radius profile (radius = f(theta), or even the radial
-    distance domain-warped by 2D noise before measuring) still failed: any
-    profile that is ONE superellipse measured from ONE center is, by
-    construction, a family of nested self-similar shells around that
+    Attempt 1 — a single warped-radius profile (radius = f(theta), or even
+    the radial distance domain-warped by 2D noise before measuring) still
+    failed: any profile that is ONE superellipse measured from ONE center
+    is, by construction, a family of nested self-similar shells around that
     center. Warping barely changes that when the warp's wavelength is
     comparable to the boulder's own radius (the common case) — the result
     reads as a fluted bundt cake / flower, ridges running dead straight
-    from crown to base, not a rock (caught by actually rendering it, see
-    the phase's verification renders; this is why the module is built to
-    require baking + looking, not just formula review).
+    from crown to base, not a rock.
 
-    The fix: a boulder is a small UNION of 2-3 superellipse LOBES with
-    DIFFERENT centers (one main lobe plus 1-2 smaller offset "knob" lobes,
-    each its own aspect/rotation/exponent/weight), combined by MAX. Offset
-    centers are what real facet structure needs — two shells around two
-    different points intersect along a real, non-radial seam, which is
-    exactly what a stone's broken-facet look is. This is the same
-    "combine by max, not sum" idea the module already uses one level up
-    for whole boulders, just applied WITHIN one boulder too.
+    Attempt 2 — a small UNION of 2-3 superellipse LOBES with different
+    centers, combined by MAX. This does break exact radial symmetry (two
+    shells around two different points intersect along a real, non-radial
+    seam), and the footprint stops being a plain ellipse. But it still
+    rendered as a smooth rounded "witch hat" (see the phase's verification
+    renders): `1 - t**p_exp` is C1-continuous everywhere except exactly at
+    a seam, and where two lobes of similar height cross, their SLOPES are
+    similar too — a crease with near-equal slopes on both sides reads as
+    smooth to the eye and to raking light, even though it is technically
+    non-smooth. Rounded lobes can union into a bumpier rounded shape; they
+    cannot union into a flat one. Real broken rock is flat FACES meeting at
+    sharp ridges — that needs at least one genuinely PLANAR ingredient, and
+    nothing planar existed anywhere in the stack.
 
-    Per lobe, same two ideas as before still hold and are kept:
+    The fix: lobes still set the boulder's overall SILHOUETTE (footprint
+    size/aspect/irregularity — kept from attempt 2, values below), but the
+    TOP is now carved by intersecting that silhouette envelope with a small
+    number of randomly tilted FACET PLANES, combined by MIN (the boolean-
+    geometry mental model: a rock is what's left after several flat cuts
+    through a rounded blank). A plane is linear, so unlike any power-law
+    lobe its slope is constant right up to a hard crease where it meets the
+    next plane or the envelope — THAT crease is a real edge, not a
+    near-tangent blend, because two different constant slopes essentially
+    never match. Few planes (4-6) with slope magnitude and origin drawn per
+    boulder keep the facets FEW AND LARGE (a chunky flat face reads as
+    "broken rock"; a dozen small ones just reads as noise) — the "fewer,
+    bigger, more distinct" shape this module has been reaching for since
+    attempt 1. The envelope is still what bounds the footprint and gives
+    the rock a footing that tapers into the surrounding terrain instead of
+    an infinite wedge (planes alone are unbounded).
+
+    Per lobe, same two ideas as attempt 2 are kept for the envelope:
     - Rock profile, not dome: height follows `1 - t**p_exp` (t = normalized
-      distance from the lobe's own center, 0..1). A high exponent keeps
-      most of the lobe near full height (a plateau) and only drops in the
-      last sliver before its edge — the opposite of a gaussian, which is
-      ALL shoulder. The last bit of that drop is smoothstep-softened over
-      a band sized to resolution_mm (same antialiasing reasoning as
-      _stones_layer's `shoulder`) so no lobe's edge stairsteps.
-    - Surface roughness: ON TOP of the combined lobes, a further noise
-      field displaces the plateau, amplitude scaled to the boulder's OWN
-      height (small boulders get subtle texture, big ones visible grain)
-      and amplitude-masked by the combined profile (fades out at the edge
-      instead of poking past the silhouette). Its wavelength is floored to
-      ~2.5 grid steps — finer than that can only alias into noise, not
-      render as rock grain (see _stones_layer's shoulder guard).
+      distance from the lobe's own center, 0..1); the higher exponent range
+      here (vs. the original 2.5-4.8) keeps more of the lobe near full
+      height and firms up the footprint's own edge, since the envelope
+      itself is now also a visible boundary (where a facet plane runs
+      higher than the envelope everywhere, the envelope's own edge is what
+      you see). The last bit of the drop is smoothstep-softened over a
+      band sized to resolution_mm (same antialiasing reasoning as
+      _stones_layer's `shoulder`) so the SILHOUETTE edge doesn't stairstep
+      — the facet CREASES inside it are deliberately left hard (see below).
+    - Surface roughness: ON TOP of the carved surface, a further noise
+      field displaces it, amplitude scaled to the boulder's OWN height and
+      masked by the combined profile so it fades at the silhouette edge.
+      Now RIDGED (folded like _fractal's ridged octaves) instead of raw
+      Perlin — plain Perlin grain is smooth bumps, which is exactly the
+      "not angular" complaint one level up; folding it creates small sharp
+      creases in the grain too, consistent with the facets. Wavelength is
+      floored to ~2.5 grid steps (never finer — that can only alias, not
+      render as rock grain) and its amplitude is kept modest since the
+      facets, not the grain, now carry the primary "broken rock" read.
 
-    Every per-boulder and per-lobe random (lobe count/offset/aspect/
-    rotation/exponent/weight, height, roughness amount) is drawn, in a
-    fixed order, from ONE seeded stream (seed ^ salt) — deterministic from
-    the seed and the boulder's position in that stream, so identical twins
-    never happen but the same seed always bakes the same rocks.
+    Facet creases are intentionally NOT smoothstep-softened the way the
+    envelope's outer edge is: a real broken rock face meets its neighbor at
+    a true sharp edge, and softening it would just recreate attempt 2's
+    problem in miniature. A grid step of ~1mm sampling a facet spanning
+    several mm of a ~10-25mm-radius boulder resolves the crease as a real
+    polyline, not noise — and any residual single-step stairstepping on a
+    crease that is SUPPOSED to be sharp reads as more rock, not less (this
+    is the inverse of _stones_layer's aliasing problem, where the cliff was
+    never supposed to be there).
+
+    Every per-boulder, per-lobe, and per-facet random (lobe/facet count,
+    offset, aspect, rotation, exponent, weight, slope, height) is drawn, in
+    a fixed order, from ONE seeded stream (seed ^ salt) — deterministic
+    from the seed and the boulder's position in that stream, so identical
+    twins never happen but the same seed always bakes the same rocks.
 
     Whole boulders are combined by MAX, not sum: two overlapping boulders
     should look like two rocks touching, not a single tower twice as tall.
@@ -380,7 +416,23 @@ def _boulders_layer(seed, width_mm, depth_mm, params, resolution_mm):
         aspect = rng.uniform(0.75, 1.3)
         lrx = r0 * aspect
         lry = r0 / aspect
-        p_exp = rng.uniform(2.5, 4.8)
+        # Higher floor than the original 2.5-4.8: the envelope is a
+        # plateau-then-cliff, not a dome, on purpose. In whatever angular
+        # sector a facet plane's descent is weakest (see _make_facets —
+        # with only a few planes there's always SOME sector where none of
+        # them point squarely outward), the envelope is what's left
+        # carving that sector's outline, and the first faceted bake still
+        # showed a visible round "collar" there (see the phase's
+        # verification renders) — a slow power-law falloff over the outer
+        # ~30% of the radius. A steeper exponent confines that falloff to a
+        # narrower band close to the edge, so even an un-faceted sector
+        # reads as a firm-edged plateau dropping to the terrain, not a dome
+        # shoulder. (Pushing this much higher than 4.5-8, tried during
+        # tuning, over-corrected: combined with tightly-clustered facet
+        # origins it made every boulder read as a shallow cone instead of a
+        # broken chunk — see _make_facets' `op_dist` for the other half of
+        # that fix.)
+        p_exp = rng.uniform(4.5, 8.0)
         # Edge shoulder width, in units of `t` (normalized 0..1 distance) —
         # a fixed mm width (same floor/scale as _stones_layer's `shoulder`)
         # turned into a fraction of THIS lobe's own radius, capped so a
@@ -389,6 +441,67 @@ def _boulders_layer(seed, width_mm, depth_mm, params, resolution_mm):
         shoulder_t = min(0.45, max(resolution_mm * 1.25, 0.3) / max(lrx, lry))
         lca, lsa = math.cos(rot_extra), math.sin(rot_extra)
         return (ou, ov, lrx, lry, lca, lsa, p_exp, shoulder_t, weight)
+
+    def _make_facets(r0):
+        """4-6 tilted half-space planes, roughly spread around the boulder
+        (a base angle per facet plus jitter, so facets don't cluster on one
+        side) with per-facet height/origin variety so some read as one big
+        flat face and others as a smaller chip near an edge. Each plane is
+        `h0 - tilt/r0 * ((u-opx)*cos(ang) + (v-opy)*sin(ang))` in the
+        boulder's own local (u, v) — min'd together (and against the
+        envelope) in `fn` below, which is what turns a rounded blank into a
+        faceted one (see the docstring above).
+
+        `tilt` is DERIVED from a target zero-crossing distance rather than
+        drawn directly: the first version drew slope magnitude straight
+        from a fixed range, and in whatever direction a boulder happened to
+        have no steeply-descending facet, that facet's height stayed near
+        its (near-1.0) origin value almost all the way to the rim — a flat
+        plateau in profile terms, which the envelope then rounds off at the
+        very edge, reading right back as a smooth shoulder in that sector
+        (caught by walking the camera around the boulder in the phase's
+        verification renders, not visible from a single angle). Deriving
+        `tilt` from `h0` and a target distance instead guarantees EVERY
+        facet actually reaches zero somewhere inside its own direction, so
+        no sector is left flat.
+
+        `op_dist` — how far a facet's own local origin sits off the
+        boulder's center — is deliberately wide (up to half the radius),
+        not a tight cluster near the middle: a first pass kept every
+        facet's origin close to center, and with a guaranteed nearby
+        zero-crossing on top, every plane became a wedge converging on
+        roughly the same apex — a shallow CONE with a jagged crown, round
+        in silhouette from most angles, not a broken chunk. Scattering the
+        origins across the footprint instead makes different facets peak
+        and vanish in different places, which is what actually produces
+        faces of visibly different size and position rather than uniform
+        pie slices (verified by walking the camera around; this is the
+        version that reads as broken rock from every angle tried, not just
+        one)."""
+        num_facets = rng.randint(4, 6)
+        facets = []
+        for i in range(num_facets):
+            base_ang = (2.0 * math.pi * i / num_facets) + rng.uniform(
+                -0.5, 0.5
+            ) * (2.0 * math.pi / num_facets)
+            # Plane height at its own local origin — allowed above AND
+            # below the nominal 1.0 peak so some facets crest higher than
+            # others (an uneven, broken-looking top) and some undercut low
+            # enough to chip a corner down toward the envelope's own edge.
+            h0 = rng.uniform(0.7, 1.2)
+            # Distance (in boulder radii, from THIS facet's own origin —
+            # see op_dist below) at which its height reaches zero along its
+            # own descent direction. Wide range: short = a small chip near
+            # its own (possibly off-center) origin, long = a broad face
+            # that barely dips within the footprint, deferring to whichever
+            # other facet or the envelope is lowest there.
+            zero_at = rng.uniform(0.7, 2.0)
+            tilt = h0 / zero_at
+            op_ang = rng.uniform(0.0, 2.0 * math.pi)
+            op_dist = rng.uniform(0.0, 0.5) * r0
+            opx, opy = math.cos(op_ang) * op_dist, math.sin(op_ang) * op_dist
+            facets.append((math.cos(base_ang), math.sin(base_ang), tilt, h0, opx, opy))
+        return facets
 
     boulders = []
     for _ in range(count):
@@ -403,9 +516,11 @@ def _boulders_layer(seed, width_mm, depth_mm, params, resolution_mm):
 
         lobes = [_make_lobe(0.0, 0.0, r0, 0.0, resolution_mm, 1.0)]
         max_extent = max(lobes[0][2], lobes[0][3])
-        # 1-2 smaller "knob" lobes offset from the main center — the
-        # non-radial seams between overlapping lobes are the facet
-        # structure a single warped profile couldn't produce.
+        # 1-2 smaller "knob" lobes offset from the main center — footprint
+        # irregularity (two rocks fused, not a plain ellipse). The TOP's
+        # angularity now comes from the facet planes below, not from these
+        # seams — see the docstring's attempt 2 for why lobe seams alone
+        # weren't enough.
         for _ in range(rng.randint(1, 2)):
             ang = rng.uniform(0.0, 2.0 * math.pi)
             dist = rng.uniform(0.15, 0.45) * r0
@@ -417,31 +532,36 @@ def _boulders_layer(seed, width_mm, depth_mm, params, resolution_mm):
             lobes.append(lobe)
             max_extent = max(max_extent, dist + max(lobe[2], lobe[3]))
 
+        facets = _make_facets(r0)
+
         # Plateau surface roughness: amplitude as a fraction of THIS
         # boulder's own height (see `height` above); wavelength floored so
         # it can't alias (never finer than ~2.5 grid steps) and scales with
-        # the boulder's own size so big rocks show bigger grain.
-        rough_amount = rng.uniform(0.10, 0.20)
+        # the boulder's own size so big rocks show bigger grain. Kept
+        # modest (vs. the original 0.10-0.20) since the facets now carry
+        # most of the "broken rock" read; too much grain on top would blur
+        # the creases back toward smooth.
+        rough_amount = rng.uniform(0.05, 0.12)
         rough_off = Vector((rng.uniform(-1000.0, 1000.0) for _ in range(3)))
-        rough_wavelength = max(resolution_mm * 2.5, r0 * 0.3)
+        rough_wavelength = max(resolution_mm * 2.5, r0 * 0.18)
         ca, sa = math.cos(rot), math.sin(rot)
         # Cheap reject radius for the per-point loop below.
         bound = max_extent * 1.15
         boulders.append((
-            cx, cy, ca, sa, lobes, height,
+            cx, cy, ca, sa, lobes, facets, r0, height,
             rough_amount, rough_off, rough_wavelength, bound,
         ))
 
     def fn(x, y):
         peak = 0.0
-        for (cx, cy, ca, sa, lobes, height,
+        for (cx, cy, ca, sa, lobes, facets, r0, height,
              rough_amount, rough_off, rough_wavelength, bound) in boulders:
             dx, dy = x - cx, y - cy
             if dx * dx + dy * dy > bound * bound:
                 continue
             u = dx * ca + dy * sa
             v = -dx * sa + dy * ca
-            profile = 0.0
+            envelope = 0.0
             for (ou, ov, lrx, lry, lca, lsa, p_exp, shoulder_t, weight) in lobes:
                 lu, lv = u - ou, v - ov
                 luR = lu * lca + lv * lsa
@@ -452,8 +572,19 @@ def _boulders_layer(seed, width_mm, depth_mm, params, resolution_mm):
                 core = max(0.0, 1.0 - t ** p_exp)
                 edge = _smoothstep(min(1.0, (1.0 - t) / shoulder_t))
                 lobe_profile = core * edge * weight
-                if lobe_profile > profile:
-                    profile = lobe_profile
+                if lobe_profile > envelope:
+                    envelope = lobe_profile
+            if envelope <= 0.0:
+                continue
+            # Intersect with every facet plane (MIN, not smoothstep-blended
+            # — the crease is meant to be a real edge, see the docstring).
+            facet_min = math.inf
+            for (fca, fsa, tilt, h0, opx, opy) in facets:
+                pu, pv = u - opx, v - opy
+                plane_h = h0 - (tilt / r0) * (pu * fca + pv * fsa)
+                if plane_h < facet_min:
+                    facet_min = plane_h
+            profile = envelope if facet_min > envelope else facet_min
             if profile <= 0.0:
                 continue
             rp = Vector((
@@ -461,7 +592,11 @@ def _boulders_layer(seed, width_mm, depth_mm, params, resolution_mm):
                 y / rough_wavelength + rough_off.y,
                 rough_off.z,
             ))
-            rough = noise.noise(rp) * rough_amount * profile
+            # Ridged (folded) grain, not raw Perlin — see the docstring:
+            # plain noise is smooth bumps, folding it creates small sharp
+            # creases consistent with the facets instead of fighting them.
+            ridged = 1.0 - abs(noise.noise(rp))
+            rough = (ridged - 0.5) * 2.0 * rough_amount * profile
             bump = (profile + rough) * height
             if bump > peak:
                 peak = bump
