@@ -52,9 +52,18 @@
 #       "max_slope_deg": 55.0,          # reject candidates on steeper ground
 #       "edge_margin_mm": 3.0,          # keep clear of the landscape's outer
 #                                        # planar (x,y) bounding box
+#       "clump": 0.0,                   # 0..1, default 0 — bias candidate
+#                                        # placement toward seeded cluster
+#                                        # centers instead of the even
+#                                        # jittered grid; see build_candidates'
+#                                        # own "clumping" comment block for the
+#                                        # algorithm. 0 = today's even spread,
+#                                        # EXACTLY (no warp step runs at all)
 #       "pieces": [
 #         {"piece": {"Generated": {"kind": "pebble"}}, "weight": 0.6},
 #         {"piece": {"Generated": {"kind": "rock"}},   "weight": 0.4}
+#         # also: {"Generated": {"kind": "twig"|"leaf"|"grass"}} — see
+#         # build_twig_piece/build_leaf_piece/build_grass_piece
 #       ]
 #     }
 #     # ... additional layers, same shape, own seed/density/pieces ...
@@ -386,6 +395,86 @@ PEBBLE_SQUASH_Z = (0.55, 0.85)
 ROCK_SQUASH_Z = (0.45, 0.78)
 ASPECT_XY_RANGE = (0.80, 1.30)
 
+# --------------------------------------------- twig / leaf / grass pieces
+#
+# Three swept/extruded solids, siblings of build_generated_piece but NOT
+# icospheres — an icosphere can't read as a bent stick, a cupped blade, or
+# an upright fin no matter how it's noise-displaced, so each of these gets
+# its own from-scratch mesh recipe (see build_twig_piece/build_leaf_piece/
+# build_grass_piece below). All three share the hard requirement the task
+# that added them calls out explicitly: a WATERTIGHT, MANIFOLD SOLID with
+# real thickness — never a zero-thickness plane (the "billboard-plane"
+# lesson: a flat leaf-shaped card is not sliceable/printable no matter how
+# thin the intended piece is meant to read). Every one of them is a closed
+# shell built purely by ADDING vertices/faces (ring sweeps, fan caps) — no
+# boolean operator touches any of them, so none of them can reintroduce the
+# union-seam manifold defects "Loose shells, not unions" above already
+# retired.
+#
+# Sizes below are the RANGE form of the "canonical 28-32mm-heroic size" the
+# CANONICAL_MM table above uses a single scalar for — pebbles/rocks are
+# round enough that one scalar diameter says everything, but "a twig is
+# 8-15mm long" IS the intrinsic seed-varied shape variety (docs/SCATTER.md
+# "Scale anchor"), analogous to build_generated_piece's own
+# PIECE_SIZE_JITTER draw. `scale`/`scale_factor` still apply ON TOP of that
+# intrinsic draw, exactly like every other piece kind: each build function
+# draws its own dimensions from these ranges first (the piece's "natural"
+# size), then multiplies the WHOLE built mesh by one final uniform scale
+# (`rng.uniform(*scale_range) * scale_factor`) — a twig scaled to 0.5x is a
+# smaller twig with every dimension shrunk together, not a twig with only
+# its length or only its thickness changed.
+
+# Twig: a bent, tapered stick swept along a short piecewise-straight spine.
+TWIG_LENGTH_RANGE_MM = (8.0, 15.0)
+TWIG_THICKNESS_RANGE_MM = (0.6, 1.2)  # diameter at the base (thickest end)
+TWIG_TIP_THICKNESS_FRACTION = 0.45  # tapers to this fraction of base thickness at the tip
+TWIG_RING_VERTS = 6  # hexagonal cross-section — enough to read as round in
+                      # print at this scale without an icosphere-grade budget
+TWIG_SEGMENTS = 5  # 6 rings total (base..tip) — enough resolution for 1-2 kinks
+# "1-2 slight forks/kinks" (the task's own wording) is implemented as 1-2
+# discrete BEND points along the spine, not literal Y-branching topology: a
+# genuine branch would need either a boolean union — reintroducing the
+# exact defect class "Loose shells, not unions" retired above — or a
+# hand-built saddle patch far past what a twig this small needs in order to
+# read correctly at arm's length/print scale. A bent, kinked stick with a
+# tapered tip is what "twig" reads as at 28-32mm-heroic scale, and it keeps
+# every twig a single, trivially-manifold swept tube (no boolean, ever).
+TWIG_KINK_ANGLE_RANGE_DEG = (6.0, 22.0)
+TWIG_ONE_KINK_CHANCE = 0.6  # vs. two kinks the rest of the time
+
+# Leaf: a solid blade — an extruded outline with a raised midrib and a
+# gentle cupped (canoe-like) curve across its width.
+LEAF_LENGTH_RANGE_MM = (5.0, 10.0)
+LEAF_WIDTH_FRACTION_RANGE = (0.42, 0.62)  # widest point's half-width, as a fraction of length
+LEAF_THICKNESS_RANGE_MM = (0.5, 0.8)
+LEAF_BOUNDARY_SAMPLES = 14  # boundary verts per side (each cap = 2x this, a closed loop)
+LEAF_TIP_TAPER_POWER = 1.6  # >1 sharpens the taper vs. a plain sine outline
+LEAF_MIDRIB_FRACTION = 0.35  # midrib ridge height, as a fraction of thickness —
+                              # added SYMMETRICALLY to both faces (see
+                              # build_leaf_piece), so local wall thickness only
+                              # ever grows at the ridge, never thins below
+                              # LEAF_THICKNESS_RANGE_MM
+LEAF_MIDRIB_SHARPNESS = 2.6  # higher = narrower ridge
+LEAF_CUP_FRACTION = 0.55  # edge lift (canoe curl), as a fraction of thickness —
+                           # a whole-cross-section Z offset shared by both faces
+                           # (see build_leaf_piece), so it curls the blade
+                           # without touching local wall thickness at all
+LEAF_OUTLINE_JITTER_FRACTION = 0.08  # per-sample outline noise, fraction of half-width
+
+# Grass: a thin upright blade/fin, WIDTH tapering to a near-point tip while
+# THICKNESS stays constant (only width tapers — see build_grass_piece).
+GRASS_HEIGHT_RANGE_MM = (8.0, 16.0)
+GRASS_BASE_WIDTH_RANGE_MM = (0.8, 1.5)
+GRASS_THICKNESS_MM = 0.5
+GRASS_TIP_WIDTH_FRACTION = 0.08  # near-zero but never literally zero — a true
+                                  # zero-width ring collapses two pairs of
+                                  # verts onto each other, which the STL
+                                  # float32 roundtrip can turn into an exact-
+                                  # zero-area sliver (same lesson MERGE_DIST_MM
+                                  # below already exists for)
+GRASS_SEGMENTS = 5  # 6 rings — enough to carry one smooth lean curve
+GRASS_LEAN_ANGLE_RANGE_DEG = (8.0, 32.0)  # total lean accumulated over the full height
+
 # Merge-by-distance / degenerate-face thresholds — same values as
 # base_cut.py's/gen_landscape.py's cleanup_and_check, same reason (the STL
 # float32 roundtrip can turn a near-zero sliver into an exact zero, dropping
@@ -607,6 +696,18 @@ def clamp(x, lo, hi):
 
 CANONICAL_MM = {"pebble": PEBBLE_CANONICAL_MM, "rock": ROCK_CANONICAL_MM}
 
+# The full Generated-kind set (docs/SCATTER.md pins the enum in
+# scatter.rs's GeneratedPieceKind): "pebble"/"rock" are noise-displaced
+# icospheres built from a CANONICAL_MM scalar (build_generated_piece);
+# "twig"/"leaf"/"grass" are swept/extruded solids, each with its own size
+# RANGE baked into its own build function (build_twig_piece/
+# build_leaf_piece/build_grass_piece) rather than a single CANONICAL_MM
+# scalar — see those functions' docstrings for why a range reads better
+# than one canonical size for organic debris. validate_pieces checks
+# membership in this set (not CANONICAL_MM) so the newer three kinds are
+# accepted without needing a fake CANONICAL_MM entry.
+GENERATED_KINDS = frozenset({"pebble", "rock", "twig", "leaf", "grass"})
+
 
 def validate_pieces(pieces_json, asset_paths):
     """Parse the pinned PieceChoice shape and return
@@ -643,7 +744,7 @@ def validate_pieces(pieces_json, asset_paths):
         if "Generated" not in piece:
             raise ValueError(f"unknown piece source: {list(piece.keys())}")
         kind = piece["Generated"]["kind"]
-        if kind not in CANONICAL_MM:
+        if kind not in GENERATED_KINDS:
             raise ValueError(f"unknown generated piece kind: {kind}")
         if weight > 0.0:
             out.append((("generated", kind), weight))
@@ -773,6 +874,298 @@ def build_generated_piece(kind, rng, scale_range, scale_factor):
     return bm, size_mm, bottom_local, height_local
 
 
+def _ring_frame(tangent):
+    """Two unit vectors perpendicular to `tangent`, spanning its local
+    cross-section plane — shared by build_twig_piece/build_grass_piece's
+    ring-sweep construction. Picks whichever of world X/Y is LESS parallel
+    to `tangent` as the reference axis to cross against, avoiding the
+    degenerate near-zero cross product a single fixed reference would hit
+    if `tangent` ever pointed close to it. Cheap and robust for the small
+    bend angles twigs use (a full loop needing continuous parallel
+    transport never happens at this piece scale)."""
+    ref = Vector((1.0, 0.0, 0.0)) if abs(tangent.x) < 0.9 else Vector((0.0, 1.0, 0.0))
+    u = tangent.cross(ref).normalized()
+    v = tangent.cross(u).normalized()
+    return u, v
+
+
+def build_twig_piece(rng, scale_range, scale_factor):
+    """A bent, tapered hexagonal-cross-section tube — see the "Twig"
+    constants block above for the size ranges and the fork-as-kink design
+    call. Built as TWIG_SEGMENTS+1 rings swept along a piecewise-straight
+    spine that starts at local origin pointing local +Z (the direction that
+    later gets aligned to the terrain normal / stays world-up, same as
+    every other piece — a twig anchors into the terrain at its base and
+    points up out of it) and bends by 1-2 small random kinks. Each ring is
+    a TWIG_RING_VERTS-gon bridged to its neighbor by quads; both end rings
+    close with a flat n-gon cap — every ring is planar by construction (it's
+    built from a fixed radius around a single center point), so
+    cleanup_shell_bm's triangulate step can turn the hexagonal caps and the
+    quad side walls into triangles with no manual fan triangulation needed
+    here, unlike build_leaf_piece's non-planar caps.
+
+    Returns the same (bm, size_mm, bottom_local, height_local) shape
+    build_generated_piece does, so the placement loop in scatter() treats
+    every generated kind identically.
+    """
+    length_mm = rng.uniform(*TWIG_LENGTH_RANGE_MM)
+    base_radius_mm = rng.uniform(*TWIG_THICKNESS_RANGE_MM) / 2.0
+    tip_radius_mm = base_radius_mm * TWIG_TIP_THICKNESS_FRACTION
+    user_scale = rng.uniform(scale_range[0], scale_range[1])
+    final_scale = max(1e-6, user_scale * scale_factor)
+
+    # All rng draws happen HERE, in one fixed-order block, before any
+    # geometry is built — same "fixed-order per-instance draw" discipline
+    # build_generated_piece follows (see the module docstring's determinism
+    # section), so the spine-building loop below only ever READS these,
+    # never draws from `rng` itself.
+    num_kinks = 1 if rng.random() < TWIG_ONE_KINK_CHANCE else 2
+    kink_ts = sorted(rng.uniform(0.3, 0.75) for _ in range(num_kinks))
+    kink_angles_rad = [
+        math.radians(rng.uniform(*TWIG_KINK_ANGLE_RANGE_DEG)) * rng.choice((-1.0, 1.0))
+        for _ in range(num_kinks)
+    ]
+    kink_axis_picks = [rng.choice((0, 1)) for _ in range(num_kinks)]
+
+    num_rings = TWIG_SEGMENTS + 1
+    seg_len = length_mm / TWIG_SEGMENTS
+
+    direction = Vector((0.0, 0.0, 1.0))
+    position = Vector((0.0, 0.0, 0.0))
+    ring_centers = [position.copy()]
+    directions = [direction.copy()]
+    kink_index = 0
+    for seg in range(1, num_rings):
+        t = seg / TWIG_SEGMENTS
+        while kink_index < num_kinks and t >= kink_ts[kink_index]:
+            axis_u, axis_v = _ring_frame(direction)
+            axis = axis_u if kink_axis_picks[kink_index] == 0 else axis_v
+            direction = (Matrix.Rotation(kink_angles_rad[kink_index], 3, axis) @ direction).normalized()
+            kink_index += 1
+        position = position + direction * seg_len
+        ring_centers.append(position.copy())
+        directions.append(direction.copy())
+
+    bm = bmesh.new()
+    rings = []
+    for i, (center, dirn) in enumerate(zip(ring_centers, directions)):
+        t = i / TWIG_SEGMENTS
+        radius = base_radius_mm + (tip_radius_mm - base_radius_mm) * t
+        u, v = _ring_frame(dirn)
+        ring_verts = []
+        for k in range(TWIG_RING_VERTS):
+            a = 2.0 * math.pi * k / TWIG_RING_VERTS
+            co = center + (math.cos(a) * u + math.sin(a) * v) * radius
+            ring_verts.append(bm.verts.new(co))
+        rings.append(ring_verts)
+
+    for i in range(len(rings) - 1):
+        a_ring, b_ring = rings[i], rings[i + 1]
+        for k in range(TWIG_RING_VERTS):
+            k2 = (k + 1) % TWIG_RING_VERTS
+            bm.faces.new((a_ring[k], a_ring[k2], b_ring[k2], b_ring[k]))
+
+    bm.faces.new(rings[0])
+    bm.faces.new(tuple(reversed(rings[-1])))
+
+    bmesh.ops.scale(bm, vec=Vector((final_scale,) * 3), verts=bm.verts)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+    min_z = min((v.co.z for v in bm.verts), default=0.0)
+    max_z = max((v.co.z for v in bm.verts), default=0.0)
+    bottom_local = -min_z
+    height_local = max(1e-6, max_z - min_z)
+    size_mm = length_mm * final_scale
+    return bm, size_mm, bottom_local, height_local
+
+
+def build_leaf_piece(rng, scale_range, scale_factor):
+    """A solid leaf blade: a closed-loop outline (tapered at both ends,
+    seed-jittered per-sample) extruded to LEAF thickness, with a raised
+    midrib and a gentle cupped (canoe) curve baked into both the top and
+    bottom surfaces — see the "Leaf" constants block above for exactly how
+    the midrib (a symmetric thickness bulge) and the cup (a whole-
+    cross-section Z offset) are kept from ever thinning the shell below
+    LEAF_THICKNESS_RANGE_MM. The outline's own width profile is a sine
+    taper raised to LEAF_TIP_TAPER_POWER, which pinches to a point at BOTH
+    ends (t=0 and t=1) — a small lanceolate/willow-leaf silhouette, tapered
+    at the tip as required, with a pointed rather than lobed base.
+
+    Both caps are built as a triangle fan from an interior CENTER vertex
+    rather than a single n-gon: with midrib/cup shaping, the cap is
+    non-planar, and a plain n-gon leaves Blender's own triangulation
+    heuristic to guess a non-planar face's split — a fan from a well-inside
+    center point is unambiguously correct for any simple (non-self-
+    intersecting) outline that's star-shaped from its centroid, which this
+    one always is by construction (width is a smooth function of position
+    along the length, never doubles back on itself). The two pinch points
+    (t=0 and t=1, where the left/right boundary samples coincide) produce
+    duplicate coincident vertices by construction — cleanup_shell_bm's
+    remove_doubles/dissolve_degenerate pass (run on every piece by the
+    caller, same as build_generated_piece) welds them and drops the
+    resulting degenerate triangles, the same "near-zero sliver" handling
+    the module docstring's MERGE_DIST_MM comment already names.
+
+    Returns the same (bm, size_mm, bottom_local, height_local) shape as
+    every other build_* function. Length runs along local +Y (not +Z like
+    the round pieces) so a leaf lies flush against the terrain — its local
+    +Z (the top/bottom thickness axis) is what align_to_surface tilts to
+    the local normal, top face up, the same "which local axis becomes
+    vertical" convention place_piece already applies uniformly.
+    """
+    length_mm = rng.uniform(*LEAF_LENGTH_RANGE_MM)
+    half_width_mm = length_mm * rng.uniform(*LEAF_WIDTH_FRACTION_RANGE)
+    thickness_mm = rng.uniform(*LEAF_THICKNESS_RANGE_MM)
+    user_scale = rng.uniform(scale_range[0], scale_range[1])
+    final_scale = max(1e-6, user_scale * scale_factor)
+
+    outline_offset = Vector((rng.uniform(-1000.0, 1000.0) for _ in range(3)))
+    midrib_height = LEAF_MIDRIB_FRACTION * thickness_mm
+    cup_height = LEAF_CUP_FRACTION * thickness_mm
+    n = LEAF_BOUNDARY_SAMPLES
+
+    def half_width_at(t):
+        # t in [0, 1] along the length, base (0) to tip (1). sin(pi*t)
+        # pinches both ends to a point; raising it to LEAF_TIP_TAPER_POWER
+        # sharpens the taper without changing where it pinches.
+        base = math.sin(math.pi * t) ** LEAF_TIP_TAPER_POWER
+        p = Vector((t * 3.0 + outline_offset.x, outline_offset.y, outline_offset.z))
+        wobble = 1.0 + LEAF_OUTLINE_JITTER_FRACTION * noise.noise(p)
+        return max(0.0, half_width_mm * base * wobble)
+
+    def cap_z(sign, side_frac):
+        # sign = +1 (top) / -1 (bottom). midrib is a SYMMETRIC bulge (both
+        # faces pushed apart, so local thickness only ever grows); cup is a
+        # shared Z offset (both faces shifted the SAME direction, so it
+        # curls the whole cross-section without touching local thickness).
+        midrib = midrib_height * math.exp(-((side_frac * LEAF_MIDRIB_SHARPNESS) ** 2))
+        cup_offset = cup_height * (side_frac ** 2)
+        return sign * (thickness_mm / 2.0 + midrib) + cup_offset
+
+    lefts = []
+    rights = []
+    for i in range(n + 1):
+        t = i / n
+        y = t * length_mm
+        hw = half_width_at(t)
+        lefts.append((y, -hw))
+        rights.append((y, hw))
+    loop = lefts + list(reversed(rights))  # closed boundary, one full lap
+
+    bm = bmesh.new()
+
+    def make_cap(sign):
+        ring_verts = []
+        for y, x in loop:
+            side_frac = 0.0 if half_width_mm <= 1e-9 else x / half_width_mm
+            z = cap_z(sign, side_frac)
+            ring_verts.append(bm.verts.new(Vector((x, y, z))))
+        center = bm.verts.new(Vector((0.0, length_mm * 0.5, cap_z(sign, 0.0))))
+        m = len(ring_verts)
+        for i in range(m):
+            a, b = ring_verts[i], ring_verts[(i + 1) % m]
+            face = (center, a, b) if sign > 0 else (center, b, a)
+            bm.faces.new(face)
+        return ring_verts
+
+    top_ring = make_cap(1.0)
+    bottom_ring = make_cap(-1.0)
+
+    m = len(top_ring)
+    for i in range(m):
+        i2 = (i + 1) % m
+        bm.faces.new((top_ring[i], top_ring[i2], bottom_ring[i2], bottom_ring[i]))
+
+    bmesh.ops.scale(bm, vec=Vector((final_scale,) * 3), verts=bm.verts)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+    min_z = min((v.co.z for v in bm.verts), default=0.0)
+    max_z = max((v.co.z for v in bm.verts), default=0.0)
+    bottom_local = -min_z
+    height_local = max(1e-6, max_z - min_z)
+    size_mm = length_mm * final_scale
+    return bm, size_mm, bottom_local, height_local
+
+
+def build_grass_piece(rng, scale_range, scale_factor):
+    """A thin upright blade — build_twig_piece's sibling with a flattened
+    (diamond, 4-vertex) cross-section instead of a round one: WIDTH tapers
+    from GRASS_BASE_WIDTH_RANGE_MM down to a near-point at the tip while
+    THICKNESS (GRASS_THICKNESS_MM, the direction perpendicular to the lean
+    plane) stays constant along the whole length — see the "Grass"
+    constants block above. Bends with ONE continuous lean distributed
+    evenly across every segment, confined to a single fixed plane (bend
+    axis = local +X, so the blade always leans within the local Y-Z plane)
+    — a real blade of grass has one dominant curve from wind/weight, not
+    multiple kinks the way a woody twig does, hence its own build function
+    rather than a shared one with build_twig_piece despite the similar
+    ring-sweep skeleton. "Clumps come from placement, not one mesh" (the
+    task's own wording) — see build_candidates' clumping warp for the tuft
+    behavior; this function only ever builds ONE blade.
+
+    Returns the same (bm, size_mm, bottom_local, height_local) shape as
+    every other build_* function.
+    """
+    height_mm = rng.uniform(*GRASS_HEIGHT_RANGE_MM)
+    base_width_mm = rng.uniform(*GRASS_BASE_WIDTH_RANGE_MM)
+    tip_width_mm = base_width_mm * GRASS_TIP_WIDTH_FRACTION
+    thickness_mm = GRASS_THICKNESS_MM
+    user_scale = rng.uniform(scale_range[0], scale_range[1])
+    final_scale = max(1e-6, user_scale * scale_factor)
+
+    lean_total_rad = math.radians(rng.uniform(*GRASS_LEAN_ANGLE_RANGE_DEG)) * rng.choice((-1.0, 1.0))
+    lean_axis = Vector((1.0, 0.0, 0.0))
+    width_axis = Vector((1.0, 0.0, 0.0))  # perpendicular to the bend plane, constant
+
+    num_rings = GRASS_SEGMENTS + 1
+    seg_len = height_mm / GRASS_SEGMENTS
+    seg_angle = lean_total_rad / GRASS_SEGMENTS
+
+    direction = Vector((0.0, 0.0, 1.0))
+    position = Vector((0.0, 0.0, 0.0))
+    ring_centers = [position.copy()]
+    directions = [direction.copy()]
+    for _ in range(1, num_rings):
+        direction = (Matrix.Rotation(seg_angle, 3, lean_axis) @ direction).normalized()
+        position = position + direction * seg_len
+        ring_centers.append(position.copy())
+        directions.append(direction.copy())
+
+    bm = bmesh.new()
+    rings = []
+    for i, (center, dirn) in enumerate(zip(ring_centers, directions)):
+        t = i / GRASS_SEGMENTS
+        half_w = (base_width_mm + (tip_width_mm - base_width_mm) * t) / 2.0
+        half_th = thickness_mm / 2.0
+        thickness_axis = dirn.cross(width_axis).normalized()
+        corners = [
+            center + width_axis * half_w,
+            center + thickness_axis * half_th,
+            center - width_axis * half_w,
+            center - thickness_axis * half_th,
+        ]
+        rings.append([bm.verts.new(c) for c in corners])
+
+    for i in range(len(rings) - 1):
+        a_ring, b_ring = rings[i], rings[i + 1]
+        for k in range(4):
+            k2 = (k + 1) % 4
+            bm.faces.new((a_ring[k], a_ring[k2], b_ring[k2], b_ring[k]))
+
+    bm.faces.new(rings[0])
+    bm.faces.new(tuple(reversed(rings[-1])))
+
+    bmesh.ops.scale(bm, vec=Vector((final_scale,) * 3), verts=bm.verts)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+    min_z = min((v.co.z for v in bm.verts), default=0.0)
+    max_z = max((v.co.z for v in bm.verts), default=0.0)
+    bottom_local = -min_z
+    height_local = max(1e-6, max_z - min_z)
+    size_mm = height_mm * final_scale
+    return bm, size_mm, bottom_local, height_local
+
+
 class AssetTemplateCache:
     """Imports each unique Asset id's STL ONCE (docs/SCATTER.md's Asset
     source pin: "Script imports the STL once per unique id (cache)") and
@@ -872,12 +1265,80 @@ def place_piece(bm, bottom_local, hit_loc, normal, align_to_surface, final_sink,
 
 # --------------------------------------------------------------- candidates
 
-def build_candidates(rng, min_x, min_y, max_x, max_y, density_per_dm2, edge_margin_mm):
+# ------------------------------------------------------------- clumping
+#
+# clump (0..1, ScatterParams.clump in scatter.rs): biases candidate
+# placement toward CLUSTERS instead of the even jittered-grid spread above —
+# what makes grass read as tufts and forest debris as drifts, instead of a
+# uniform sprinkle. Algorithm: build the SAME jittered-grid candidates as
+# clump=0 always has (nothing above this comment changes), then, only if
+# clump > 0, WARP each candidate's (x, y) toward whichever of a small set of
+# seeded cluster centers is nearest, by a fraction of the distance
+# proportional to clump. A rectangle is convex, and both the original
+# candidate and every cluster center already satisfy the edge-margin bounds
+# by construction, so linear interpolation between them can never move a
+# warped candidate outside the margin — no extra bounds check needed after
+# the warp.
+#
+# Determinism / independence from the existing behavior: cluster centers are
+# drawn from `random.Random(f"{seed}:scatter-clump:{num_clusters}")` — a
+# stream INDEPENDENT of the `rng` passed in (the layer's own
+# `random.Random(layer["seed"])`, already consumed above for the grid's cell
+# jitter) — so clumping can never perturb the fixed-order draw sequence
+# every other piece of this module's determinism proof depends on: the
+# grid-candidate loop above runs byte-for-byte identically regardless of
+# `clump`, and at clump<=0 this function returns that exact list, untouched
+# — the pin `clump=0 == pre-clump behavior` is true by construction, not by
+# coincidence.
+CLUMP_CANDIDATES_PER_CLUSTER = 6.0  # average grid candidates gathered per tuft
+CLUMP_MAX_PULL = 0.85  # cap so clump=1 still reads as a tight tuft, not every
+                        # candidate collapsed onto one exact point per cluster
+
+
+def _clump_cluster_centers(seed, min_x, min_y, max_x, max_y, edge_margin_mm, num_clusters):
+    """Deterministic cluster centers for the clumping warp, from a stream
+    independent of the layer's own candidate-jitter rng (see the clumping
+    comment above for why that independence matters). Seeded by the STRING
+    `f"{seed}:scatter-clump:{num_clusters}"` rather than reusing the layer
+    stream — same "separate stream for a separate concern" idea as
+    gen_landscape.py's `cluster_offset`/`_seed_offset`, applied here as an
+    actual RNG object (discrete cluster POINTS) instead of a noise offset
+    (a continuous field), since that's what this discrete-candidate case
+    needs. A string, not a tuple: `random.Random()` only accepts
+    None/int/float/str/bytes/bytearray as of Python 3.11 (tuples used to
+    work via an implicit hash() fallback that no longer exists), and a
+    formatted string is deterministic across runs/processes the way
+    Python's built-in `hash()` on an arbitrary object is NOT (hash
+    randomization) — `random.seed()`'s own str handling hashes via a fixed
+    internal conversion, unaffected by PYTHONHASHSEED."""
+    cluster_rng = random.Random(f"{seed}:scatter-clump:{num_clusters}")
+    lo_x, hi_x = min_x + edge_margin_mm, max_x - edge_margin_mm
+    lo_y, hi_y = min_y + edge_margin_mm, max_y - edge_margin_mm
+    if hi_x <= lo_x or hi_y <= lo_y:
+        # Degenerate plate (margin ate the whole area) — every candidate
+        # will already have been rejected by the edge-margin check above,
+        # so the exact center value here is moot; fall back to the bbox
+        # center so callers still get a well-formed (non-empty) list.
+        center = ((lo_x + hi_x) / 2.0, (lo_y + hi_y) / 2.0)
+        return [center] * num_clusters
+    return [(cluster_rng.uniform(lo_x, hi_x), cluster_rng.uniform(lo_y, hi_y)) for _ in range(num_clusters)]
+
+
+def build_candidates(rng, min_x, min_y, max_x, max_y, density_per_dm2, edge_margin_mm, seed=None, clump=0.0):
     """Jittered-grid candidate (x, y) points in FIXED row-major order — see
     the module docstring's determinism note for why the order (and drawing
     both jitter numbers for every cell, accepted or not) matters. density is
     pieces per 100x100mm, so the average area per piece is 10000/density
-    mm^2 and the grid step is that area's square root."""
+    mm^2 and the grid step is that area's square root.
+
+    `clump` (see the "clumping" comment block above this function) is
+    applied as a position WARP after the grid is fully built — it never
+    changes which/how many candidates exist, only where they sit. `seed` is
+    only used to derive the independent cluster-center stream when
+    `clump > 0`; pass the layer's own seed (NOT `rng`, which already carries
+    the grid's own consumed state) — `None` is fine when `clump <= 0`, the
+    common case, since the clumping branch is skipped entirely.
+    """
     if density_per_dm2 <= 0:
         raise ValueError("density_per_dm2 must be > 0")
     step = math.sqrt(10000.0 / density_per_dm2)
@@ -904,7 +1365,19 @@ def build_candidates(rng, min_x, min_y, max_x, max_y, density_per_dm2, edge_marg
             ):
                 continue
             candidates.append((x, y))
-    return candidates
+
+    if clump <= 0.0 or not candidates:
+        return candidates
+
+    num_clusters = max(1, round(len(candidates) / CLUMP_CANDIDATES_PER_CLUSTER))
+    centers = _clump_cluster_centers(seed, min_x, min_y, max_x, max_y, edge_margin_mm, num_clusters)
+    pull = min(1.0, clump) * CLUMP_MAX_PULL
+
+    warped = []
+    for x, y in candidates:
+        cx, cy = min(centers, key=lambda c: (c[0] - x) ** 2 + (c[1] - y) ** 2)
+        warped.append((x + (cx - x) * pull, y + (cy - y) * pull))
+    return warped
 
 
 def raycast_accept(bvh, x, y, ray_z, ray_distance, max_slope_deg):
@@ -948,6 +1421,7 @@ def parse_layer(layer_json, asset_paths):
         "align_to_surface": bool(layer_json.get("align_to_surface", True)),
         "max_slope_deg": float(layer_json.get("max_slope_deg", 55.0)),
         "edge_margin_mm": float(layer_json.get("edge_margin_mm", 2.0)),
+        "clump": float(layer_json.get("clump", 0.0)),
         "pieces": validate_pieces(layer_json["pieces"], asset_paths),
     }
 
@@ -1005,6 +1479,7 @@ def scatter(job, debug):
         grid_candidates = build_candidates(
             layer_rng, min_x, min_y, max_x, max_y,
             layer["density_per_dm2"], layer["edge_margin_mm"],
+            seed=layer["seed"], clump=layer["clump"],
         )
         accepted = []
         for x, y in grid_candidates:
@@ -1028,9 +1503,23 @@ def scatter(job, debug):
             source, key = pick_piece_kind(layer_rng, pieces)
             yaw = layer_rng.uniform(0.0, 2.0 * math.pi)
             if source == "generated":
-                bm, size_mm, bottom_local, height_local = build_generated_piece(
-                    key, layer_rng, scale_range, scale_factor
-                )
+                if key in ("pebble", "rock"):
+                    bm, size_mm, bottom_local, height_local = build_generated_piece(
+                        key, layer_rng, scale_range, scale_factor
+                    )
+                elif key == "twig":
+                    bm, size_mm, bottom_local, height_local = build_twig_piece(
+                        layer_rng, scale_range, scale_factor
+                    )
+                elif key == "leaf":
+                    bm, size_mm, bottom_local, height_local = build_leaf_piece(
+                        layer_rng, scale_range, scale_factor
+                    )
+                else:  # "grass" — validate_pieces already restricted `key`
+                    # to GENERATED_KINDS, so this is the last remaining option
+                    bm, size_mm, bottom_local, height_local = build_grass_piece(
+                        layer_rng, scale_range, scale_factor
+                    )
                 debug_kind = key
             else:  # "asset" — see validate_pieces/build_asset_piece
                 bm, size_mm, bottom_local, height_local = build_asset_piece(

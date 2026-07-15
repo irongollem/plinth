@@ -1393,10 +1393,14 @@ bank_height: number; amount?: number }
 /**
  * A generated piece kind — the only source scatter can actually place
  * today (docs/SCATTER.md "Execution phases": bundled/user assets are S4).
- * Serializes lowercase ("pebble"/"rock") to match
- * scatter_landscape.py's `CANONICAL_MM` keys exactly.
+ * Serializes lowercase ("pebble"/"rock"/"twig"/"leaf"/"grass") to match
+ * scatter_landscape.py's generated-kind set exactly. `Pebble`/`Rock` are
+ * built as noise-displaced icospheres and still live in that script's
+ * `CANONICAL_MM` table; `Twig`/`Leaf`/`Grass` are swept/extruded solids
+ * (see `build_twig_piece`/`build_leaf_piece`/`build_grass_piece` there) —
+ * same dispatch shape, different geometry recipe per kind.
  */
-export type GeneratedPieceKind = "pebble" | "rock"
+export type GeneratedPieceKind = "pebble" | "rock" | "twig" | "leaf" | "grass"
 /**
  * A named, ready-to-generate parameter set (docs/BASECUTTER.md: "Presets
  * are parameter sets" — the cutter-library move again, a new terrain
@@ -1872,7 +1876,20 @@ export type ScatterJob = { landscape_path: string; out_path: string; layers: Sca
  * default (missing keys raise `KeyError`/`ValueError` there), so they stay
  * required here too.
  */
-export type ScatterParams = { seed: number; density_per_dm2: number; scale?: [number, number]; scale_factor?: number; sink_mm?: [number, number]; align_to_surface?: boolean; max_slope_deg?: number; edge_margin_mm?: number; pieces: PieceChoice[] }
+export type ScatterParams = { seed: number; density_per_dm2: number; scale?: [number, number]; scale_factor?: number; sink_mm?: [number, number]; align_to_surface?: boolean; max_slope_deg?: number; edge_margin_mm?: number; 
+/**
+ * Clustering bias for candidate placement, `0.0..=1.0` (see
+ * scatter_landscape.py's `build_candidates`/`_clump_cluster_centers`
+ * for the algorithm this drives). `0.0` (the default) is the original
+ * even jittered-grid behavior EXACTLY — no warp step runs at all, so a
+ * job that omits this key places identically to before it existed.
+ * Toward `1.0`, candidates are pulled toward a handful of seeded
+ * cluster centers instead of staying evenly spread, so pieces read as
+ * tufts/patches (grass clumps, forest-floor drifts) rather than a
+ * uniform scatter. Deterministic and per-layer, same as every other
+ * knob here — see `validate_layer` for the range check.
+ */
+clump?: number; pieces: PieceChoice[] }
 /**
  * One piece's source — externally tagged with NO `#[serde(tag = ...)]`
  * (Rust's default enum-with-struct-variants shape), matching

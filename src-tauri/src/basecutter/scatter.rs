@@ -52,13 +52,20 @@ pub fn materialize_scatter_script(app_handle: &AppHandle) -> Result<PathBuf, App
 
 /// A generated piece kind — the only source scatter can actually place
 /// today (docs/SCATTER.md "Execution phases": bundled/user assets are S4).
-/// Serializes lowercase ("pebble"/"rock") to match
-/// scatter_landscape.py's `CANONICAL_MM` keys exactly.
+/// Serializes lowercase ("pebble"/"rock"/"twig"/"leaf"/"grass") to match
+/// scatter_landscape.py's generated-kind set exactly. `Pebble`/`Rock` are
+/// built as noise-displaced icospheres and still live in that script's
+/// `CANONICAL_MM` table; `Twig`/`Leaf`/`Grass` are swept/extruded solids
+/// (see `build_twig_piece`/`build_leaf_piece`/`build_grass_piece` there) —
+/// same dispatch shape, different geometry recipe per kind.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Type)]
 #[serde(rename_all = "lowercase")]
 pub enum GeneratedPieceKind {
     Pebble,
     Rock,
+    Twig,
+    Leaf,
+    Grass,
 }
 
 /// One piece's source — externally tagged with NO `#[serde(tag = ...)]`
@@ -155,6 +162,9 @@ fn default_max_slope_deg() -> f64 {
 fn default_edge_margin_mm() -> f64 {
     2.0
 }
+fn default_clump() -> f64 {
+    0.0
+}
 
 /// Scatter placement parameters — see docs/SCATTER.md "Pinned interfaces"
 /// and "Scale anchor: 28-32mm heroic". Defaults mirror
@@ -180,6 +190,18 @@ pub struct ScatterParams {
     pub max_slope_deg: f64,
     #[serde(default = "default_edge_margin_mm")]
     pub edge_margin_mm: f64,
+    /// Clustering bias for candidate placement, `0.0..=1.0` (see
+    /// scatter_landscape.py's `build_candidates`/`_clump_cluster_centers`
+    /// for the algorithm this drives). `0.0` (the default) is the original
+    /// even jittered-grid behavior EXACTLY — no warp step runs at all, so a
+    /// job that omits this key places identically to before it existed.
+    /// Toward `1.0`, candidates are pulled toward a handful of seeded
+    /// cluster centers instead of staying evenly spread, so pieces read as
+    /// tufts/patches (grass clumps, forest-floor drifts) rather than a
+    /// uniform scatter. Deterministic and per-layer, same as every other
+    /// knob here — see `validate_layer` for the range check.
+    #[serde(default = "default_clump")]
+    pub clump: f64,
     pub pieces: Vec<PieceChoice>,
 }
 
@@ -574,6 +596,16 @@ fn validate_layer(index: usize, params: &ScatterParams) -> Result<(), AppError> 
             scale_lo, scale_hi
         )));
     }
+    // Rejected, not clamped — every other range in this function (density,
+    // scale) is a hard reject on out-of-range input rather than a silent
+    // clamp, so a typo'd clump value surfaces immediately instead of
+    // quietly running at a different value than what was asked for.
+    if !(0.0..=1.0).contains(&params.clump) {
+        return Err(AppError::InvalidInput(format!(
+            "layer {index}: clump must be in 0.0..=1.0, got {}",
+            params.clump
+        )));
+    }
     if params.pieces.is_empty() {
         return Err(AppError::InvalidInput(format!(
             "layer {index}: pieces is empty — nothing to scatter"
@@ -810,6 +842,7 @@ mod tests {
             align_to_surface: true,
             max_slope_deg: 55.0,
             edge_margin_mm: 3.0,
+            clump: 0.0,
             pieces: vec![
                 pebble(0.6),
                 PieceChoice {
@@ -854,6 +887,7 @@ mod tests {
             "align_to_surface",
             "max_slope_deg",
             "edge_margin_mm",
+            "clump",
             "pieces",
         ] {
             assert!(
@@ -920,6 +954,29 @@ mod tests {
         assert_eq!(back, choice);
     }
 
+    /// The three new Generated kinds (twig/leaf/grass) must round-trip
+    /// through the SAME externally-tagged, lowercase shape as pebble/rock —
+    /// scatter_landscape.py's generated-kind dispatch matches on these exact
+    /// lowercase strings (see its GENERATED_KINDS set).
+    #[test]
+    fn twig_leaf_grass_piece_kinds_serialize_to_the_pinned_lowercase_shape() {
+        for (kind, expected) in [
+            (GeneratedPieceKind::Twig, "twig"),
+            (GeneratedPieceKind::Leaf, "leaf"),
+            (GeneratedPieceKind::Grass, "grass"),
+        ] {
+            let choice = PieceChoice {
+                piece: ScatterPieceSource::Generated { kind: kind.clone() },
+                weight: 1.0,
+            };
+            let json = serde_json::to_value(&choice).unwrap();
+            assert_eq!(json["piece"]["Generated"]["kind"], expected);
+
+            let back: PieceChoice = serde_json::from_value(json).unwrap();
+            assert_eq!(back, choice);
+        }
+    }
+
     /// Every default here must match scatter_landscape.py's own
     /// `params.get(key, default)` fallbacks exactly — a JSON that omits an
     /// optional key must behave identically whether Rust or the script
@@ -938,6 +995,11 @@ mod tests {
         assert!(params.align_to_surface);
         assert_eq!(params.max_slope_deg, 55.0);
         assert_eq!(params.edge_margin_mm, 2.0);
+        // layer_json.get("clump", 0.0) — omitting clump must reproduce the
+        // pre-clump even jittered-grid behavior exactly (see
+        // scatter_landscape.py's build_candidates: clump <= 0.0 skips the
+        // warp step entirely).
+        assert_eq!(params.clump, 0.0);
         // entry.get("weight", 1.0)
         assert_eq!(params.pieces[0].weight, 1.0);
     }
@@ -1219,6 +1281,56 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// `clump` is a 0.0..=1.0 knob (docs/SCATTER.md-pinned range in this
+    /// task) — out-of-range values are REJECTED, not silently clamped, same
+    /// house style as density/scale above; the boundary values 0.0 and 1.0
+    /// are both valid (inclusive range).
+    #[test]
+    fn validate_scatter_job_rejects_out_of_range_clump_and_accepts_the_boundaries() {
+        let dir = std::env::temp_dir().join(format!("stlpack_scatter_validate_clump_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let landscape = dir.join("landscape.stl");
+        std::fs::write(&landscape, b"not a real stl, just needs to exist").unwrap();
+        let landscape_path = landscape.to_string_lossy().into_owned();
+        let out_path = dir.join("out.stl").to_string_lossy().into_owned();
+
+        let mut params = valid_params();
+        params.clump = -0.01;
+        let job = ScatterJob { landscape_path: landscape_path.clone(), out_path: out_path.clone(), layers: vec![params] };
+        assert!(matches!(validate_scatter_job(&job), Err(AppError::InvalidInput(_))));
+
+        let mut params = valid_params();
+        params.clump = 1.01;
+        let job = ScatterJob { landscape_path: landscape_path.clone(), out_path: out_path.clone(), layers: vec![params] };
+        assert!(matches!(validate_scatter_job(&job), Err(AppError::InvalidInput(_))));
+
+        let mut params = valid_params();
+        params.clump = 0.0;
+        let job = ScatterJob { landscape_path: landscape_path.clone(), out_path: out_path.clone(), layers: vec![params] };
+        assert!(validate_scatter_job(&job).is_ok(), "clump=0.0 (the boundary/default) must be accepted");
+
+        let mut params = valid_params();
+        params.clump = 1.0;
+        let job = ScatterJob { landscape_path, out_path, layers: vec![params] };
+        assert!(validate_scatter_job(&job).is_ok(), "clump=1.0 (the other boundary) must be accepted");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A JSON payload that omits `clump` (an older UI build, or a preset
+    /// authored before this knob existed) must deserialize to 0.0 — the
+    /// "no clumping, identical to before this feature" default.
+    #[test]
+    fn clump_defaults_to_zero_when_omitted() {
+        let json = serde_json::json!({
+            "seed": 1,
+            "density_per_dm2": 10.0,
+            "pieces": [{"piece": {"Generated": {"kind": "pebble"}}}]
+        });
+        let params: ScatterParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.clump, 0.0);
+    }
+
     #[test]
     fn validate_scatter_job_rejects_an_empty_layer_stack() {
         let dir = std::env::temp_dir().join(format!("stlpack_scatter_validate_nolayers_{}", std::process::id()));
@@ -1429,6 +1541,7 @@ mod tests {
             align_to_surface: true,
             max_slope_deg: 55.0,
             edge_margin_mm: 3.0,
+            clump: 0.0,
             pieces: vec![pebble(0.6), rock(0.4)],
         };
         // Layer 1: the bundled skull + more rocks, a DIFFERENT seed and
@@ -1442,6 +1555,7 @@ mod tests {
             align_to_surface: true,
             max_slope_deg: 55.0,
             edge_margin_mm: 3.0,
+            clump: 0.0,
             pieces: vec![
                 PieceChoice {
                     piece: ScatterPieceSource::Asset {
