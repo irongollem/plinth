@@ -827,6 +827,14 @@ async cancelBaseCut(jobId: string) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async exportCutsToCatalog(paths: string[], root: string, groupName: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_cuts_to_catalog", { paths, root, groupName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getLandscapePresets() : Promise<GeneratorPreset[]> {
     return await TAURI_INVOKE("get_landscape_presets");
 },
@@ -1525,7 +1533,17 @@ look_config?: string | null;
  * Render the configured scale-reference figure beside the model
  * (settings supply the STL path + height; silently off when unset).
  */
-scale_reference?: boolean }
+scale_reference?: boolean; 
+/**
+ * Stand the model on a standard tapered wargaming base — the hobby's
+ * own "banana for scale" (docs/BASECUTTER.md "Synergy: standard bases
+ * in the Render tool"). The NOMINAL (bottom-face) footprint the user
+ * picked from `basecutter::cutters::get_cutter_library`; None = no
+ * base. Rust derives the cut (top-face) footprint via `top_face_of`
+ * before this ever reaches the script — see
+ * `render::engine::build_render_command`.
+ */
+base?: CutterKind | null }
 export type RenderProgressStatus = { job_id: string; current_sample: number; total_samples: number; percent: number }
 export type RenderStartedStatus = { job_id: string; output_path: string }
 export type RenderStatus = { Started: RenderStartedStatus } | { Progress: RenderProgressStatus } | { Completed: RenderCompletedStatus } | { Failed: RenderFailedStatus } | { Cancelled: RenderCancelledStatus }
@@ -1612,7 +1630,17 @@ scale_reference_height_mm?: number | null;
  * The creator's licence file (PDF/txt/md), offered as a toggle in the
  * release builder — set once, ride along in every release.3pk.
  */
-licence_path?: string | null }
+licence_path?: string | null; 
+/**
+ * The user's magnet inventory (docs/BASECUTTER.md "Hollow, with magnet
+ * mounts"): what they actually own, e.g. 5x1, 6x2, 10x2. Base Cutter's
+ * per-placement magnet panel offers one chip per entry and suggests
+ * the largest whose boss fits a given base — never a hardcoded
+ * base->magnet table. Seeded with common hobby sizes on first load
+ * (see settings::default_magnet_inventory), same pattern as
+ * known_designers. serde(default): an older store has no such key.
+ */
+magnet_inventory?: MagnetSpec[] | null }
 export type StartedStatus = { job_id: string; total_files: number; total_size_kb: number }
 /**
  * A model as the release builder stages it and `model.json` records it.

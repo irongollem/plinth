@@ -72,7 +72,10 @@ pub(crate) fn job_active(prefix: &str) -> bool {
 
 /// Trailing-separator-insensitive form of a root path — must agree with the
 /// scoping in db::replace_catalog or the same folder scans as two roots.
-fn normalized_root(path: &str) -> String {
+/// pub(crate): basecutter::commands::export_cuts_to_catalog reuses this to
+/// check its `root` argument against the same normalized catalog_roots list,
+/// rather than growing a second trimming convention.
+pub(crate) fn normalized_root(path: &str) -> String {
     let trimmed = path.trim_end_matches(std::path::MAIN_SEPARATOR);
     if trimmed.is_empty() {
         path.to_string()

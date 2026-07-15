@@ -10,7 +10,7 @@ mod process;
 mod render;
 mod settings;
 
-use basecutter::commands::{cancel_base_cut, start_base_cut};
+use basecutter::commands::{cancel_base_cut, export_cuts_to_catalog, start_base_cut};
 use basecutter::cutters::{get_cutter_library, get_plinth_defaults};
 use basecutter::generator::{
     cancel_landscape_generation, get_landscape_presets, start_landscape_generation,
@@ -147,6 +147,7 @@ fn create_specta_builder() -> Builder {
             get_plinth_defaults,
             start_base_cut,
             cancel_base_cut,
+            export_cuts_to_catalog,
             get_landscape_presets,
             start_landscape_generation,
             cancel_landscape_generation,

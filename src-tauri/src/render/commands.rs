@@ -93,7 +93,7 @@ pub async fn start_render(
     let output_path = if options.overwrite {
         output_path
     } else {
-        unique_path(output_path)
+        crate::file::utils::unique_path(output_path)
     };
 
     let job_id = Uuid::new_v4().to_string();
@@ -121,29 +121,6 @@ pub async fn start_render(
     });
 
     Ok(job_id)
-}
-
-/// First non-existing variant of `path`: name.png, name-1.png, name-2.png...
-fn unique_path(path: PathBuf) -> PathBuf {
-    if !path.exists() {
-        return path;
-    }
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "render".to_string());
-    let extension = path
-        .extension()
-        .map(|e| e.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "png".to_string());
-    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
-    for n in 1.. {
-        let candidate = parent.join(format!("{}-{}.{}", stem, n, extension));
-        if !candidate.exists() {
-            return candidate;
-        }
-    }
-    unreachable!("ran out of integers before file names")
 }
 
 /// Read an image as a data URL for the branding bake. The webview draws

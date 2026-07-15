@@ -14,54 +14,59 @@ use super::{pack, FileRow, FileVariantRow, ModelRow, PackRow, IMAGE_EXTENSIONS, 
 /// parses — serde ignores fields we don't list, like model_files). This is
 /// the read side of metadata portability: whatever a release was packed with
 /// is restored on scan. See docs/3PK.md.
+///
+/// `pub(crate)`, fields included, so basecutter::commands' export sidecar
+/// writer and its tests can parse a freshly written sidecar into the exact
+/// type the scanner will later read it back as — one struct, no drift
+/// between "what we write" and "what we read".
 #[derive(Deserialize)]
-struct ModelJson {
+pub(crate) struct ModelJson {
     #[serde(default)]
-    id: Option<Uuid>,
-    name: String,
+    pub(crate) id: Option<Uuid>,
+    pub(crate) name: String,
     #[serde(default)]
-    description: Option<String>,
+    pub(crate) description: Option<String>,
     #[serde(default)]
-    tags: Vec<String>,
+    pub(crate) tags: Vec<String>,
     #[serde(default)]
-    images: Vec<String>,
+    pub(crate) images: Vec<String>,
     #[serde(default)]
-    variant: Option<String>,
+    pub(crate) variant: Option<String>,
     #[serde(default)]
-    pose: Option<String>,
+    pub(crate) pose: Option<String>,
     #[serde(default)]
-    scale: Option<String>,
+    pub(crate) scale: Option<String>,
     #[serde(default)]
-    support_status: Option<String>,
+    pub(crate) support_status: Option<String>,
     #[serde(default)]
-    release_date: Option<String>,
+    pub(crate) release_date: Option<String>,
     #[serde(default)]
-    designer: Option<String>,
+    pub(crate) designer: Option<String>,
     #[serde(default)]
-    sculptor: Option<String>,
+    pub(crate) sculptor: Option<String>,
     #[serde(default)]
-    release_name: Option<String>,
+    pub(crate) release_name: Option<String>,
     #[serde(default)]
-    base_round_mm: Option<String>,
+    pub(crate) base_round_mm: Option<String>,
     #[serde(default)]
-    base_square_mm: Option<String>,
+    pub(crate) base_square_mm: Option<String>,
     /// Chosen render orientation "x,y,z" (Blender euler degrees) — written
     /// by the render pipeline so re-renders skip repositioning. Additive.
     #[serde(default)]
-    rotation: Option<String>,
+    pub(crate) rotation: Option<String>,
     /// Measured printed size "WxDxH" in mm + part count, from the render
     /// pipeline's geometry pass. Additive.
     #[serde(default)]
-    dims_mm: Option<String>,
+    pub(crate) dims_mm: Option<String>,
     #[serde(default)]
-    part_count: Option<u32>,
+    pub(crate) part_count: Option<u32>,
     /// Per-file variant/pose split, restored into file_variants on scan.
     #[serde(default)]
-    file_poses: Vec<FilePoseJson>,
+    pub(crate) file_poses: Vec<FilePoseJson>,
 }
 
 #[derive(Deserialize)]
-struct FilePoseJson {
+pub(crate) struct FilePoseJson {
     /// File name relative to the model dir (matched by basename in its subtree).
     name: String,
     #[serde(default)]

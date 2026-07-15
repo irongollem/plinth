@@ -710,4 +710,55 @@ bpy.ops.wm.stl_export(filepath=out_path, export_selected_objects=True)
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    // ---- cross-language drift tripwire (docs/BASECUTTER.md "The plinth") --
+    //
+    // src/utils/magnetSuggest.ts mirrors three pieces of base_cut.py's magnet
+    // math in TypeScript, since the frontend suggests/fits magnets without a
+    // round-trip to Blender: the r_boss formula, the _magnet_positions
+    // spacing expression, and MAX_MAGNET_COUNT. Unlike cutFootprint.ts's
+    // mirror of the taper shrink (pinned by cutters.rs's own Rust tests
+    // against the same numbers), nothing here fails if base_cut.py's magnet
+    // math changes underfoot — this test is that failure.
+    //
+    // If this test fails: base_cut.py's magnet geometry changed.
+    // src/utils/magnetSuggest.ts (and its magnetSuggest.test.ts) must be
+    // re-mirrored to match, and the pinned strings below updated to the new
+    // source lines.
+
+    #[test]
+    fn magnet_boss_formula_is_still_the_string_magnet_suggest_ts_mirrors() {
+        assert!(
+            BASE_CUT_SCRIPT.contains(
+                r#"r_boss = magnet["diameter_mm"] / 2.0 + clearance + wall"#
+            ),
+            "base_cut.py's boss-radius formula changed — re-mirror \
+             bossOuterDiameterMm in src/utils/magnetSuggest.ts"
+        );
+    }
+
+    #[test]
+    fn magnet_positions_spacing_is_still_the_expression_magnet_suggest_ts_mirrors() {
+        assert!(
+            BASE_CUT_SCRIPT.contains("spacing = long_dim / (count + 1)"),
+            "base_cut.py's _magnet_positions spacing changed — re-mirror \
+             magnetPositionsMm in src/utils/magnetSuggest.ts"
+        );
+        assert!(
+            BASE_CUT_SCRIPT.contains(
+                "return [direction * ((i - (count - 1) / 2.0) * spacing) for i in range(count)]"
+            ),
+            "base_cut.py's _magnet_positions offset formula changed — re-mirror \
+             magnetPositionsMm in src/utils/magnetSuggest.ts"
+        );
+    }
+
+    #[test]
+    fn max_magnet_count_is_still_the_value_magnet_suggest_ts_mirrors() {
+        assert!(
+            BASE_CUT_SCRIPT.contains("MAX_MAGNET_COUNT = 4"),
+            "base_cut.py's MAX_MAGNET_COUNT changed — update the mirrored \
+             constant of the same name in src/utils/magnetSuggest.ts"
+        );
+    }
 }
