@@ -1012,9 +1012,12 @@ export type BlenderProvisionStatus = { Started: ProvisionStartedStatus } | { Pro
  */
 export type BlenderVerdict = "Missing" | "TooOld" | "Outdated" | "Ok"
 /**
- * N seeded gaussian bumps — loose rock/rubble, combined by max (not sum)
- * so overlapping boulders read as touching domes rather than a stacked
- * tower (see gen_landscape.py's _boulders_layer docstring).
+ * N seeded rocks — lumpy elliptical footprints with a per-boulder
+ * superellipse height profile (steep-shouldered, flat-topped plateau, not
+ * a gaussian dome) and noise-displaced surface grain, combined by max (not
+ * sum) so overlapping boulders read as touching stones rather than a
+ * stacked tower (see gen_landscape.py's _boulders_layer docstring — that's
+ * where all the shape tuning lives, this struct is just count/size/amount).
  */
 export type BouldersLayer = { enabled?: boolean; count: number; min_mm: number; max_mm: number; amount?: number }
 /**

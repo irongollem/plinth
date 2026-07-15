@@ -317,34 +317,152 @@ def _stones_layer(seed, params, resolution_mm):
     return fn
 
 
-def _boulders_layer(seed, width_mm, depth_mm, params):
-    """N seeded gaussian bumps — count/min/max diameter, one weight for the
-    whole layer. A dedicated random.Random stream (seed ^ a fixed salt) so
-    boulder placement never shifts when other layers' params change.
+def _boulders_layer(seed, width_mm, depth_mm, params, resolution_mm):
+    """N seeded ROCKS — half-buried stones, not smooth domes. A gaussian
+    bump (the original implementation) is a perfect circle in plan and an
+    all-shoulder, no-plateau profile — at miniature scale that reads as a
+    pimple, not a rock. Fixing that took two attempts worth recording:
 
-    Combined by MAX, not sum: two overlapping boulders should look like two
-    domes touching, not a single tower twice as tall. A sum would also make
-    the final normalize-to-relief_mm step read the busiest cluster as "the"
-    peak and flatten every solitary boulder elsewhere on the plate down to
-    near nothing."""
+    A single warped-radius profile (radius = f(theta), or even the radial
+    distance domain-warped by 2D noise before measuring) still failed: any
+    profile that is ONE superellipse measured from ONE center is, by
+    construction, a family of nested self-similar shells around that
+    center. Warping barely changes that when the warp's wavelength is
+    comparable to the boulder's own radius (the common case) — the result
+    reads as a fluted bundt cake / flower, ridges running dead straight
+    from crown to base, not a rock (caught by actually rendering it, see
+    the phase's verification renders; this is why the module is built to
+    require baking + looking, not just formula review).
+
+    The fix: a boulder is a small UNION of 2-3 superellipse LOBES with
+    DIFFERENT centers (one main lobe plus 1-2 smaller offset "knob" lobes,
+    each its own aspect/rotation/exponent/weight), combined by MAX. Offset
+    centers are what real facet structure needs — two shells around two
+    different points intersect along a real, non-radial seam, which is
+    exactly what a stone's broken-facet look is. This is the same
+    "combine by max, not sum" idea the module already uses one level up
+    for whole boulders, just applied WITHIN one boulder too.
+
+    Per lobe, same two ideas as before still hold and are kept:
+    - Rock profile, not dome: height follows `1 - t**p_exp` (t = normalized
+      distance from the lobe's own center, 0..1). A high exponent keeps
+      most of the lobe near full height (a plateau) and only drops in the
+      last sliver before its edge — the opposite of a gaussian, which is
+      ALL shoulder. The last bit of that drop is smoothstep-softened over
+      a band sized to resolution_mm (same antialiasing reasoning as
+      _stones_layer's `shoulder`) so no lobe's edge stairsteps.
+    - Surface roughness: ON TOP of the combined lobes, a further noise
+      field displaces the plateau, amplitude scaled to the boulder's OWN
+      height (small boulders get subtle texture, big ones visible grain)
+      and amplitude-masked by the combined profile (fades out at the edge
+      instead of poking past the silhouette). Its wavelength is floored to
+      ~2.5 grid steps — finer than that can only alias into noise, not
+      render as rock grain (see _stones_layer's shoulder guard).
+
+    Every per-boulder and per-lobe random (lobe count/offset/aspect/
+    rotation/exponent/weight, height, roughness amount) is drawn, in a
+    fixed order, from ONE seeded stream (seed ^ salt) — deterministic from
+    the seed and the boulder's position in that stream, so identical twins
+    never happen but the same seed always bakes the same rocks.
+
+    Whole boulders are combined by MAX, not sum: two overlapping boulders
+    should look like two rocks touching, not a single tower twice as tall.
+    A sum would also make the final normalize-to-relief_mm step read the
+    busiest cluster as "the" peak and flatten every solitary boulder
+    elsewhere on the plate down to near nothing."""
     count = max(0, int(params.get("count", 6)))
     min_mm = params.get("min_mm", 8.0)
     max_mm = params.get("max_mm", 20.0)
     amount = params.get("amount", 1.0)
     rng = random.Random((int(seed) & 0xFFFFFFFF) ^ _SALT_BOULDERS)
+
+    def _make_lobe(ou, ov, r0, rot_extra, resolution_mm, weight):
+        aspect = rng.uniform(0.75, 1.3)
+        lrx = r0 * aspect
+        lry = r0 / aspect
+        p_exp = rng.uniform(2.5, 4.8)
+        # Edge shoulder width, in units of `t` (normalized 0..1 distance) —
+        # a fixed mm width (same floor/scale as _stones_layer's `shoulder`)
+        # turned into a fraction of THIS lobe's own radius, capped so a
+        # tiny lobe on a coarse grid doesn't lose its whole plateau to the
+        # antialiasing band.
+        shoulder_t = min(0.45, max(resolution_mm * 1.25, 0.3) / max(lrx, lry))
+        lca, lsa = math.cos(rot_extra), math.sin(rot_extra)
+        return (ou, ov, lrx, lry, lca, lsa, p_exp, shoulder_t, weight)
+
     boulders = []
     for _ in range(count):
         cx = rng.uniform(-width_mm / 2.0, width_mm / 2.0)
         cy = rng.uniform(-depth_mm / 2.0, depth_mm / 2.0)
         diameter = rng.uniform(min(min_mm, max_mm), max(min_mm, max_mm))
-        boulders.append((cx, cy, max(0.1, diameter / 2.0)))
+        r0 = max(0.1, diameter / 2.0)
+        rot = rng.uniform(0.0, 2.0 * math.pi)
+        # Per-boulder height variance — identical heights read as stamped
+        # copies, not rubble.
+        height = rng.uniform(0.7, 1.15)
+
+        lobes = [_make_lobe(0.0, 0.0, r0, 0.0, resolution_mm, 1.0)]
+        max_extent = max(lobes[0][2], lobes[0][3])
+        # 1-2 smaller "knob" lobes offset from the main center — the
+        # non-radial seams between overlapping lobes are the facet
+        # structure a single warped profile couldn't produce.
+        for _ in range(rng.randint(1, 2)):
+            ang = rng.uniform(0.0, 2.0 * math.pi)
+            dist = rng.uniform(0.15, 0.45) * r0
+            ou, ov = math.cos(ang) * dist, math.sin(ang) * dist
+            sub_r0 = rng.uniform(0.4, 0.7) * r0
+            sub_rot = rng.uniform(-0.7, 0.7)
+            sub_weight = rng.uniform(0.6, 0.95)
+            lobe = _make_lobe(ou, ov, sub_r0, sub_rot, resolution_mm, sub_weight)
+            lobes.append(lobe)
+            max_extent = max(max_extent, dist + max(lobe[2], lobe[3]))
+
+        # Plateau surface roughness: amplitude as a fraction of THIS
+        # boulder's own height (see `height` above); wavelength floored so
+        # it can't alias (never finer than ~2.5 grid steps) and scales with
+        # the boulder's own size so big rocks show bigger grain.
+        rough_amount = rng.uniform(0.10, 0.20)
+        rough_off = Vector((rng.uniform(-1000.0, 1000.0) for _ in range(3)))
+        rough_wavelength = max(resolution_mm * 2.5, r0 * 0.3)
+        ca, sa = math.cos(rot), math.sin(rot)
+        # Cheap reject radius for the per-point loop below.
+        bound = max_extent * 1.15
+        boulders.append((
+            cx, cy, ca, sa, lobes, height,
+            rough_amount, rough_off, rough_wavelength, bound,
+        ))
 
     def fn(x, y):
         peak = 0.0
-        for cx, cy, r in boulders:
-            sigma = max(0.1, r * 0.6)
-            dist2 = (x - cx) ** 2 + (y - cy) ** 2
-            bump = math.exp(-dist2 / (2.0 * sigma * sigma))
+        for (cx, cy, ca, sa, lobes, height,
+             rough_amount, rough_off, rough_wavelength, bound) in boulders:
+            dx, dy = x - cx, y - cy
+            if dx * dx + dy * dy > bound * bound:
+                continue
+            u = dx * ca + dy * sa
+            v = -dx * sa + dy * ca
+            profile = 0.0
+            for (ou, ov, lrx, lry, lca, lsa, p_exp, shoulder_t, weight) in lobes:
+                lu, lv = u - ou, v - ov
+                luR = lu * lca + lv * lsa
+                lvR = -lu * lsa + lv * lca
+                t = math.sqrt((luR / lrx) ** 2 + (lvR / lry) ** 2)
+                if t >= 1.0:
+                    continue
+                core = max(0.0, 1.0 - t ** p_exp)
+                edge = _smoothstep(min(1.0, (1.0 - t) / shoulder_t))
+                lobe_profile = core * edge * weight
+                if lobe_profile > profile:
+                    profile = lobe_profile
+            if profile <= 0.0:
+                continue
+            rp = Vector((
+                x / rough_wavelength + rough_off.x,
+                y / rough_wavelength + rough_off.y,
+                rough_off.z,
+            ))
+            rough = noise.noise(rp) * rough_amount * profile
+            bump = (profile + rough) * height
             if bump > peak:
                 peak = bump
         return peak * amount
@@ -406,7 +524,7 @@ def build_layer_fns(seed, width_mm, depth_mm, layers, resolution_mm):
     if layers.get("stones", {}).get("enabled"):
         fns.append(_stones_layer(seed, layers["stones"], resolution_mm))
     if layers.get("boulders", {}).get("enabled"):
-        fns.append(_boulders_layer(seed, width_mm, depth_mm, layers["boulders"]))
+        fns.append(_boulders_layer(seed, width_mm, depth_mm, layers["boulders"], resolution_mm))
     if layers.get("flow", {}).get("enabled"):
         fns.append(_flow_layer(seed, layers["flow"]))
     if layers.get("camber", {}).get("enabled"):

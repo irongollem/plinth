@@ -152,9 +152,12 @@ impl Default for StonesLayer {
     }
 }
 
-/// N seeded gaussian bumps — loose rock/rubble, combined by max (not sum)
-/// so overlapping boulders read as touching domes rather than a stacked
-/// tower (see gen_landscape.py's _boulders_layer docstring).
+/// N seeded rocks — lumpy elliptical footprints with a per-boulder
+/// superellipse height profile (steep-shouldered, flat-topped plateau, not
+/// a gaussian dome) and noise-displaced surface grain, combined by max (not
+/// sum) so overlapping boulders read as touching stones rather than a
+/// stacked tower (see gen_landscape.py's _boulders_layer docstring — that's
+/// where all the shape tuning lives, this struct is just count/size/amount).
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
 pub struct BouldersLayer {
     #[serde(default)]
@@ -297,7 +300,7 @@ pub struct GeneratorPreset {
 ///   (0.1, i.e. small/fine features) relative to the boulders (amount 1.0,
 ///   14-30mm) — an earlier tuning pass at noise amount 0.35/scale 0.15 (a
 ///   similar wavelength to the boulders themselves) visually swamped the
-///   boulder domes into the noise texture; separating the two features by
+///   boulder shapes into the noise texture; separating the two features by
 ///   both amplitude AND frequency is what made the boulders read as
 ///   boulders again (see the phase's verification renders).
 /// - **lava-flow**: the flow channel field + a light ridged-noise crust so
