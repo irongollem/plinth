@@ -284,14 +284,18 @@ type ScatterMixEntry = {
   enabled: boolean;
   weight: number;
 };
-/** The two GENERATED kinds (docs/SCATTER.md "Placement algorithm") — always
- * offered, independent of what's loaded from the backend. See
- * `bundledPieces`/`userLibraryPieces` below for the other two PIECE MIX
- * groups (docs/SCATTER.md "UI (BaseCutter view)": "generated kinds first,
- * then bundled, then user library"). */
+/** The five GENERATED kinds (docs/SCATTER.md "Placement algorithm") — always
+ * offered, independent of what's loaded from the backend. Procedural solids
+ * built in-script, same as pebble/rock (commit 6744fc2 added twig/leaf/grass
+ * alongside them). See `bundledPieces`/`userLibraryPieces` below for the
+ * other two PIECE MIX groups (docs/SCATTER.md "UI (BaseCutter view)":
+ * "generated kinds first, then bundled, then user library"). */
 const debrisPieces = reactive<ScatterMixEntry[]>([
   { kind: "pebble", enabled: true, weight: 1 },
   { kind: "rock", enabled: true, weight: 1 },
+  { kind: "twig", enabled: true, weight: 1 },
+  { kind: "leaf", enabled: true, weight: 1 },
+  { kind: "grass", enabled: true, weight: 1 },
 ]);
 
 /** One row per available piece from a non-generated source (BUNDLED or USER
@@ -353,6 +357,12 @@ type DebrisParams = {
   align_to_surface: boolean;
   max_slope_deg: number;
   edge_margin_mm: number;
+  /** Clustering bias, `0..=1` (see `ScatterParams.clump`'s doc comment in
+   * bindings.ts) — 0 is the original even jittered-grid spread, unchanged
+   * default so existing behavior doesn't shift. Per-layer, like every other
+   * knob here: it rides into buildScatterParams()'s output and is baked with
+   * the rest of the draft when a layer is added. */
+  clump: number;
 };
 const debrisParams = reactive<DebrisParams>({
   seed: 1,
@@ -365,21 +375,28 @@ const debrisParams = reactive<DebrisParams>({
   align_to_surface: true,
   max_slope_deg: 45,
   edge_margin_mm: 3,
+  clump: 0,
 });
 
 /** Preset mixes as chips (docs/SCATTER.md UI spec) — a local literal, the
  * cutter-library move: a new mix is a new row here, not a new pipeline.
- * Weights are relative (PieceChoice.weight), not fractions.
+ * Weights are relative (PieceChoice.weight), not fractions. `weights` is
+ * partial over the five GENERATED kinds — an omitted kind defaults to 0
+ * (filtered the same as unchecked, see `isMixed`), so existing presets don't
+ * need to spell out `twig`/`leaf`/`grass: 0` by hand.
  * `assetWeights` is optional and keys BUNDLED asset ids only (the bundled
  * set ships with the app, so a preset can safely reference its ids by name
  * — see `scatter_assets::BUNDLED_ASSETS` for the id table); a preset never
  * touches USER LIBRARY rows, which are specific to whatever the user
- * happens to have in their own folder. */
+ * happens to have in their own folder. `clump` is set explicitly by every
+ * preset (unlike the omittable weights) since it's the one ADVANCED knob a
+ * preset reaches into — see `draftMatchesSelectedPreset`. */
 type ScatterPreset = {
   id: string;
   label: string;
   density_per_dm2: number;
-  weights: { pebble: number; rock: number };
+  clump: number;
+  weights: Partial<Record<GeneratedPieceKind, number>>;
   assetWeights?: Record<string, number>;
 };
 const SCATTER_PRESETS: ScatterPreset[] = [
@@ -387,24 +404,28 @@ const SCATTER_PRESETS: ScatterPreset[] = [
     id: "light-pebbles",
     label: "Light pebbles",
     density_per_dm2: 4,
+    clump: 0,
     weights: { pebble: 4, rock: 1 },
   },
   {
     id: "rocky-debris",
     label: "Rocky debris",
     density_per_dm2: 9,
+    clump: 0,
     weights: { pebble: 1, rock: 3 },
   },
   {
     id: "dense-rubble",
     label: "Dense rubble",
     density_per_dm2: 18,
+    clump: 0,
     weights: { pebble: 1, rock: 1 },
   },
   {
     id: "boneyard",
     label: "Boneyard",
     density_per_dm2: 6,
+    clump: 0,
     // Pebbles stay in as light filler; rock is left out entirely (weight 0
     // is filtered the same as unchecked — see buildScatterParams).
     weights: { pebble: 1, rock: 0 },
@@ -422,19 +443,45 @@ const SCATTER_PRESETS: ScatterPreset[] = [
       "bone-pilot-whale-mandible": 1,
     },
   },
+  {
+    id: "grass",
+    label: "Grass",
+    density_per_dm2: 40,
+    // High clump: grass reads as tufts/patches, not an even lawn — see
+    // ScatterParams.clump's doc comment in bindings.ts.
+    clump: 0.7,
+    weights: { grass: 0.85, pebble: 0.15 },
+  },
+  {
+    id: "forest-ground",
+    label: "Forest ground",
+    density_per_dm2: 18,
+    clump: 0.4,
+    // A drift of leaf litter and fallen twigs with the odd mushroom and a
+    // little grit underneath — leaf/twig/pebble/rock are generated kinds,
+    // the mushroom is the one curated bundled asset that fits (see
+    // assetWeights below; gracefully skipped if the bundled set failed to
+    // load, same as Boneyard's skulls/bones).
+    weights: { leaf: 0.35, twig: 0.25, pebble: 0.15, rock: 0.1 },
+    assetWeights: { mushroom: 0.15 },
+  },
 ];
 const selectedScatterPresetId = ref<string | null>(null);
 
 const selectScatterPreset = (preset: ScatterPreset) => {
   debrisParams.density_per_dm2 = preset.density_per_dm2;
+  debrisParams.clump = preset.clump;
   for (const piece of debrisPieces) {
     piece.enabled = true;
-    piece.weight = preset.weights[piece.kind];
+    piece.weight = preset.weights[piece.kind] ?? 0;
   }
   // A preset fully redefines the bundled slice of the mix too — any
   // bundled id not in this preset's assetWeights turns off, exactly like
   // the generated pieces above always get an explicit weight rather than
-  // partial carry-over from whatever was picked before.
+  // partial carry-over from whatever was picked before. If the bundled set
+  // never loaded (getScatterAssets failed), bundledPieces is empty and this
+  // loop simply does nothing — the preset still applies its generated-kind
+  // weights and density/clump, it just has no mushroom row to enable.
   for (const bundled of bundledPieces.value) {
     const weight = preset.assetWeights?.[bundled.asset.id];
     bundled.enabled = weight !== undefined;
@@ -450,18 +497,22 @@ const rerollDebrisSeed = () => {
 };
 
 /** Whether the CURRENT draft still matches the preset last clicked. A hand
- * edit anywhere a preset writes to — density, the generated-piece mix, or a
- * bundled weight/enable — silently detaches the draft from it (a preset
- * never touches seed or the ADVANCED knobs, so those don't count). Read
- * when a layer is added (docs/SCATTER.md "Layers") to decide its label. */
+ * edit anywhere a preset writes to — density, clump, the generated-piece
+ * mix, or a bundled weight/enable — silently detaches the draft from it (a
+ * preset never touches seed or the OTHER ADVANCED knobs, clump aside, so
+ * those don't count). Read when a layer is added (docs/SCATTER.md "Layers")
+ * to decide its label. */
 const draftMatchesSelectedPreset = computed(() => {
   const preset = SCATTER_PRESETS.find(
     (p) => p.id === selectedScatterPresetId.value,
   );
   if (!preset) return false;
   if (debrisParams.density_per_dm2 !== preset.density_per_dm2) return false;
+  if (debrisParams.clump !== preset.clump) return false;
   if (
-    debrisPieces.some((p) => !p.enabled || p.weight !== preset.weights[p.kind])
+    debrisPieces.some(
+      (p) => !p.enabled || p.weight !== (preset.weights[p.kind] ?? 0),
+    )
   ) {
     return false;
   }
@@ -556,6 +607,7 @@ const buildScatterParams = (): ScatterParams => ({
   align_to_surface: debrisParams.align_to_surface,
   max_slope_deg: debrisParams.max_slope_deg,
   edge_margin_mm: debrisParams.edge_margin_mm,
+  clump: debrisParams.clump,
   pieces: [
     ...debrisPieces.filter(isMixed).map((p) => ({
       piece: { Generated: { kind: p.kind } },
@@ -2675,6 +2727,31 @@ watch(baseCut.finishedSummary, (summary) => {
                 :min="0"
                 v-model="debrisParams.edge_margin_mm"
               />
+
+              <div class="flex flex-col gap-1">
+                <div class="flex items-center gap-2">
+                  <span class="text-[11px] w-24 shrink-0">Clumping</span>
+                  <input
+                    type="range"
+                    class="range range-xs flex-1"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    v-model.number="debrisParams.clump"
+                  />
+                  <input
+                    type="number"
+                    class="input input-xs w-16 font-mono"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    v-model.number="debrisParams.clump"
+                  />
+                </div>
+                <span class="text-[10.5px] text-base-content/40 pl-26"
+                  >0 = even spread · 1 = tight tufts</span
+                >
+              </div>
 
               <div
                 class="flex flex-col gap-1.5 border-t border-base-content/10 pt-2"
