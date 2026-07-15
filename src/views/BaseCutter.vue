@@ -765,9 +765,14 @@ const addPlacement = (cutter: Cutter) => {
 // selected cutter. Both append to `placements` (never wipe it) and name
 // each new placement through the same `nextName` the palette uses, so
 // generated and hand-placed bases share one naming sequence.
+// "Random spread", not "Scatter": the debris scatter in step 2 already
+// owns that word in the UI, and two visible Scatters that do unrelated
+// things is a support ticket factory. Internal names (runScatter,
+// scatterCount, the "scatter" key) stay — the wire and the code never
+// confused themselves, only the labels did.
 const GENERATOR_MODES = [
   { key: "regiment", label: "Regiment" },
-  { key: "scatter", label: "Scatter" },
+  { key: "scatter", label: "Random spread" },
 ] as const;
 const generatorMode = ref<(typeof GENERATOR_MODES)[number]["key"]>("regiment");
 const regimentRows = ref(2);
@@ -909,7 +914,7 @@ const runScatter = () => {
   );
   pushGenerated(cutter.id, generated);
   toastStore.addToast(
-    `Scattered ${generated.length} of ${requested} — ${
+    `Spread ${generated.length} of ${requested} — ${
       generated.length < requested
         ? "ran out of room without overlapping"
         : "placed"
@@ -2472,7 +2477,7 @@ watch(baseCut.finishedSummary, (summary) => {
                 :title="generatorBlockedReason"
                 @click="runScatter"
               >
-                Scatter
+                Spread randomly
               </button>
             </div>
           </div>
