@@ -53,6 +53,25 @@ export const componentVertexColors = (
     if (ra !== rb) parent[ra] = rb;
   };
 
+  // Connectivity must be by POSITION, not by the caller's index. The decode
+  // worker's mergeVertices hashes normals too, and STL carries flat
+  // per-face normals — so coincident vertices at every face boundary stay
+  // UNMERGED, and a union-find over that index shatters one smooth surface
+  // into hundreds of components (the terrain then loses "largest" to a
+  // stray flat patch, and most of it gets mis-tinted). Welding coincident
+  // positions first re-fuses those splits; distinct shells never share a
+  // position, so they stay apart. Quantized to 1e-4 mm — the normal-split
+  // duplicates are exactly-equal positions, so they collide identically.
+  const posRep = new Map<string, number>();
+  for (let v = 0; v < vertexCount; v++) {
+    const key = `${Math.round(position[v * 3] * 1e4)},${Math.round(
+      position[v * 3 + 1] * 1e4,
+    )},${Math.round(position[v * 3 + 2] * 1e4)}`;
+    const rep = posRep.get(key);
+    if (rep === undefined) posRep.set(key, v);
+    else union(v, rep);
+  }
+
   for (let t = 0; t < index.length; t += 3) {
     union(index[t], index[t + 1]);
     union(index[t + 1], index[t + 2]);
