@@ -19,6 +19,33 @@ remeshing, and boolean-unioning the piece into a landscape counts as a
 derivative, which ND forbids outright, and SA would try to drag our own
 bundle content under its terms.
 
+## Curation verdict (2026-07-15, after the 101-piece preview render)
+
+The downloaded packs were converted and batch-rendered (101/101 clean —
+contact sheet at `~/Downloads/plinth-scatter-curation/curation-report.html`),
+and the verdict is a hard narrowing: **game assets are for games, not for
+printing.** Resin reproduces every facet at 0.05 mm, so a 176-tri prop
+that reads fine in a viewport reads as a toy next to a sculpted mini.
+The one survivor of the eyeball pass was the OpenGameArt mushroom —
+3,584 tris / 175 KB, sourced from an actual sculpted .blend.
+
+That yields a SELECTION CRITERION for organic pieces: binary STL is
+~50 bytes/triangle, so **reject anything under ~150 KB (≈3k tris) as
+sourced** — below that a piece cannot carry sculpted surface detail —
+and admit into the bundle at **≤ ~1 MB after decimation** (the ~15k-tri
+target). Size is a proxy for sculpt-density, not a substitute for the
+eyeball + manifold gate; it's the cheap first filter. Hard-surface bits
+(crates/gravestones/barrels — legitimately angular, legitimately light)
+are exempt from the floor but only earn a slot if a subdivide/bevel A/B
+render at true base scale passes the same "next to a sculpted mini" test.
+
+Bundled set direction: scan-quality skulls (Dundee/raven remix, manual
+download pending) + the OGA mushroom + at most a couple of A/B-approved
+hard-surface pieces. Everything else organic goes PROCEDURAL (rocks and
+pebbles already shipped in scatter_landscape.py; bones and tufts join as
+generated kinds) — zero bundle bytes and no aesthetic clash. Real premium
+scatter enters through the user-library door, which is S4's other half.
+
 ## Summary
 
 | Category                       | Verdict           | Notes                                                                                                                 |
