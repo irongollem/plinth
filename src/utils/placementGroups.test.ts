@@ -5,6 +5,7 @@ import {
   moveDelta,
   normalizeDeg,
   reindexSelection,
+  renameMember,
   rotateGroup,
 } from "./placementGroups";
 
@@ -175,6 +176,44 @@ describe("moveDelta", () => {
     }
     expect(totalDx).toBeCloseTo(9);
     expect(totalDy).toBeCloseTo(9);
+  });
+});
+
+describe("renameMember", () => {
+  type Group = { id: string; label: string; names: string[] };
+
+  it("rewrites the renamed member's entry in its group's names", () => {
+    const groups: Group[] = [
+      { id: "g1", label: "regiment 1", names: ["round32-1", "round32-2"] },
+    ];
+    const out = renameMember(groups, "round32-1", "Left Flank");
+    expect(out[0].names).toEqual(["Left Flank", "round32-2"]);
+  });
+
+  it("leaves other groups untouched", () => {
+    const groups: Group[] = [
+      { id: "g1", label: "regiment 1", names: ["round32-1", "round32-2"] },
+      { id: "g2", label: "regiment 2", names: ["square25-1", "square25-2"] },
+    ];
+    const out = renameMember(groups, "square25-1", "Right Flank");
+    expect(out[0]).toBe(groups[0]); // untouched group is the SAME reference
+    expect(out[1].names).toEqual(["Right Flank", "square25-2"]);
+  });
+
+  it("is a no-op (same array reference) when the name isn't grouped", () => {
+    const groups: Group[] = [
+      { id: "g1", label: "regiment 1", names: ["round32-1", "round32-2"] },
+    ];
+    const out = renameMember(groups, "not-a-member", "whatever");
+    expect(out).toBe(groups);
+  });
+
+  it("does not mutate the input group objects", () => {
+    const groups: Group[] = [
+      { id: "g1", label: "regiment 1", names: ["round32-1", "round32-2"] },
+    ];
+    renameMember(groups, "round32-1", "Left Flank");
+    expect(groups[0].names).toEqual(["round32-1", "round32-2"]);
   });
 });
 

@@ -96,6 +96,34 @@ export const moveDelta = (
 });
 
 /**
+ * Rewrite whichever group holds `oldName` so its `names` entry says
+ * `newName` instead — the frontend counterpart of a placement rename.
+ * Membership is keyed by placement NAME (see BaseCutter.vue's `groups` doc
+ * comment: names are minted collision-free and never reused while a
+ * placement carrying one still lives, which is exactly what makes a name a
+ * stable handle in the first place). A rename that doesn't also patch this
+ * silently drops the placement out of its own group from that point on:
+ * `names` would still hold the OLD name, which no live placement carries
+ * anymore, so `groupOfName(newName)` returns undefined for a member that's
+ * still very much grouped.
+ *
+ * A no-op — returns `groups` itself, not a copy — when `oldName` isn't
+ * held by any group, so renaming an ungrouped placement never allocates.
+ */
+export const renameMember = <G extends { names: string[] }>(
+  groups: G[],
+  oldName: string,
+  newName: string,
+): G[] => {
+  if (!groups.some((g) => g.names.includes(oldName))) return groups;
+  return groups.map((g) =>
+    g.names.includes(oldName)
+      ? { ...g, names: g.names.map((n) => (n === oldName ? newName : n)) }
+      : g,
+  );
+};
+
+/**
  * Recompute a `selectedIndex` after removing `removedIndices` (any order,
  * any count) from the placements array it indexes into — extends
  * BaseCutter.vue's original single-delete compensation (null out the

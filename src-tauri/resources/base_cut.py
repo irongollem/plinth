@@ -85,6 +85,14 @@
 #   "manifold":bool, ...additive fields below} / CUT_FAILED {"index":i,
 #   "reason":...} / JOB_DONE {json}
 #
+# CUT_DONE's "out" is never a guessed "{out_dir}/{name}.stl" — it's whatever
+# unique_out_path (below) actually wrote to, which gets a "-1", "-2", ...
+# suffix the moment out_dir already holds a file of that name (a second job
+# run into the same out_dir, or two placements that share a name in
+# different jobs). Mirrors file::utils::unique_path's convention Rust-side
+# (render/commands.rs and basecutter::commands::export_cuts both use it for
+# THEIR outputs) so a re-run never silently clobbers an earlier base.
+#
 # CUT_DONE's additive fields (all optional, present only when relevant —
 # see docs/BASECUTTER.md "Pinned interfaces"):
 #   "fused": false + "shells": N  — normal mode only: the plug/plinth union
@@ -627,6 +635,30 @@ def incorporate_pieces(target, claimed, rehome, seat_shift):
 
 # ------------------------------------------------------------------ the cut
 
+def unique_out_path(out_dir, name):
+    """First non-existing `{out_dir}/{name}.stl`, else `{name}-1.stl`,
+    `{name}-2.stl`, ... — the never-clobber convention Rust already applies
+    to ITS OWN outputs (file::utils::unique_path, shared by
+    render/commands.rs and basecutter::commands::export_cuts). Placement
+    names come from a per-JOB counter on the frontend (BaseCutter.vue's
+    nextNames — restarts at -1 for a fresh placements list, since names are
+    scoped to one job/session), so two SEPARATE jobs cutting into the same
+    out_dir can easily mint the same "round32.stl" — that used to silently
+    overwrite the earlier base. Checked here, at write time, rather than
+    only at the frontend's validate_placements (which only ever sees ONE
+    job's placements and can't know what an earlier job already wrote to
+    disk)."""
+    candidate = os.path.join(out_dir, f"{name}.stl")
+    if not os.path.exists(candidate):
+        return candidate
+    n = 1
+    while True:
+        candidate = os.path.join(out_dir, f"{name}-{n}.stl")
+        if not os.path.exists(candidate):
+            return candidate
+        n += 1
+
+
 def seat_height(plug_obj):
     """Lowest z of the sculpted surface: min over vertices of upward-facing
     faces. The plug's walls are vertical and its carrier bottom faces down,
@@ -811,7 +843,7 @@ def cut_one(
         extra["shells"] = shells
 
     name = placement.get("name") or f"base_{index}"
-    out = os.path.join(out_dir, f"{name}.stl")
+    out = unique_out_path(out_dir, name)
     bpy.ops.object.select_all(action="DESELECT")
     base.select_set(True)
     bpy.context.view_layer.objects.active = base

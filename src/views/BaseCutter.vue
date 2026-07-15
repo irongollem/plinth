@@ -6,7 +6,15 @@
  * viewport (LandscapeViewport) is a dumb renderer + drag/select/rotate
  * input surface that emits update/select/delete events.
  */
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import {
+  type ComponentPublicInstance,
+  computed,
+  nextTick,
+  onMounted,
+  reactive,
+  ref,
+  watch,
+} from "vue";
 import type {
   BaseCutJob,
   BouldersLayer,
@@ -33,7 +41,7 @@ import LandscapeViewport from "../components/LandscapeViewport.vue";
 import NumberInput from "../components/NumberInput.vue";
 import ProgressBar from "../components/ProgressBar.vue";
 import Switch from "../components/Switch.vue";
-import { useBaseCut } from "../composables/useBaseCut";
+import { type BaseCutResult, useBaseCut } from "../composables/useBaseCut";
 import { useBlenderProvision } from "../composables/useBlenderProvision";
 import { selectDirectory, useFileSelect } from "../composables/useFileSelect";
 import { useLandscapeGen } from "../composables/useLandscapeGen";
@@ -56,8 +64,10 @@ import {
   moveDelta,
   normalizeDeg,
   reindexSelection,
+  renameMember,
   rotateGroup,
 } from "../utils/placementGroups";
+import { validatePlacementName } from "../utils/placementName";
 import { popLast, pushBounded } from "../utils/placementUndo";
 
 const toastStore = useToastStore();
@@ -438,20 +448,26 @@ onMounted(async () => {
     presets,
     settingsResult,
     rootsResult,
-    assets,
+    assetsResult,
   ] = await Promise.all([
     commands.getCutterLibrary(),
     commands.getPlinthDefaults(),
     commands.getLandscapePresets(),
     commands.getSettings(),
     commands.listCatalogRoots(),
-    // S4 (docs/SCATTER.md "Execution phases") returns [] until curation
-    // lands — called now anyway so the piece mix editor lights up
-    // automatically the day it isn't, with no UI change needed.
+    // The bundled museum pieces (S4, commit 67bdf19) — materialized
+    // lazily backend-side, hence the Result shape.
     commands.getScatterAssets(),
   ]);
   cutterLibrary.value = library;
-  scatterAssets.value = assets;
+  if (assetsResult.status === "ok") {
+    scatterAssets.value = assetsResult.data;
+  } else {
+    toastStore.reportError(
+      "Failed to load bundled scatter pieces",
+      assetsResult.error,
+    );
+  }
   Object.assign(plinth, plinthDefaults);
   landscapePresets.value = presets;
   if (presets.length) selectPreset(presets[0]);
@@ -727,6 +743,99 @@ const locked = computed(
     landscapeGen.isRunning.value ||
     debrisScatter.isRunning.value,
 );
+
+// ---- inline placement rename (PLACEMENTS list — click the ✎ beside a
+// name) ----
+// A placement's name feeds its output STL's file name (base_cut.py:
+// "{name}.stl") — the collision-and-overwrite bug this whole feature fixes
+// — so the edit is validated at commit against the same rule Rust's
+// validate_placements enforces (no two placements share a non-empty name,
+// case-insensitively since target filesystems are mostly Windows) PLUS
+// filesystem-safety Rust doesn't need to check itself (validatePlacementName
+// in ../utils/placementName). Only one row edits at a time — `editingIndex`
+// is a single value, not a per-row flag — which also keeps the "which input
+// do I focus" question trivial (see the watch below).
+const editingIndex = ref<number | null>(null);
+const nameDraft = ref("");
+const nameError = ref("");
+let nameInputEl: HTMLInputElement | null = null;
+const setNameInputRef = (el: Element | ComponentPublicInstance | null) => {
+  nameInputEl = (el as HTMLInputElement) ?? null;
+};
+// Autofocus + select-all whenever a row enters edit mode, same "the input
+// should be immediately typeable" courtesy the rest of the app's inline
+// editors give (see CatalogDrawer's group rename). nextTick: the input
+// doesn't exist in the DOM until the v-if switch this watch reacts to has
+// actually re-rendered.
+watch(editingIndex, async (index) => {
+  if (index === null) return;
+  await nextTick();
+  nameInputEl?.focus();
+  nameInputEl?.select();
+});
+
+/** Disabled-with-tooltip reason for the rename affordance — same convention
+ * as `undoBlockedReason` above, never a click-then-scold. */
+const renameBlockedReason = computed(() =>
+  locked.value ? "Locked while a job is running" : "",
+);
+
+const startEditName = (index: number) => {
+  if (locked.value) return;
+  editingIndex.value = index;
+  nameDraft.value = placements.value[index]?.name ?? "";
+  nameError.value = "";
+};
+
+/** Discard the edit and revert to the span — Escape's job. Never runs
+ * validation; whatever's on screen (valid or not) is simply dropped. */
+const cancelEditName = () => {
+  editingIndex.value = null;
+  nameError.value = "";
+};
+
+/** Commit-on-blur/enter (bound to both events in the template — see the
+ * house convention noted at this const's call sites): validates the draft
+ * and, on failure, KEEPS editing state with an inline error rather than a
+ * toast (house UX rule — never click-then-scold) and refocuses the input
+ * (blur already moved focus away by the time this runs for the @blur path;
+ * Enter never blurs, so the refocus is a no-op there). On success, updates
+ * the placement's name and — this is the part that's easy to forget, see
+ * placementGroups.ts's renameMember doc comment — the group's `names` entry
+ * too, since membership is keyed by name and a stale entry silently drops
+ * the placement out of its own group. */
+const commitEditName = () => {
+  const index = editingIndex.value;
+  if (index === null) return;
+  const placement = placements.value[index];
+  if (!placement) {
+    editingIndex.value = null;
+    return;
+  }
+  const otherNames = placements.value
+    .filter((_, i) => i !== index)
+    .map((p) => p.name);
+  const error = validatePlacementName(nameDraft.value, otherNames);
+  if (error) {
+    nameError.value = error;
+    nextTick(() => nameInputEl?.focus());
+    return;
+  }
+  const newName = nameDraft.value.trim();
+  const oldName = placement.name;
+  if (newName === oldName) {
+    editingIndex.value = null;
+    nameError.value = "";
+    return;
+  }
+  pushUndoSnapshot();
+  placement.name = newName;
+  if (oldName) {
+    groups.value = renameMember(groups.value, oldName, newName);
+  }
+  editingIndex.value = null;
+  nameError.value = "";
+};
 
 const addPlacement = (cutter: Cutter) => {
   generatorCutterId.value = cutter.id;
@@ -1378,6 +1487,23 @@ const stepLabel = computed(() => {
 
 const resultName = (index: number) =>
   jobPlacementNames.value[index] ?? `#${index + 1}`;
+
+/** Display name for a finished cut in the RESULTS list — read off CUT_DONE's
+ * own "out" path (base_cut.py's unique_out_path already resolved any
+ * collision by the time this fires), never `resultName`'s pre-job guess.
+ * A reconstructed guess would silently lie the moment out_dir already held
+ * a file of that name — the results list would say "round32" while the
+ * file on disk is actually "round32-1.stl", which is exactly the kind of
+ * quiet mismatch this whole rename/uniquify feature exists to kill. Falls
+ * back to `resultName` only when there's no out_path to read yet (a failed
+ * cut never got one). */
+const resultDisplayName = (r: BaseCutResult) => {
+  if (r.out_path) {
+    const base = r.out_path.split(/[/\\]/).pop() ?? r.out_path;
+    return base.replace(/\.stl$/i, "");
+  }
+  return resultName(r.index);
+};
 
 /* ---- export into the catalog (docs/BASECUTTER.md phase 5) ----
  * Cut output stays local/catalog-bound — this only ever copies into a
@@ -2516,9 +2642,42 @@ watch(baseCut.finishedSummary, (summary) => {
                   "
                   @click="selectedIndex = row.index"
                 >
-                  <span class="flex-1 truncate font-medium">{{
-                    row.p.name
-                  }}</span>
+                  <template v-if="editingIndex === row.index">
+                    <div class="flex-1 min-w-0 flex flex-col" @click.stop>
+                      <input
+                        type="text"
+                        v-model="nameDraft"
+                        class="input input-xs font-mono w-full"
+                        :class="nameError ? 'input-error' : ''"
+                        :ref="setNameInputRef"
+                        @keydown.enter.prevent="commitEditName"
+                        @keydown.escape.prevent="cancelEditName"
+                        @blur="commitEditName"
+                      />
+                      <span
+                        v-if="nameError"
+                        class="text-[10px] text-error truncate"
+                        >{{ nameError }}</span
+                      >
+                    </div>
+                  </template>
+                  <template v-else>
+                    <span class="flex-1 truncate font-medium">{{
+                      row.p.name
+                    }}</span>
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-xs px-1 opacity-40 hover:opacity-100"
+                      :title="
+                        renameBlockedReason ||
+                        'Rename — the name becomes the output file name'
+                      "
+                      :disabled="locked"
+                      @click.stop="startEditName(row.index)"
+                    >
+                      ✎
+                    </button>
+                  </template>
                   <span class="text-base-content/50 font-mono text-[10px]">{{
                     cutterLabel(row.p.cutter)
                   }}</span>
@@ -2625,9 +2784,42 @@ watch(baseCut.finishedSummary, (summary) => {
                       "
                       @click="selectedIndex = m.index"
                     >
-                      <span class="flex-1 truncate font-medium">{{
-                        m.p.name
-                      }}</span>
+                      <template v-if="editingIndex === m.index">
+                        <div class="flex-1 min-w-0 flex flex-col" @click.stop>
+                          <input
+                            type="text"
+                            v-model="nameDraft"
+                            class="input input-xs font-mono w-full"
+                            :class="nameError ? 'input-error' : ''"
+                            :ref="setNameInputRef"
+                            @keydown.enter.prevent="commitEditName"
+                            @keydown.escape.prevent="cancelEditName"
+                            @blur="commitEditName"
+                          />
+                          <span
+                            v-if="nameError"
+                            class="text-[10px] text-error truncate"
+                            >{{ nameError }}</span
+                          >
+                        </div>
+                      </template>
+                      <template v-else>
+                        <span class="flex-1 truncate font-medium">{{
+                          m.p.name
+                        }}</span>
+                        <button
+                          type="button"
+                          class="btn btn-ghost btn-xs px-1 opacity-40 hover:opacity-100"
+                          :title="
+                            renameBlockedReason ||
+                            'Rename — the name becomes the output file name'
+                          "
+                          :disabled="locked"
+                          @click.stop="startEditName(m.index)"
+                        >
+                          ✎
+                        </button>
+                      </template>
                       <span
                         class="text-base-content/50 font-mono text-[10px]"
                         >{{ cutterLabel(m.p.cutter) }}</span
@@ -2982,7 +3174,9 @@ watch(baseCut.finishedSummary, (summary) => {
                   "
                   >{{ r.ok ? (r.manifold ? "✓" : "⚠") : "✗" }}</span
                 >
-                <span class="flex-1 truncate">{{ resultName(r.index) }}</span>
+                <span class="flex-1 truncate" :title="r.out_path">{{
+                  resultDisplayName(r)
+                }}</span>
                 <span v-if="!r.ok" class="text-error text-[11px] truncate">{{
                   r.reason
                 }}</span>
