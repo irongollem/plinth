@@ -43,7 +43,14 @@
 # stdout protocol (parsed by basecutter::scatter, S2):
 #   SCATTER_START
 #   SCATTER_PROGRESS {"placed":i,"total":N}
-#   SCATTER_DONE {"out":...,"placed":N,"manifold":bool}
+#   SCATTER_DONE {"out":...,"placed":N,"manifold":bool,
+#                 "non_manifold_edges":N,"total_edges":M}
+#     (manifold/edge counts are measured on the EXPORTED file via a
+#     re-import — see roundtrip_check — so they match what base_cut.py's
+#     validate will see; mild non-manifold-ness is warning-grade data here,
+#     the same lenient policy as base_cut.py's validate, and the job only
+#     FAILS above MAX_NON_MANIFOLD_RATIO. The Rust DonePayload currently
+#     parses out/placed/manifold and ignores the extra count fields.)
 #   SCATTER_FAILED {"reason":...}
 #   With --debug (after `--job <path>`), one extra line per placed piece:
 #   SCATTER_PIECE {"index":i,"kind":...,"x_mm":...,"y_mm":...,"z_mm":...,
@@ -278,6 +285,19 @@ ASPECT_XY_RANGE = (0.80, 1.30)
 # a pinhole in the shell).
 MERGE_DIST_MM = 0.001
 
+# Cleanup passes: dissolving one degenerate can degenerate a neighboring
+# face, so the merge/dissolve pair runs until the mesh stops changing
+# (bounded; in practice 1-2 passes suffice).
+CLEANUP_MAX_PASSES = 4
+
+# Same catastrophic threshold as base_cut.py's validate (and the same
+# lenient-gate reasoning): a decorated plate with a few non-manifold edges
+# still cuts fine — the exact solver copes and base_cut re-validates with
+# this exact tolerance downstream — so mild non-manifold-ness is a WARNING
+# carried in SCATTER_DONE's payload, never a failure. Only above this
+# ratio is the plate genuinely broken enough to stop the pipeline.
+MAX_NON_MANIFOLD_RATIO = 0.02
+
 
 def tok(name, payload=None):
     line = name if payload is None else name + " " + json.dumps(payload)
@@ -349,21 +369,72 @@ def bbox_minmax(verts):
 
 def cleanup_and_check(obj):
     """Merge stray verts, dissolve degenerate slivers, fix normals, return
-    (manifold, dims_mm). Identical recipe to base_cut.py's/gen_landscape.py's
-    cleanup_and_check, run ONCE after every piece is unioned in (not per
-    piece) — cheap and matches "cleanup" as the final step of the pipeline
-    docs/SCATTER.md describes, not a per-union step."""
+    (non_manifold_edges, total_edges, dims_mm). base_cut.py's/
+    gen_landscape.py's recipe at heart, run ONCE after every piece is
+    unioned in (not per piece) — cheap and matches "cleanup" as the final
+    step of the pipeline docs/SCATTER.md describes, not a per-union step —
+    but strengthened in two ways for the densified pieces:
+
+      - TRIANGULATE FIRST. The EXACT boolean leaves n-gons along every
+        union seam, and the STL exporter triangulates those invisibly at
+        write time — so without this step, cleanup checks a mesh that is
+        NOT the mesh being exported. With dense pieces the seam n-gons are
+        skinny enough that the export-time triangulation sheds degenerate/
+        duplicate triangles; the importer then drops the duplicates,
+        leaving T-junction holes — non-manifold edges that exist ONLY in
+        the exported file (measured on the live-repro job: SCATTER_DONE
+        said manifold:true while base_cut.py's validate on the same file
+        counted 12 bad edges from 4 dropped duplicate triangles — the
+        user-visible "landscape is not manifold" warning). Triangulating
+        HERE puts those slivers in front of the dissolve pass below
+        instead of hiding them until export, and measured 0 bad edges
+        post-roundtrip on that same repro (a coarser dissolve threshold
+        WITHOUT triangulation was tried first and made things worse,
+        12 -> 42 — the n-gons, not the threshold, were the problem);
+      - it iterates until stable (dissolving one sliver can degenerate a
+        neighbor), bounded by CLEANUP_MAX_PASSES.
+
+    Returns a COUNT of non-manifold edges (not the old all-or-nothing
+    bool) so the caller can apply base_cut.py's lenient ratio gate instead
+    of treating one bad edge out of 100k the same as a shredded mesh."""
     bm = bmesh.new()
     bm.from_mesh(obj.data)
-    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=MERGE_DIST_MM)
-    bmesh.ops.dissolve_degenerate(bm, edges=bm.edges, dist=MERGE_DIST_MM)
+    bmesh.ops.triangulate(bm, faces=bm.faces)
+    for _ in range(CLEANUP_MAX_PASSES):
+        verts_before = len(bm.verts)
+        faces_before = len(bm.faces)
+        bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=MERGE_DIST_MM)
+        bmesh.ops.dissolve_degenerate(bm, edges=bm.edges, dist=MERGE_DIST_MM)
+        if len(bm.verts) == verts_before and len(bm.faces) == faces_before:
+            break
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-    manifold = all(e.is_manifold for e in bm.edges)
+    total_edges = len(bm.edges)
+    bad_edges = sum(1 for e in bm.edges if not e.is_manifold)
     min_x, min_y, min_z, max_x, max_y, max_z = bbox_minmax(bm.verts)
     dims = [round(max_x - min_x, 3), round(max_y - min_y, 3), round(max_z - min_z, 3)]
     bm.to_mesh(obj.data)
     bm.free()
-    return manifold, dims
+    return bad_edges, total_edges, dims
+
+
+def roundtrip_check(path):
+    """Re-import the just-exported STL and count non-manifold edges THERE —
+    the pre-export bmesh count is provably too optimistic: the STL
+    importer's exact-duplicate-triangle drop can turn a sliver that was
+    manifold in the bmesh into a T-junction in the file every downstream
+    consumer (base_cut.py's validate, a slicer) actually reads. This is the
+    same import base_cut.py will do, so the count SCATTER_DONE reports is
+    the count the cut pipeline will see — no more "scatter said manifold,
+    cut said not". Costs one STL import (~1s on a decorated plate),
+    the honest price of reporting the truth."""
+    imported = import_landscape(path)
+    bm = bmesh.new()
+    bm.from_mesh(imported.data)
+    total_edges = len(bm.edges)
+    bad_edges = sum(1 for e in bm.edges if not e.is_manifold)
+    bm.free()
+    delete_object(imported)
+    return bad_edges, total_edges
 
 
 def import_landscape(path):
@@ -705,14 +776,29 @@ def scatter(job, debug):
             )
         tok("SCATTER_PROGRESS", {"placed": placed, "total": total})
 
-    manifold, dims = cleanup_and_check(landscape)
+    cleanup_and_check(landscape)
 
     bpy.ops.object.select_all(action="DESELECT")
     landscape.select_set(True)
     bpy.context.view_layer.objects.active = landscape
     bpy.ops.wm.stl_export(filepath=out_path, export_selected_objects=True)
 
-    return out_path, placed, manifold, dims
+    # Validate what was actually WRITTEN (see roundtrip_check's docstring),
+    # with base_cut.py's own lenient policy: a mild count is a warning in
+    # the payload, only a catastrophic ratio (> MAX_NON_MANIFOLD_RATIO,
+    # base_cut's exact threshold) fails the job — raising here lands in
+    # main()'s except and becomes SCATTER_FAILED + exit 1. The exported
+    # file is left on disk in that case; a failed job's output is never
+    # consumed (basecutter::scatter only forwards the SCATTER_DONE path).
+    bad_edges, total_edges = roundtrip_check(out_path)
+    ratio = (bad_edges / total_edges) if total_edges else 1.0
+    if ratio > MAX_NON_MANIFOLD_RATIO:
+        raise RuntimeError(
+            f"scattered landscape is catastrophically non-manifold "
+            f"({bad_edges} of {total_edges} edges)"
+        )
+
+    return out_path, placed, bad_edges, total_edges
 
 
 def main():
@@ -724,13 +810,29 @@ def main():
 
     tok("SCATTER_START")
     try:
-        out, placed, manifold, _dims = scatter(job, debug)
+        out, placed, bad_edges, total_edges = scatter(job, debug)
     except Exception as e:  # noqa: BLE001 — reported as a token, not a crash
         traceback.print_exc()
         tok("SCATTER_FAILED", {"reason": str(e)})
         sys.exit(1)
 
-    tok("SCATTER_DONE", {"out": out, "placed": placed, "manifold": manifold})
+    # non_manifold_edges/total_edges are NEW payload fields: mild
+    # non-manifold-ness (under MAX_NON_MANIFOLD_RATIO — above it scatter()
+    # already raised) rides along as a warning-grade detail. serde's default
+    # deserialize ignores unknown JSON fields, so basecutter::scatter's
+    # existing DonePayload {out, placed, manifold} keeps parsing this line
+    # unchanged — it just DISCARDS the counts until S2 grows fields for
+    # them (see this change's report).
+    tok(
+        "SCATTER_DONE",
+        {
+            "out": out,
+            "placed": placed,
+            "manifold": bad_edges == 0,
+            "non_manifold_edges": bad_edges,
+            "total_edges": total_edges,
+        },
+    )
 
 
 main()

@@ -56,6 +56,11 @@ ScatterParams = { seed: u32,
 ScatterJob    = { landscape_path, out_path, params }
 // events: ScatterStatus = Started | Progress { placed, total }
 //   | Finished { out } | Failed | Cancelled — user cancel is Cancelled.
+// SCATTER_DONE carries additive honesty fields: {"manifold": bool,
+//   "non_manifold_edges": N, "total_edges": M} measured by RE-IMPORTING
+//   the exported STL (export-time triangulation can create defects that
+//   exist only in the written file) — mild counts under base_cut.py's
+//   2% gate are warning-grade, not failure.
 // script: resources/scatter_landscape.py, TOKEN {json} stdout lines,
 //   --python-exit-code 1, job JSON after `--` — the render/base_cut/
 //   gen_landscape conventions verbatim.
