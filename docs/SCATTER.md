@@ -22,9 +22,19 @@ Scatter is NOT part of the cut job. It is its own headless-Blender pass:
 - Re-scatter never compounds: the UI keeps the UNDECORATED source path and
   always scatters from it (new seed = new debris, not debris-on-debris).
 
-Pieces are boolean-UNIONED into the terrain (exact solver, per piece —
-small meshes, cheap) so the decorated STL passes the same validation gate
-as any landscape.
+Pieces are placed as LOOSE SHELLS — sunk to their floor but deliberately
+NOT boolean-unioned into the terrain. Three wins, one mechanism: each
+shell stays individually manifold (the union seams were the whole source
+of the non-manifold-edge saga), slicers and the cut pipeline handle
+overlapping shells natively, and — the decisive one — pieces remain
+identifiable at CUT time, so the cutter can decide what happens to a
+piece straddling a base's rim instead of blindly slicing through it.
+base_cut.py separates connected components: the largest shell is the
+terrain, the rest are pieces (see `scatter_rim` in docs/BASECUTTER.md's
+pinned interfaces — "keep" unions a piece whole into any base whose cut
+footprint contains its center, letting it overhang the rim like real
+scenic basing; "slice" reproduces the old fused-cut look). Pieces only
+get unioned into a BASE, at cut time, where fusion actually matters.
 
 ## Pinned interfaces
 

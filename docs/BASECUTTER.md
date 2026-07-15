@@ -324,7 +324,25 @@ Placement  = { cutter: CutterKind, x_mm, y_mm, rotation_deg,
                                                   // from inventory, overridable
 // settings gains: magnet_inventory: Vec<MagnetSpec> (seeded with common sizes)
 BaseCutJob = { landscape_path, placements: Vec<Placement>,
-               plinth: PlinthParams, out_dir }
+               plinth: PlinthParams, out_dir,
+               scatter_rim: ScatterRim,  // what happens to a scatter piece
+               // (a loose shell in the landscape — see docs/SCATTER.md)
+               // that straddles a cutter's rim. "keep" (the default):
+               // pieces whose CENTER falls inside the cut footprint are
+               // unioned in WHOLE and may overhang the rim like hand-made
+               // scenic basing; center outside = left behind. "slice":
+               // all shells are fused first and the cutter slices straight
+               // through — the old look. serde(default) = keep. On a
+               // single-shell landscape both modes are identical.
+               topper_mm: Option<f64> }  // Some(t) = BASE TOPPER mode: no
+               // plinth at all — the plug is flat-trimmed t mm below its
+               // lowest sculpted point (t clamped ~1..3, default 1.5) and
+               // exported as a glue-on terrain slab for hard plastic
+               // bases. The cut footprint stays the TOP face (that's the
+               // face of the base it glues onto). Magnets are ignored in
+               // topper mode (nothing to pocket). None = the normal
+               // seat-on-plinth flow. Additive + serde(default), so old
+               // frontends keep working.
 // On the wire, job.rs injects per placement: "cut": CutterKind — the
 // top_face_of result. The script consumes it and never re-derives.
 
