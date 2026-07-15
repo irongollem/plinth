@@ -318,6 +318,35 @@ const startDownload = async () => {
 
 const cancelDownload = () => download.cancel();
 
+/* Catalog hand-off: minihoard lands releases in its own library dir, which
+   Plinth doesn't watch. After a run drops files, offer to fold that folder
+   into the catalog — start_catalog_scan registers the root itself (and
+   rejects an overlap), so this is one call, not add-then-scan. */
+const libraryDir = computed(() => health.value?.library_dir ?? null);
+const scanningCatalog = ref(false);
+const canScanIntoCatalog = computed(
+  () =>
+    !!libraryDir.value &&
+    !!download.finishedSummary.value &&
+    download.finishedSummary.value.ok > 0,
+);
+const scanIntoCatalog = async () => {
+  if (!libraryDir.value || scanningCatalog.value) return;
+  scanningCatalog.value = true;
+  // start_catalog_scan takes AppError, not MinihoardError, so reportError's
+  // describeError handles it correctly here (unlike the typed commands).
+  const result = await commands.startCatalogScan(libraryDir.value);
+  scanningCatalog.value = false;
+  if (result.status === "ok") {
+    toastStore.addToast(
+      "Scanning your library into the catalog — watch the Catalog tab for progress.",
+      "success",
+    );
+  } else {
+    toastStore.reportError("Couldn't scan into the catalog", result.error);
+  }
+};
+
 const queueDoneCount = computed(
   () => download.queue.value.filter((i) => i.done || i.failed).length,
 );
@@ -600,13 +629,24 @@ watch(
         class="flex items-center justify-between text-[11px] text-base-content/50 mb-1"
       >
         <span>Download queue — {{ queueDoneCount }} / {{ download.total.value }}</span>
-        <span v-if="download.finishedSummary.value">
-          {{ download.finishedSummary.value.ok }} done,
-          {{ download.finishedSummary.value.failed }} failed
-        </span>
-        <span v-else-if="download.cancelled.value" class="text-warning"
-          >cancelled</span
-        >
+        <div class="flex items-center gap-2">
+          <span v-if="download.finishedSummary.value">
+            {{ download.finishedSummary.value.ok }} done,
+            {{ download.finishedSummary.value.failed }} failed
+          </span>
+          <span v-else-if="download.cancelled.value" class="text-warning"
+            >cancelled</span
+          >
+          <button
+            v-if="canScanIntoCatalog"
+            type="button"
+            class="btn btn-xs btn-primary"
+            :disabled="scanningCatalog"
+            @click="scanIntoCatalog"
+          >
+            Scan into catalog
+          </button>
+        </div>
       </div>
       <div
         v-for="item in download.queue.value"
