@@ -439,6 +439,17 @@ const HANDLE_RADIUS_MM = 1.4;
 const handleDist = (kind: CutterKind): number =>
   plusXExtent(kind) + HANDLE_STEM_MM + HANDLE_RADIUS_MM;
 
+/** Whether the SELECTED placement's rotation handle exists at all: any
+ * non-circle, or a circle that is GROUPED — a lone round base has no
+ * visible rotation, but a grouped one's handle pivots the whole formation
+ * (BaseCutter.vue maps its rotation delta onto the group), which is very
+ * visible. `coSelected` is non-empty exactly when the selection is grouped
+ * (groups of one dissolve), so no extra prop is needed. Only ever
+ * meaningful for the selected placement — every caller ANDs it with a
+ * selectedIndex check. */
+const handleRotatable = (kind: CutterKind): boolean =>
+  kind.kind !== "circle" || (props.coSelected?.length ?? 0) > 0;
+
 const buildOverlayLoops = (
   group: THREE.Group,
   placement: Placement,
@@ -458,8 +469,8 @@ const buildOverlayLoops = (
   );
   // Rotation handle: a stem out of the footprint's local +X plus a small
   // circle to grab — lives in the group, so the placement's own rotation
-  // carries it. Only shown on the selected placement (and pointless for
-  // circles, whose rotation is invisible).
+  // carries it. Only shown on the selected placement, when rotating it
+  // means anything (see handleRotatable).
   const xEdge = plusXExtent(placement.cutter);
   const stem = makeLoop(
     [
@@ -484,7 +495,7 @@ const buildOverlayLoops = (
     false,
   );
   stem.visible = knob.visible =
-    selected && placement.cutter.kind !== "circle" && !props.locked;
+    selected && handleRotatable(placement.cutter) && !props.locked;
   group.add(outer, inner, stem, knob);
 };
 
@@ -496,7 +507,7 @@ const syncHandleVisibility = () => {
     const show =
       index === props.selectedIndex &&
       p !== undefined &&
-      p.cutter.kind !== "circle" &&
+      handleRotatable(p.cutter) &&
       !props.locked;
     if (stem) stem.visible = show;
     if (knob) knob.visible = show;
@@ -689,7 +700,7 @@ const onPointerDown = (e: PointerEvent) => {
     // practice, but a neighboring placement underneath must not steal it.
     if (world && props.selectedIndex !== null && !props.locked) {
       const p = props.placements[props.selectedIndex];
-      if (p && p.cutter.kind !== "circle") {
+      if (p && handleRotatable(p.cutter)) {
         const rad = (p.rotation_deg * Math.PI) / 180;
         const d = handleDist(p.cutter);
         const hx = p.x_mm + Math.cos(rad) * d;
