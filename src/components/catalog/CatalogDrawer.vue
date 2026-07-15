@@ -659,9 +659,13 @@
 </template>
 
 <script setup lang="ts">
+import { defineAsyncComponent } from "vue";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { storeToRefs } from "pinia";
-import StlViewport from "../StlViewport.vue";
+// Lazy: StlViewport drags three.js with it, and this component rides the
+// eager Catalog boot chunk — the viewport is only needed once a preview
+// actually opens (the v-if), not at first paint.
+const StlViewport = defineAsyncComponent(() => import("../StlViewport.vue"));
 import { useCatalogStore } from "../../stores/catalogStore";
 import { useReleasesStore } from "../../stores/releasesStore";
 import { formatFileSize } from "../../utils/format";
