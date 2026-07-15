@@ -15,6 +15,7 @@ import type {
   Cutter,
   CutterKind,
   FlowLayer,
+  GeneratedPieceKind,
   GeneratorPreset,
   LandscapeParams,
   MagnetSpec,
@@ -22,6 +23,9 @@ import type {
   Placement,
   PlinthParams,
   RipplesLayer,
+  ScatterAsset,
+  ScatterJob,
+  ScatterParams,
   StonesLayer,
 } from "../bindings";
 import { commands } from "../bindings";
@@ -33,6 +37,7 @@ import { useBaseCut } from "../composables/useBaseCut";
 import { useBlenderProvision } from "../composables/useBlenderProvision";
 import { selectDirectory, useFileSelect } from "../composables/useFileSelect";
 import { useLandscapeGen } from "../composables/useLandscapeGen";
+import { useScatter } from "../composables/useScatter";
 import { useReleasesStore } from "../stores/releasesStore";
 import { useToastStore } from "../stores/toastStore";
 import { cloneRaw } from "../utils/cloneRaw";
@@ -60,6 +65,7 @@ const releasesStore = useReleasesStore();
 const { selectFiles } = useFileSelect();
 const baseCut = useBaseCut();
 const landscapeGen = useLandscapeGen();
+const debrisScatter = useScatter();
 // The cut path hard-requires Blender >= 4.2 (wm.stl_import/export), same as
 // Render.vue's gate — reuse that composable/verdict rather than inventing a
 // second Blender-detection mechanism.
@@ -203,6 +209,206 @@ const rerollSeed = () => {
   genParams.seed = Math.floor(Math.random() * 0xffffffff);
 };
 
+// ---- Scatter state (docs/SCATTER.md "UI (BaseCutter view)"): decorates
+// whatever landscape is active with generated debris via its own headless
+// pass (scatter_landscape.py). Named `debrisScatter`/`debris*` throughout —
+// NOT `scatter*` — because that name is already taken by the placement
+// GENERATORS' random-cutter-scatter mode above (GENERATOR_MODES, scatterCount,
+// runScatter): two unrelated features that both happen to be called
+// "scatter" in their own domains.
+const scatterAssets = ref<ScatterAsset[]>([]);
+
+/** Undecorated-source bookkeeping (docs/SCATTER.md "re-scatter never
+ * compounds"): the landscape path as it stood BEFORE its first scatter.
+ * Scatter always runs FROM this path — never from the currently-displayed
+ * decorated one — so repeated runs never scatter debris onto debris.
+ * Updated only when the user picks/generates a genuinely NEW landscape
+ * (chooseLandscape, landscapeGen.finished below); a scatter job's own
+ * Finished handler deliberately leaves it alone. */
+const scatterSourcePath = ref("");
+
+/** True once a scatter has actually been applied to the active landscape —
+ * gates the "Remove scatter" button and swaps the run button's label to
+ * "Re-scatter". */
+const hasScatterApplied = computed(
+  () =>
+    !!scatterSourcePath.value &&
+    landscapePath.value !== scatterSourcePath.value,
+);
+
+type ScatterMixEntry = {
+  kind: GeneratedPieceKind;
+  enabled: boolean;
+  weight: number;
+};
+/** Generated kinds only — get_scatter_assets() is called on mount but
+ * currently returns [] until S4 curation lands (docs/SCATTER.md "Execution
+ * phases"), so there is no asset row to seed here yet. */
+const debrisPieces = reactive<ScatterMixEntry[]>([
+  { kind: "pebble", enabled: true, weight: 1 },
+  { kind: "rock", enabled: true, weight: 1 },
+]);
+
+type DebrisParams = {
+  seed: number;
+  density_per_dm2: number;
+  scale_min: number;
+  scale_max: number;
+  scale_factor: number;
+  sink_min: number;
+  sink_max: number;
+  align_to_surface: boolean;
+  max_slope_deg: number;
+  edge_margin_mm: number;
+};
+const debrisParams = reactive<DebrisParams>({
+  seed: 1,
+  density_per_dm2: 8,
+  scale_min: 0.8,
+  scale_max: 1.2,
+  scale_factor: 1,
+  sink_min: 0.5,
+  sink_max: 2,
+  align_to_surface: true,
+  max_slope_deg: 45,
+  edge_margin_mm: 3,
+});
+
+/** Preset mixes as chips (docs/SCATTER.md UI spec) — a local literal, the
+ * cutter-library move: a new mix is a new row here, not a new pipeline.
+ * Weights are relative (PieceChoice.weight), not fractions. */
+type ScatterPreset = {
+  id: string;
+  label: string;
+  density_per_dm2: number;
+  weights: { pebble: number; rock: number };
+};
+const SCATTER_PRESETS: ScatterPreset[] = [
+  {
+    id: "light-pebbles",
+    label: "Light pebbles",
+    density_per_dm2: 4,
+    weights: { pebble: 4, rock: 1 },
+  },
+  {
+    id: "rocky-debris",
+    label: "Rocky debris",
+    density_per_dm2: 9,
+    weights: { pebble: 1, rock: 3 },
+  },
+  {
+    id: "dense-rubble",
+    label: "Dense rubble",
+    density_per_dm2: 18,
+    weights: { pebble: 1, rock: 1 },
+  },
+];
+const selectedScatterPresetId = ref<string | null>(null);
+
+const selectScatterPreset = (preset: ScatterPreset) => {
+  debrisParams.density_per_dm2 = preset.density_per_dm2;
+  for (const piece of debrisPieces) {
+    piece.enabled = true;
+    piece.weight = preset.weights[piece.kind];
+  }
+  selectedScatterPresetId.value = preset.id;
+};
+
+/** Reroll to a fresh random seed — same convention as the landscape
+ * generator's own 🎲 (rerollSeed above). */
+const rerollDebrisSeed = () => {
+  debrisParams.seed = Math.floor(Math.random() * 0xffffffff);
+};
+
+/** Why the scatter section is disabled — the palette's own
+ * disabled-with-tooltip convention, never click-then-toast. */
+const debrisScatterBlockedReason = computed(() => {
+  if (locked.value || debrisScatter.isRunning.value) {
+    return "Locked while a job is running";
+  }
+  if (!landscapeBounds.value) return "Load or generate a landscape first";
+  if (!debrisPieces.some((p) => p.enabled && p.weight > 0)) {
+    return "Enable at least one piece";
+  }
+  return "";
+});
+const canRunDebrisScatter = computed(() => !debrisScatterBlockedReason.value);
+
+const removeScatterBlockedReason = computed(() => {
+  if (locked.value || debrisScatter.isRunning.value) {
+    return "Locked while a job is running";
+  }
+  if (!hasScatterApplied.value) return "No scatter to remove";
+  return "";
+});
+const canRemoveScatter = computed(() => !removeScatterBlockedReason.value);
+
+/** Derives a stable, OVERWRITTEN output path from the undecorated source —
+ * source stem + "-scattered.stl" beside it. Stable (not unique-suffixed) on
+ * purpose: a re-scatter is meant to replace the previous decorated STL, the
+ * same "regenerated bake overwrites its own file" policy the landscape
+ * generator's preset+seed filenames already rely on. */
+const deriveScatterOutPath = (sourcePath: string): string => {
+  const splitAt = Math.max(
+    sourcePath.lastIndexOf("/"),
+    sourcePath.lastIndexOf("\\"),
+  );
+  const dir = splitAt >= 0 ? sourcePath.slice(0, splitAt + 1) : "";
+  const base = splitAt >= 0 ? sourcePath.slice(splitAt + 1) : sourcePath;
+  const stem = base.replace(/\.stl$/i, "");
+  return `${dir}${stem}-scattered.stl`;
+};
+
+const buildScatterParams = (): ScatterParams => ({
+  seed: debrisParams.seed,
+  density_per_dm2: debrisParams.density_per_dm2,
+  scale: [debrisParams.scale_min, debrisParams.scale_max],
+  scale_factor: debrisParams.scale_factor,
+  sink_mm: [debrisParams.sink_min, debrisParams.sink_max],
+  align_to_surface: debrisParams.align_to_surface,
+  max_slope_deg: debrisParams.max_slope_deg,
+  edge_margin_mm: debrisParams.edge_margin_mm,
+  pieces: debrisPieces
+    .filter((p) => p.enabled && p.weight > 0)
+    .map((p) => ({ piece: { Generated: { kind: p.kind } }, weight: p.weight })),
+});
+
+/** Runs (or re-runs) scatter FROM the tracked source, never from the
+ * currently-displayed decorated path — see scatterSourcePath's comment. */
+const startDebrisScatter = async () => {
+  if (!canRunDebrisScatter.value) return;
+  const source = scatterSourcePath.value || landscapePath.value;
+  const job: ScatterJob = {
+    landscape_path: source,
+    out_path: deriveScatterOutPath(source),
+    params: buildScatterParams(),
+  };
+  const result = await debrisScatter.start(job);
+  if (result.status === "error") {
+    toastStore.reportError("Failed to start scatter", result.error);
+  }
+};
+
+const cancelDebrisScatter = () => debrisScatter.cancel();
+
+/** Restores the undecorated source into the viewport — the mirror of a
+ * scatter's own Finished handler below, both routed through
+ * setLandscapePath so placements/undo get the same terrain-swap treatment. */
+const removeScatter = () => {
+  if (!canRemoveScatter.value) return;
+  setLandscapePath(scatterSourcePath.value);
+};
+
+const debrisScatterPercent = computed(() => {
+  const p = debrisScatter.progress.value;
+  if (!p || !p.total) return 0;
+  return Math.min(100, Math.round((p.placed * 100) / p.total));
+});
+const debrisScatterStepLabel = computed(() => {
+  const p = debrisScatter.progress.value;
+  return p ? `Placing ${p.placed}/${p.total}…` : "Starting…";
+});
+
 /** The user's magnet inventory (app settings — docs/BASECUTTER.md "Hollow,
  * with magnet mounts"): what the per-placement magnet panel offers as
  * chips and what suggestMagnet() picks from. Loaded once on mount, same
@@ -226,15 +432,26 @@ const exportGroupName = ref("");
 const exportBusy = ref(false);
 
 onMounted(async () => {
-  const [library, plinthDefaults, presets, settingsResult, rootsResult] =
-    await Promise.all([
-      commands.getCutterLibrary(),
-      commands.getPlinthDefaults(),
-      commands.getLandscapePresets(),
-      commands.getSettings(),
-      commands.listCatalogRoots(),
-    ]);
+  const [
+    library,
+    plinthDefaults,
+    presets,
+    settingsResult,
+    rootsResult,
+    assets,
+  ] = await Promise.all([
+    commands.getCutterLibrary(),
+    commands.getPlinthDefaults(),
+    commands.getLandscapePresets(),
+    commands.getSettings(),
+    commands.listCatalogRoots(),
+    // S4 (docs/SCATTER.md "Execution phases") returns [] until curation
+    // lands — called now anyway so the piece mix editor lights up
+    // automatically the day it isn't, with no UI change needed.
+    commands.getScatterAssets(),
+  ]);
   cutterLibrary.value = library;
+  scatterAssets.value = assets;
   Object.assign(plinth, plinthDefaults);
   landscapePresets.value = presets;
   if (presets.length) selectPreset(presets[0]);
@@ -500,11 +717,15 @@ const onGestureEnd = () => {
 // Placement mutation is locked out while a job is running: the job already
 // took a snapshot (jobPlacementNames below) and mid-job add/delete would
 // desync indices between the live array and the in-flight cut list.
-// Placement mutation is also locked while a landscape bake is in flight —
-// the bake may swap `landscapePath` out from under any in-progress edits
-// (see setLandscapePath's clear-on-swap logic).
+// Placement mutation is also locked while a landscape bake OR a scatter pass
+// is in flight — either one may swap `landscapePath` out from under any
+// in-progress edits (see setLandscapePath's clear-on-swap logic), and all
+// three jobs share the one Blender process slot besides.
 const locked = computed(
-  () => baseCut.isRunning.value || landscapeGen.isRunning.value,
+  () =>
+    baseCut.isRunning.value ||
+    landscapeGen.isRunning.value ||
+    debrisScatter.isRunning.value,
 );
 
 const addPlacement = (cutter: Cutter) => {
@@ -936,6 +1157,10 @@ const setLandscapePath = (newPath: string, options?: { force?: boolean }) => {
   selectedIndex.value = null;
   landscapePath.value = newPath;
   landscapeReloadToken.value++;
+  // Every undo snapshot references placements on the OLD terrain — a scatter
+  // or bake swap invalidates all of them, same reasoning as clearing
+  // `placements` above, so the stack is dropped rather than left dangling.
+  undoStack.value = [];
 };
 
 const chooseLandscape = async () => {
@@ -946,6 +1171,10 @@ const chooseLandscape = async () => {
   });
   if (!files?.length) return;
   setLandscapePath(files[0].path);
+  // A hand-picked file is by definition undecorated — it becomes the new
+  // scatter source (docs/SCATTER.md: "If the user picks/generates a NEW
+  // landscape, scatterSourcePath resets to it").
+  scatterSourcePath.value = files[0].path;
 };
 
 const chooseOutDir = async () => {
@@ -959,7 +1188,8 @@ const canCut = computed(
     placements.value.length > 0 &&
     !!outDir.value &&
     !baseCut.isRunning.value &&
-    !landscapeGen.isRunning.value, // generation and cutting share Blender — never both at once
+    !landscapeGen.isRunning.value && // generation and cutting share Blender — never both at once
+    !debrisScatter.isRunning.value,
 );
 
 // Names as they were when the job was submitted — progress/result labels
@@ -990,8 +1220,9 @@ const canGenerate = computed(
     genParams.width_mm > 0 &&
     genParams.depth_mm > 0 &&
     genParams.relief_mm >= 0 &&
-    !baseCut.isRunning.value && // generation and cutting share Blender — never both at once
-    !landscapeGen.isRunning.value,
+    !baseCut.isRunning.value && // generation, scatter, and cutting share Blender — never more than one at once
+    !landscapeGen.isRunning.value &&
+    !debrisScatter.isRunning.value,
 );
 
 const startGenerate = async () => {
@@ -1012,6 +1243,9 @@ const cancelGenerate = () => landscapeGen.cancel();
 watch(landscapeGen.finished, (finished) => {
   if (!finished) return;
   setLandscapePath(finished.out_path, { force: true });
+  // A freshly baked terrain is by definition undecorated — same reasoning
+  // as chooseLandscape's own scatterSourcePath reset above.
+  scatterSourcePath.value = finished.out_path;
   const [w, d, h] = finished.dims_mm;
   toastStore.addToast(
     `Generated landscape (${w}×${d}×${h}mm)${finished.manifold ? "" : " — non-manifold"}`,
@@ -1025,6 +1259,29 @@ watch(landscapeGen.failedMessage, (message) => {
 watch(landscapeGen.cancelled, (isCancelled) => {
   if (!isCancelled) return;
   toastStore.addToast("Landscape generation cancelled", "info");
+});
+
+// On a finished scatter, auto-load the decorated STL into the viewport —
+// same swap path the generator/file-picker use, so stale placements+undo
+// get cleared too. `scatterSourcePath` is deliberately left untouched: it
+// still points at the undecorated terrain, so "re-scatter" and "remove
+// scatter" both keep working off it (docs/SCATTER.md "re-scatter never
+// compounds").
+watch(debrisScatter.finished, (finished) => {
+  if (!finished) return;
+  setLandscapePath(finished.out_path, { force: true });
+  toastStore.addToast(
+    `Scattered ${finished.placed} piece${finished.placed === 1 ? "" : "s"}${finished.manifold ? "" : " — non-manifold"}`,
+    finished.manifold ? "success" : "warning",
+  );
+});
+watch(debrisScatter.failedMessage, (message) => {
+  if (!message) return;
+  toastStore.addToast(`Scatter failed: ${message}`, "error", 0);
+});
+watch(debrisScatter.cancelled, (isCancelled) => {
+  if (!isCancelled) return;
+  toastStore.addToast("Scatter cancelled", "info");
 });
 
 // Surface terminal states as toasts — the results list already shows the
@@ -1507,6 +1764,228 @@ const exportToCatalog = async () => {
           >
         </div>
       </div>
+
+      <details
+        class="collapse collapse-arrow border border-base-content/10 bg-base-200/20 rounded-box"
+      >
+        <summary
+          class="collapse-title min-h-0 py-2.5 px-3 flex items-center gap-2 cursor-pointer"
+        >
+          <span
+            class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+            >SCATTER</span
+          >
+        </summary>
+        <div class="collapse-content flex flex-col gap-1.5 px-3">
+          <div class="flex flex-wrap gap-1">
+            <button
+              v-for="preset in SCATTER_PRESETS"
+              :key="preset.id"
+              type="button"
+              class="btn btn-xs"
+              :class="
+                preset.id === selectedScatterPresetId ? 'btn-primary' : ''
+              "
+              :disabled="!!debrisScatterBlockedReason"
+              :title="debrisScatterBlockedReason || undefined"
+              @click="selectScatterPreset(preset)"
+            >
+              {{ preset.label }}
+            </button>
+          </div>
+
+          <div class="flex items-center gap-1.5">
+            <span class="text-[11px] text-base-content/50 shrink-0"
+              >Density /dm²</span
+            >
+            <input
+              type="number"
+              class="input input-xs flex-1 font-mono"
+              min="0"
+              step="0.5"
+              :disabled="debrisScatter.isRunning.value"
+              v-model.number="debrisParams.density_per_dm2"
+            />
+          </div>
+
+          <div class="flex items-center gap-1.5">
+            <span class="text-[11px] text-base-content/50 shrink-0">Seed</span>
+            <input
+              type="number"
+              class="input input-xs flex-1 font-mono"
+              :disabled="debrisScatter.isRunning.value"
+              v-model.number="debrisParams.seed"
+            />
+            <button
+              type="button"
+              class="btn btn-xs"
+              title="Reroll seed"
+              :disabled="debrisScatter.isRunning.value"
+              @click="rerollDebrisSeed"
+            >
+              🎲
+            </button>
+          </div>
+
+          <div class="flex items-center gap-3">
+            <button
+              class="btn btn-secondary btn-sm grow"
+              :disabled="!canRunDebrisScatter"
+              :title="debrisScatterBlockedReason || undefined"
+              @click="startDebrisScatter"
+            >
+              <template v-if="debrisScatter.isRunning.value">
+                <span class="loading loading-spinner loading-xs"></span>
+                <span>Scattering…</span>
+              </template>
+              <span v-else>{{
+                hasScatterApplied ? "Re-scatter" : "Scatter"
+              }}</span>
+            </button>
+            <button
+              v-if="debrisScatter.isRunning.value"
+              class="btn btn-error btn-sm"
+              @click="cancelDebrisScatter"
+            >
+              Cancel
+            </button>
+          </div>
+          <div
+            v-if="debrisScatter.isRunning.value"
+            class="flex items-center gap-3"
+          >
+            <ProgressBar :progress="debrisScatterPercent" />
+            <span class="text-sm opacity-70">{{ debrisScatterStepLabel }}</span>
+          </div>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs self-start"
+            :disabled="!canRemoveScatter"
+            :title="removeScatterBlockedReason || undefined"
+            @click="removeScatter"
+          >
+            Remove scatter
+          </button>
+          <div
+            v-if="debrisScatter.failedMessage.value"
+            class="alert alert-error text-xs whitespace-pre-wrap flex-col items-start"
+          >
+            <span>{{ debrisScatter.failedMessage.value }}</span>
+            <pre
+              v-if="debrisScatter.failedStdoutTail.value"
+              class="font-mono text-[10px] opacity-70 whitespace-pre-wrap mt-1"
+              >{{ debrisScatter.failedStdoutTail.value }}</pre
+            >
+          </div>
+
+          <details
+            class="collapse collapse-arrow border border-base-content/10 bg-base-200/20 rounded-box"
+          >
+            <summary
+              class="collapse-title min-h-0 py-2.5 px-3 flex items-center gap-2 cursor-pointer"
+            >
+              <span
+                class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+                >ADVANCED — SCATTER</span
+              >
+            </summary>
+            <div class="collapse-content flex flex-col gap-2.5 px-3">
+              <NumberInput
+                id="scatter-scale-min"
+                label="Scale min ×"
+                :step="0.05"
+                :min="0.1"
+                v-model="debrisParams.scale_min"
+              />
+              <NumberInput
+                id="scatter-scale-max"
+                label="Scale max ×"
+                :step="0.05"
+                :min="0.1"
+                v-model="debrisParams.scale_max"
+              />
+              <!-- Whole-pass rescale for non-28mm work (docs/SCATTER.md
+                   "Scale anchor: 28-32mm heroic") — leave at 1 for the
+                   default heroic scale. -->
+              <NumberInput
+                id="scatter-scale-factor"
+                label="Scale factor ×"
+                :step="0.05"
+                :min="0.1"
+                v-model="debrisParams.scale_factor"
+              />
+              <NumberInput
+                id="scatter-sink-min"
+                label="Sink min (mm)"
+                :step="0.1"
+                :min="0"
+                v-model="debrisParams.sink_min"
+              />
+              <NumberInput
+                id="scatter-sink-max"
+                label="Sink max (mm)"
+                :step="0.1"
+                :min="0"
+                v-model="debrisParams.sink_max"
+              />
+              <Switch
+                v-model="debrisParams.align_to_surface"
+                label="Align to surface"
+              />
+              <NumberInput
+                id="scatter-max-slope"
+                label="Max slope (deg)"
+                :step="1"
+                :min="0"
+                :max="90"
+                v-model="debrisParams.max_slope_deg"
+              />
+              <NumberInput
+                id="scatter-edge-margin"
+                label="Edge margin (mm)"
+                :step="0.5"
+                :min="0"
+                v-model="debrisParams.edge_margin_mm"
+              />
+
+              <div
+                class="flex flex-col gap-1.5 border-t border-base-content/10 pt-2"
+              >
+                <span
+                  class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+                  >PIECE MIX — GENERATED</span
+                >
+                <div
+                  v-for="piece in debrisPieces"
+                  :key="piece.kind"
+                  class="flex items-center gap-1.5"
+                >
+                  <input
+                    type="checkbox"
+                    class="checkbox checkbox-xs"
+                    v-model="piece.enabled"
+                  />
+                  <span class="text-[11px] flex-1 capitalize">{{
+                    piece.kind
+                  }}</span>
+                  <input
+                    type="number"
+                    class="input input-xs w-16 font-mono"
+                    min="0"
+                    step="0.1"
+                    :disabled="!piece.enabled"
+                    v-model.number="piece.weight"
+                  />
+                </div>
+                <!-- get_scatter_assets() returns [] until S4 curation lands
+                     (docs/SCATTER.md "Execution phases") — no assets group
+                     renders until there's actually something in it, rather
+                     than an always-empty list confusing the picker. -->
+              </div>
+            </div>
+          </details>
+        </div>
+      </details>
 
       <div class="flex flex-col gap-1">
         <span
