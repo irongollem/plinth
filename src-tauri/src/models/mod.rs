@@ -1,5 +1,6 @@
 pub(crate) mod events;
 
+use crate::basecutter::cutters::{CutterKind, MagnetSpec};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use uuid::Uuid;
@@ -65,6 +66,15 @@ pub struct Settings {
     /// release builder — set once, ride along in every release.3pk.
     #[serde(default)]
     pub licence_path: Option<String>,
+    /// The user's magnet inventory (docs/BASECUTTER.md "Hollow, with magnet
+    /// mounts"): what they actually own, e.g. 5x1, 6x2, 10x2. Base Cutter's
+    /// per-placement magnet panel offers one chip per entry and suggests
+    /// the largest whose boss fits a given base — never a hardcoded
+    /// base->magnet table. Seeded with common hobby sizes on first load
+    /// (see settings::default_magnet_inventory), same pattern as
+    /// known_designers. serde(default): an older store has no such key.
+    #[serde(default)]
+    pub magnet_inventory: Option<Vec<MagnetSpec>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
@@ -127,6 +137,15 @@ pub struct RenderOptions {
     /// (settings supply the STL path + height; silently off when unset).
     #[serde(default)]
     pub scale_reference: bool,
+    /// Stand the model on a standard tapered wargaming base — the hobby's
+    /// own "banana for scale" (docs/BASECUTTER.md "Synergy: standard bases
+    /// in the Render tool"). The NOMINAL (bottom-face) footprint the user
+    /// picked from `basecutter::cutters::get_cutter_library`; None = no
+    /// base. Rust derives the cut (top-face) footprint via `top_face_of`
+    /// before this ever reaches the script — see
+    /// `render::engine::build_render_command`.
+    #[serde(default)]
+    pub base: Option<CutterKind>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

@@ -1,3 +1,4 @@
+use crate::basecutter::cutters::MagnetSpec;
 use crate::models::{CompressionType, Settings};
 use once_cell::sync::Lazy;
 use serde_json::json;
@@ -25,6 +26,7 @@ pub(crate) static SETTINGS_CACHE: Lazy<Mutex<Settings>> = Lazy::new(|| {
         scale_reference_path: None,
         scale_reference_height_mm: None,
         licence_path: None,
+        magnet_inventory: None,
     })
 });
 
@@ -36,6 +38,27 @@ pub fn default_designers() -> Vec<String> {
         .iter()
         .map(|s| s.to_string())
         .collect()
+}
+
+/// Starter magnet inventory (docs/BASECUTTER.md "Hollow, with magnet
+/// mounts" — "ships with a starter inventory of the common hobby sizes so
+/// it works before anyone opens settings"). Seeded on first load, same
+/// pattern as default_designers; the user's saved list wins thereafter.
+pub fn default_magnet_inventory() -> Vec<MagnetSpec> {
+    [
+        (5.0, 1.0),
+        (5.0, 2.0),
+        (6.0, 2.0),
+        (8.0, 3.0),
+        (10.0, 2.0),
+    ]
+    .into_iter()
+    .map(|(diameter_mm, height_mm)| MagnetSpec {
+        diameter_mm,
+        height_mm,
+        count: 1,
+    })
+    .collect()
 }
 
 async fn get_store_arc(app_handle: &AppHandle) -> Result<Arc<Store<Wry>>, String> {
@@ -162,6 +185,15 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         .filter(|list| !list.is_empty())
         .unwrap_or_else(default_designers);
 
+    // Same seed-on-first-load pattern as known_designers above: an absent
+    // or empty store value (older store, or a user who cleared the list)
+    // falls back to the starter inventory rather than shipping empty.
+    let magnet_inventory = store
+        .get("magnet_inventory")
+        .and_then(|v| serde_json::from_value::<Vec<MagnetSpec>>(v).ok())
+        .filter(|list| !list.is_empty())
+        .unwrap_or_else(default_magnet_inventory);
+
     let settings = Settings {
         scratch_dir,
         target_dir,
@@ -181,6 +213,7 @@ pub async fn get_settings(app_handle: AppHandle) -> Result<Settings, String> {
         scale_reference_path,
         scale_reference_height_mm,
         licence_path,
+        magnet_inventory: Some(magnet_inventory),
     };
 
     {
@@ -300,6 +333,11 @@ pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(
         "licence_path",
         settings.licence_path.as_deref().map(|v| json!(v)),
     );
+    set_or_delete(
+        &store,
+        "magnet_inventory",
+        settings.magnet_inventory.as_ref().map(|v| json!(v)),
+    );
 
     store.save().map_err(|e| e.to_string())?;
 
@@ -324,4 +362,56 @@ pub fn get_optimal_thread_count() -> u32 {
         .map(|n| n.get() as u32)
         .unwrap_or(1);
     std::cmp::max(1, cpu_count.saturating_sub(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The starter inventory docs/BASECUTTER.md promises ("5x1, 6x2, 10x2,
+    /// ...") — pinned so a seed-list edit here is a deliberate change, not
+    /// an accidental drop of a size someone's boss-fit test already relies
+    /// on.
+    #[test]
+    fn default_magnet_inventory_has_the_common_hobby_sizes() {
+        let inventory = default_magnet_inventory();
+        let dims: Vec<(f64, f64)> = inventory
+            .iter()
+            .map(|m| (m.diameter_mm, m.height_mm))
+            .collect();
+        assert_eq!(
+            dims,
+            vec![
+                (5.0, 1.0),
+                (5.0, 2.0),
+                (6.0, 2.0),
+                (8.0, 3.0),
+                (10.0, 2.0),
+            ]
+        );
+        assert!(
+            inventory.iter().all(|m| m.count == 1),
+            "starter entries are single magnets, not pre-set multi-boss groups"
+        );
+    }
+
+    /// get_settings/set_settings round-trip magnet_inventory through the
+    /// store as plain `serde_json::to_value`/`from_value::<Vec<MagnetSpec>>`
+    /// (see both functions above) — pin that shape so a future MagnetSpec
+    /// field change can't silently break the store round-trip without a
+    /// test noticing.
+    #[test]
+    fn magnet_inventory_round_trips_through_json_like_the_store_does() {
+        let inventory = vec![MagnetSpec {
+            diameter_mm: 6.0,
+            height_mm: 2.0,
+            count: 1,
+        }];
+        let stored = serde_json::to_value(&inventory).unwrap();
+        let restored: Vec<MagnetSpec> = serde_json::from_value(stored).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].diameter_mm, 6.0);
+        assert_eq!(restored[0].height_mm, 2.0);
+        assert_eq!(restored[0].count, 1);
+    }
 }

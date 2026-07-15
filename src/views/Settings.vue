@@ -178,6 +178,55 @@
       <div class="flex flex-col gap-1.5">
         <span
           class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          >MAGNET INVENTORY — DIAMETER × HEIGHT (MM)</span
+        >
+        <div
+          class="flex flex-wrap gap-1.5 items-center bg-base-200 border border-base-content/10 rounded-lg p-2"
+        >
+          <span
+            v-for="(magnet, index) in settings.magnet_inventory ?? []"
+            :key="`${magnet.diameter_mm}x${magnet.height_mm}-${index}`"
+            class="font-mono text-[11px] text-base-content/70 border border-base-content/15 rounded-full px-2.5 py-0.5 flex items-center gap-1"
+          >
+            {{ magnet.diameter_mm }}×{{ magnet.height_mm }}
+            <button
+              type="button"
+              class="opacity-50 hover:opacity-100"
+              @click="removeMagnet(index)"
+            >
+              ✕
+            </button>
+          </span>
+          <form class="join" @submit.prevent="addMagnet">
+            <input
+              v-model.number="newMagnetDiameter"
+              type="number"
+              step="0.5"
+              min="0.5"
+              class="input input-xs join-item w-14 font-mono"
+              placeholder="⌀"
+            />
+            <input
+              v-model.number="newMagnetHeight"
+              type="number"
+              step="0.5"
+              min="0.5"
+              class="input input-xs join-item w-14 font-mono"
+              placeholder="h"
+            />
+            <button type="submit" class="btn btn-xs join-item">+ add</button>
+          </form>
+        </div>
+        <p class="text-[10.5px] text-base-content/40">
+          Magnets you actually own. Base Cutter's per-placement magnet panel
+          offers one chip per size here and suggests the largest one whose boss
+          fits the base — always overridable per placement.
+        </p>
+      </div>
+
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
           >PRINT BUTTON</span
         >
         <div
@@ -443,6 +492,16 @@ const printAction = computed(
 // Unset means the default: extracted working copies are taken back after use
 const packCleanup = computed(() => settings.value.pack_cleanup_after ?? true);
 
+/* Both chip-list editors below (designer lexicon, magnet inventory) share
+   one add rule: append unless a duplicate already exists, where each list
+   defines its own duplicate key. One helper instead of two hand-rolled
+   copies, so a future editing rule (validation, undo) lands in one place. */
+const addUnique = <T>(
+  list: T[],
+  item: T,
+  isDuplicate: (existing: T) => boolean,
+): T[] => (list.some(isDuplicate) ? list : [...list, item]);
+
 /* The scanner's designer lexicon, editable here; seeded server-side with
    sensible defaults. Mutating the array triggers the deep-watch auto-save. */
 const newDesigner = ref("");
@@ -450,15 +509,39 @@ const addDesigner = () => {
   const name = newDesigner.value.trim();
   newDesigner.value = "";
   if (!name) return;
-  const list = settings.value.known_designers ?? [];
-  if (!list.some((d) => d.toLowerCase() === name.toLowerCase())) {
-    settings.value.known_designers = [...list, name];
-  }
+  settings.value.known_designers = addUnique(
+    settings.value.known_designers ?? [],
+    name,
+    (d) => d.toLowerCase() === name.toLowerCase(),
+  );
 };
 const removeDesigner = (name: string) => {
   settings.value.known_designers = (
     settings.value.known_designers ?? []
   ).filter((d) => d !== name);
+};
+
+/* The magnet inventory (docs/BASECUTTER.md "Hollow, with magnet mounts"),
+   editable here; seeded server-side with the common hobby sizes. Base
+   Cutter's magnet panel reads this list and never writes it back. */
+const newMagnetDiameter = ref<number | null>(null);
+const newMagnetHeight = ref<number | null>(null);
+const addMagnet = () => {
+  const diameter_mm = newMagnetDiameter.value;
+  const height_mm = newMagnetHeight.value;
+  newMagnetDiameter.value = null;
+  newMagnetHeight.value = null;
+  if (!diameter_mm || !height_mm || diameter_mm <= 0 || height_mm <= 0) return;
+  settings.value.magnet_inventory = addUnique(
+    settings.value.magnet_inventory ?? [],
+    { diameter_mm, height_mm, count: 1 },
+    (m) => m.diameter_mm === diameter_mm && m.height_mm === height_mm,
+  );
+};
+const removeMagnet = (index: number) => {
+  settings.value.magnet_inventory = (
+    settings.value.magnet_inventory ?? []
+  ).filter((_, i) => i !== index);
 };
 
 // Shared with the first-run dialog and the Render tab — one verdict, three
