@@ -1399,6 +1399,94 @@ const exportToCatalog = async () => {
     exportBusy.value = false;
   }
 };
+
+// ---- three-step accordion (side panel UX: "which step am I on") ----
+// Free navigation, never a locked wizard — activeStep only ever changes via
+// an explicit header click (selectStep) or an auto-advance nudge on a
+// milestone TRANSITION (false -> true, never re-fired on every render while
+// the milestone stays true). Session-only: no localStorage, resets to 1 on
+// reload.
+const activeStep = ref<1 | 2 | 3>(1);
+/** High-water mark of steps the user has explicitly opened via a header
+ * click — NOT bumped by autoAdvance. Once the user has manually looked at a
+ * later step, autoAdvance never re-opens an earlier (or equal) one out from
+ * under them again this session — "never auto-move backward" plus "respect
+ * a manual choice that's already ahead of the milestone". */
+let highestManualStep: 1 | 2 | 3 = 1;
+const selectStep = (step: 1 | 2 | 3) => {
+  activeStep.value = step;
+  if (step > highestManualStep) highestManualStep = step;
+};
+/** Forward-only, and only below the user's own high-water mark — see
+ * highestManualStep's comment. Called from milestone-transition watchers
+ * below, never from a steady-state check (so it fires once per transition,
+ * not on every subsequent render while the milestone stays true). */
+const autoAdvance = (target: 1 | 2 | 3) => {
+  if (target <= activeStep.value || target <= highestManualStep) return;
+  activeStep.value = target;
+};
+
+const step1Done = computed(() => landscapeBounds.value != null);
+const step2Done = computed(() => placements.value.length > 0);
+/** Latches true the first time a job finishes with >=1 ok result and never
+ * resets — unlike baseCut.finishedSummary (which reverts to null the moment
+ * the NEXT job starts, see useBaseCut's resetState), this is a "this
+ * session" milestone, not a "this job" one. */
+const hasCutMilestone = ref(false);
+const step3Done = computed(() => hasCutMilestone.value);
+
+/** "no landscape yet" / basename + dims (cheap: landscapeBounds is already
+ * the loaded extent, no re-measurement needed) + "· scattered" once applied. */
+const step1Summary = computed(() => {
+  if (!landscapeBounds.value) return "no landscape yet";
+  const b = landscapeBounds.value;
+  const base = landscapePath.value.split(/[/\\]/).pop() || "landscape";
+  const w = Math.round(b.maxX - b.minX);
+  const d = Math.round(b.maxY - b.minY);
+  return `${base} (${w}×${d}mm)${hasScatterApplied.value ? " · scattered" : ""}`;
+});
+
+/** "N placements" (+ "· M magnets" counting placements with a magnet set, +
+ * "· K grouped" counting groups) — always numeric, no separate empty-state
+ * copy (unlike step 1/3): "0 placements" already reads fine here. */
+const step2Summary = computed(() => {
+  const n = placements.value.length;
+  const magnets = placements.value.filter((p) => p.magnet != null).length;
+  let summary = `${n} placement${n === 1 ? "" : "s"}`;
+  if (magnets > 0) summary += ` · ${magnets} magnet${magnets === 1 ? "" : "s"}`;
+  if (groups.value.length > 0) summary += ` · ${groups.value.length} grouped`;
+  return summary;
+});
+
+/** The last completed job's tally — kept separately from
+ * baseCut.finishedSummary (which the toast watcher above clears back to
+ * null the moment a new job starts) so the step-3 summary doesn't blank out
+ * mid-second-run. */
+const lastCutSummary = ref<{ ok_count: number; total: number } | null>(null);
+const step3Summary = computed(() => {
+  if (!lastCutSummary.value) return "not cut yet";
+  return `${lastCutSummary.value.ok_count}/${lastCutSummary.value.total} cut ok`;
+});
+
+// Auto-advance on milestone transitions (false -> true) only — landscape
+// loads -> open step 2. The step-2 milestone (first placement) deliberately
+// has NO auto-advance wired here (stays on 2, per the docs task): placing a
+// base shouldn't jump the user straight to the cut screen.
+watch(landscapeBounds, (loaded, wasLoaded) => {
+  if (loaded && !wasLoaded) autoAdvance(2);
+});
+
+// A second, independent watch on the same source the toast watcher above
+// already observes (baseCut.finishedSummary) — separate concerns (accordion
+// state vs. toast copy), not a replacement for it.
+watch(baseCut.finishedSummary, (summary) => {
+  if (!summary) return;
+  lastCutSummary.value = summary;
+  if (summary.ok_count > 0) {
+    hasCutMilestone.value = true;
+    autoAdvance(3);
+  }
+});
 </script>
 
 <template>
@@ -1410,490 +1498,407 @@ const exportToCatalog = async () => {
         <span class="font-bold text-[17px]">Base Cutter</span>
       </div>
 
-      <div class="flex flex-col gap-1.5">
-        <span
-          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-          >GENERATE LANDSCAPE</span
-        >
-        <div class="flex flex-wrap gap-1">
-          <button
-            v-for="preset in landscapePresets"
-            :key="preset.id"
-            type="button"
-            class="btn btn-xs"
-            :class="preset.id === selectedPresetId ? 'btn-primary' : ''"
-            :disabled="landscapeGen.isRunning.value"
-            @click="selectPreset(preset)"
-          >
-            {{ preset.label }}
-          </button>
-        </div>
-        <div class="flex items-center gap-1.5">
-          <span class="text-[11px] text-base-content/50 shrink-0">Seed</span>
-          <input
-            type="number"
-            class="input input-xs flex-1 font-mono"
-            :disabled="landscapeGen.isRunning.value"
-            v-model.number="genParams.seed"
-          />
-          <button
-            type="button"
-            class="btn btn-xs"
-            title="Reroll seed"
-            :disabled="landscapeGen.isRunning.value"
-            @click="rerollSeed"
-          >
-            🎲
-          </button>
-        </div>
-
-        <details
-          class="collapse collapse-arrow border border-base-content/10 bg-base-200/20 rounded-box"
-        >
-          <summary
-            class="collapse-title min-h-0 py-2.5 px-3 flex items-center gap-2 cursor-pointer"
-          >
-            <span
-              class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-              >ADVANCED — TERRAIN LAYERS</span
-            >
-          </summary>
-          <div class="collapse-content flex flex-col gap-2.5 px-3">
-            <NumberInput
-              id="gen-width"
-              label="Width (mm)"
-              :step="1"
-              :min="10"
-              v-model="genParams.width_mm"
-            />
-            <NumberInput
-              id="gen-depth"
-              label="Depth (mm)"
-              :step="1"
-              :min="10"
-              v-model="genParams.depth_mm"
-            />
-            <!-- 0.1mm is resin-grade; the script coarsens automatically if
-                 the step would blow the vertex budget on a big plate and
-                 reports the effective value back. -->
-            <NumberInput
-              id="gen-resolution"
-              label="Resolution (mm, finest 0.1)"
-              :step="0.05"
-              :min="0.1"
-              v-model="genParams.resolution_mm"
-            />
-            <!-- Zooms the terrain itself (stone/dune/boulder sizes), not
-                 the mesh density — that's Resolution above. -->
-            <NumberInput
-              id="gen-feature-scale"
-              label="Feature scale ×"
-              :step="0.1"
-              :min="0.25"
-              :max="4"
-              v-model="genParams.feature_scale"
-            />
-            <NumberInput
-              id="gen-carrier"
-              label="Carrier (mm)"
-              :step="0.1"
-              :min="0"
-              v-model="genParams.carrier_mm"
-            />
-            <NumberInput
-              id="gen-relief"
-              label="Relief (mm)"
-              :step="0.1"
-              :min="0"
-              v-model="genParams.relief_mm"
-            />
-
-            <div
-              class="flex flex-col gap-2 border-t border-base-content/10 pt-2"
-            >
-              <div class="flex flex-col gap-1">
-                <Switch
-                  v-model="genParams.layers.noise.enabled"
-                  label="Noise"
-                />
-                <template v-if="genParams.layers.noise.enabled">
-                  <NumberInput
-                    id="gen-noise-scale"
-                    label="Scale"
-                    :step="0.01"
-                    :min="0"
-                    v-model="genParams.layers.noise.scale"
-                  />
-                  <NumberInput
-                    id="gen-noise-octaves"
-                    label="Octaves"
-                    :step="1"
-                    :min="1"
-                    :max="8"
-                    v-model="genParams.layers.noise.octaves"
-                  />
-                  <Switch
-                    v-model="genParams.layers.noise.ridged"
-                    label="Ridged (sharp crests)"
-                  />
-                  <NumberInput
-                    id="gen-noise-amount"
-                    label="Amount"
-                    :step="0.05"
-                    :min="0"
-                    v-model="genParams.layers.noise.amount"
-                  />
-                </template>
-              </div>
-
-              <div class="flex flex-col gap-1">
-                <Switch
-                  v-model="genParams.layers.ripples.enabled"
-                  label="Ripples"
-                />
-                <template v-if="genParams.layers.ripples.enabled">
-                  <NumberInput
-                    id="gen-ripples-wavelength"
-                    label="Wavelength (mm)"
-                    :step="0.5"
-                    :min="0.1"
-                    v-model="genParams.layers.ripples.wavelength_mm"
-                  />
-                  <NumberInput
-                    id="gen-ripples-direction"
-                    label="Direction (deg)"
-                    :step="5"
-                    v-model="genParams.layers.ripples.direction_deg"
-                  />
-                  <NumberInput
-                    id="gen-ripples-waviness"
-                    label="Waviness"
-                    :step="0.05"
-                    :min="0"
-                    v-model="genParams.layers.ripples.waviness"
-                  />
-                  <NumberInput
-                    id="gen-ripples-amount"
-                    label="Amount"
-                    :step="0.05"
-                    :min="0"
-                    v-model="genParams.layers.ripples.amount"
-                  />
-                </template>
-              </div>
-
-              <div class="flex flex-col gap-1">
-                <Switch
-                  v-model="genParams.layers.stones.enabled"
-                  label="Stones"
-                />
-                <template v-if="genParams.layers.stones.enabled">
-                  <NumberInput
-                    id="gen-stones-cell"
-                    label="Cell size (mm)"
-                    :step="0.5"
-                    :min="1"
-                    v-model="genParams.layers.stones.cell_mm"
-                  />
-                  <NumberInput
-                    id="gen-stones-gap"
-                    label="Gap / mortar (mm)"
-                    :step="0.1"
-                    :min="0"
-                    v-model="genParams.layers.stones.gap_mm"
-                  />
-                  <NumberInput
-                    id="gen-stones-dome"
-                    label="Dome (0-1)"
-                    :step="0.05"
-                    :min="0"
-                    :max="1"
-                    v-model="genParams.layers.stones.dome"
-                  />
-                  <NumberInput
-                    id="gen-stones-jitter"
-                    label="Height jitter"
-                    :step="0.05"
-                    :min="0"
-                    v-model="genParams.layers.stones.jitter"
-                  />
-                  <NumberInput
-                    id="gen-stones-cluster"
-                    label="Cluster (0-1, lava crust)"
-                    :step="0.05"
-                    :min="0"
-                    :max="1"
-                    v-model="genParams.layers.stones.cluster"
-                  />
-                  <NumberInput
-                    id="gen-stones-rough"
-                    label="Edge roughness (0-1)"
-                    :step="0.05"
-                    :min="0"
-                    :max="1"
-                    v-model="genParams.layers.stones.rough"
-                  />
-                  <NumberInput
-                    id="gen-stones-amount"
-                    label="Amount"
-                    :step="0.05"
-                    :min="0"
-                    v-model="genParams.layers.stones.amount"
-                  />
-                </template>
-              </div>
-
-              <div class="flex flex-col gap-1">
-                <Switch
-                  v-model="genParams.layers.boulders.enabled"
-                  label="Boulders"
-                />
-                <template v-if="genParams.layers.boulders.enabled">
-                  <NumberInput
-                    id="gen-boulders-count"
-                    label="Count"
-                    :step="1"
-                    :min="0"
-                    v-model="genParams.layers.boulders.count"
-                  />
-                  <NumberInput
-                    id="gen-boulders-min"
-                    label="Min diameter (mm)"
-                    :step="1"
-                    :min="1"
-                    v-model="genParams.layers.boulders.min_mm"
-                  />
-                  <NumberInput
-                    id="gen-boulders-max"
-                    label="Max diameter (mm)"
-                    :step="1"
-                    :min="1"
-                    v-model="genParams.layers.boulders.max_mm"
-                  />
-                  <NumberInput
-                    id="gen-boulders-amount"
-                    label="Amount"
-                    :step="0.05"
-                    :min="0"
-                    v-model="genParams.layers.boulders.amount"
-                  />
-                </template>
-              </div>
-
-              <div class="flex flex-col gap-1">
-                <Switch v-model="genParams.layers.flow.enabled" label="Flow" />
-                <template v-if="genParams.layers.flow.enabled">
-                  <NumberInput
-                    id="gen-flow-width"
-                    label="Channel width (mm)"
-                    :step="0.5"
-                    :min="0.5"
-                    v-model="genParams.layers.flow.channel_width_mm"
-                  />
-                  <NumberInput
-                    id="gen-flow-meander"
-                    label="Meander scale"
-                    :step="0.05"
-                    :min="0.01"
-                    v-model="genParams.layers.flow.meander_scale"
-                  />
-                  <NumberInput
-                    id="gen-flow-bank"
-                    label="Bank height"
-                    :step="0.1"
-                    :min="0.05"
-                    v-model="genParams.layers.flow.bank_height"
-                  />
-                  <NumberInput
-                    id="gen-flow-amount"
-                    label="Amount"
-                    :step="0.05"
-                    :min="0"
-                    v-model="genParams.layers.flow.amount"
-                  />
-                </template>
-              </div>
-
-              <div class="flex flex-col gap-1">
-                <Switch
-                  v-model="genParams.layers.camber.enabled"
-                  label="Camber"
-                />
-                <NumberInput
-                  v-if="genParams.layers.camber.enabled"
-                  id="gen-camber-amount"
-                  label="Amount"
-                  :step="0.05"
-                  :min="0"
-                  v-model="genParams.layers.camber.amount"
-                />
-              </div>
-            </div>
-          </div>
-        </details>
-
-        <div class="flex items-center gap-3">
-          <button
-            class="btn btn-secondary btn-sm grow"
-            :disabled="!canGenerate"
-            @click="startGenerate"
-          >
-            <template v-if="landscapeGen.isRunning.value">
-              <span class="loading loading-spinner loading-xs"></span>
-              <span>Generating…</span>
-            </template>
-            <span v-else>Generate landscape</span>
-          </button>
-          <button
-            v-if="landscapeGen.isRunning.value"
-            class="btn btn-error btn-sm"
-            @click="cancelGenerate"
-          >
-            Cancel
-          </button>
-        </div>
-        <div
-          v-if="landscapeGen.failedMessage.value"
-          class="alert alert-error text-xs whitespace-pre-wrap flex-col items-start"
-        >
-          <span>{{ landscapeGen.failedMessage.value }}</span>
-          <pre
-            v-if="landscapeGen.failedStdoutTail.value"
-            class="font-mono text-[10px] opacity-70 whitespace-pre-wrap mt-1"
-            >{{ landscapeGen.failedStdoutTail.value }}</pre
-          >
-        </div>
-      </div>
-
-      <details
-        class="collapse collapse-arrow border border-base-content/10 bg-base-200/20 rounded-box"
+      <div
+        class="rounded-box border overflow-hidden"
+        :class="activeStep === 1 ? 'border-primary' : 'border-base-content/10'"
       >
-        <summary
-          class="collapse-title min-h-0 py-2.5 px-3 flex items-center gap-2 cursor-pointer"
+        <button
+          type="button"
+          class="w-full flex items-center gap-2 p-3 text-left"
+          @click="selectStep(1)"
         >
           <span
-            class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-            >SCATTER</span
+            class="flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-mono shrink-0"
+            :class="
+              activeStep === 1
+                ? 'bg-primary text-primary-content'
+                : step1Done
+                  ? 'bg-success/20 text-success'
+                  : 'bg-base-content/10 text-base-content/50'
+            "
+            >1</span
           >
-        </summary>
-        <div class="collapse-content flex flex-col gap-1.5 px-3">
-          <div class="flex flex-wrap gap-1">
-            <button
-              v-for="preset in SCATTER_PRESETS"
-              :key="preset.id"
-              type="button"
-              class="btn btn-xs"
-              :class="
-                preset.id === selectedScatterPresetId ? 'btn-primary' : ''
-              "
-              :disabled="!!debrisScatterBlockedReason"
-              :title="debrisScatterBlockedReason || undefined"
-              @click="selectScatterPreset(preset)"
-            >
-              {{ preset.label }}
-            </button>
-          </div>
-
-          <div class="flex items-center gap-1.5">
-            <span class="text-[11px] text-base-content/50 shrink-0"
-              >Density /dm²</span
-            >
-            <input
-              type="number"
-              class="input input-xs flex-1 font-mono"
-              min="0"
-              step="0.5"
-              :disabled="debrisScatter.isRunning.value"
-              v-model.number="debrisParams.density_per_dm2"
-            />
-            <!-- Front-row, not an advanced knob: like the terrain's own
-                 feature_scale, this is the "what scale am I basing for"
-                 dial — 1 = the 28-32mm heroic anchor every piece size is
-                 canonical at (docs/SCATTER.md "Scale anchor"); 15mm gaming
-                 wants ~0.5, 54mm display work ~2. -->
+          <span class="flex-1 min-w-0 flex flex-col">
             <span
-              class="text-[11px] text-base-content/50 shrink-0"
-              title="Whole-pass piece rescale — 1 = 28-32mm heroic"
-              >Scale ×</span
+              class="font-mono font-semibold text-[10px] tracking-widest"
+              :class="
+                activeStep === 1 ? 'text-primary' : 'text-base-content/40'
+              "
+              >TERRAIN</span
             >
-            <input
-              type="number"
-              class="input input-xs w-16 font-mono"
-              min="0.1"
-              step="0.05"
-              :disabled="debrisScatter.isRunning.value"
-              v-model.number="debrisParams.scale_factor"
-            />
-          </div>
+            <span class="text-[11px] text-base-content/50 truncate">{{
+              step1Summary
+            }}</span>
+          </span>
+          <span
+            v-if="step1Done"
+            class="text-success text-[13px] shrink-0"
+            title="Landscape loaded"
+            >✓</span
+          >
+        </button>
+        <div
+          v-show="activeStep === 1"
+          class="flex flex-col gap-3.5 px-3 pb-3.5"
+        >
+          <div class="flex flex-col gap-1.5">
+            <span
+              class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+              >GENERATE LANDSCAPE</span
+            >
+            <div class="flex flex-wrap gap-1">
+              <button
+                v-for="preset in landscapePresets"
+                :key="preset.id"
+                type="button"
+                class="btn btn-xs"
+                :class="preset.id === selectedPresetId ? 'btn-primary' : ''"
+                :disabled="landscapeGen.isRunning.value"
+                @click="selectPreset(preset)"
+              >
+                {{ preset.label }}
+              </button>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <span class="text-[11px] text-base-content/50 shrink-0"
+                >Seed</span
+              >
+              <input
+                type="number"
+                class="input input-xs flex-1 font-mono"
+                :disabled="landscapeGen.isRunning.value"
+                v-model.number="genParams.seed"
+              />
+              <button
+                type="button"
+                class="btn btn-xs"
+                title="Reroll seed"
+                :disabled="landscapeGen.isRunning.value"
+                @click="rerollSeed"
+              >
+                🎲
+              </button>
+            </div>
 
-          <div class="flex items-center gap-1.5">
-            <span class="text-[11px] text-base-content/50 shrink-0">Seed</span>
-            <input
-              type="number"
-              class="input input-xs flex-1 font-mono"
-              :disabled="debrisScatter.isRunning.value"
-              v-model.number="debrisParams.seed"
-            />
-            <button
-              type="button"
-              class="btn btn-xs"
-              title="Reroll seed"
-              :disabled="debrisScatter.isRunning.value"
-              @click="rerollDebrisSeed"
+            <details
+              class="collapse collapse-arrow border border-base-content/10 bg-base-200/20 rounded-box"
             >
-              🎲
-            </button>
-          </div>
+              <summary
+                class="collapse-title min-h-0 py-2.5 px-3 flex items-center gap-2 cursor-pointer"
+              >
+                <span
+                  class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+                  >ADVANCED — TERRAIN LAYERS</span
+                >
+              </summary>
+              <div class="collapse-content flex flex-col gap-2.5 px-3">
+                <NumberInput
+                  id="gen-width"
+                  label="Width (mm)"
+                  :step="1"
+                  :min="10"
+                  v-model="genParams.width_mm"
+                />
+                <NumberInput
+                  id="gen-depth"
+                  label="Depth (mm)"
+                  :step="1"
+                  :min="10"
+                  v-model="genParams.depth_mm"
+                />
+                <!-- 0.1mm is resin-grade; the script coarsens automatically if
+                 the step would blow the vertex budget on a big plate and
+                 reports the effective value back. -->
+                <NumberInput
+                  id="gen-resolution"
+                  label="Resolution (mm, finest 0.1)"
+                  :step="0.05"
+                  :min="0.1"
+                  v-model="genParams.resolution_mm"
+                />
+                <!-- Zooms the terrain itself (stone/dune/boulder sizes), not
+                 the mesh density — that's Resolution above. -->
+                <NumberInput
+                  id="gen-feature-scale"
+                  label="Feature scale ×"
+                  :step="0.1"
+                  :min="0.25"
+                  :max="4"
+                  v-model="genParams.feature_scale"
+                />
+                <NumberInput
+                  id="gen-carrier"
+                  label="Carrier (mm)"
+                  :step="0.1"
+                  :min="0"
+                  v-model="genParams.carrier_mm"
+                />
+                <NumberInput
+                  id="gen-relief"
+                  label="Relief (mm)"
+                  :step="0.1"
+                  :min="0"
+                  v-model="genParams.relief_mm"
+                />
 
-          <div class="flex items-center gap-3">
-            <button
-              class="btn btn-secondary btn-sm grow"
-              :disabled="!canRunDebrisScatter"
-              :title="debrisScatterBlockedReason || undefined"
-              @click="startDebrisScatter"
+                <div
+                  class="flex flex-col gap-2 border-t border-base-content/10 pt-2"
+                >
+                  <div class="flex flex-col gap-1">
+                    <Switch
+                      v-model="genParams.layers.noise.enabled"
+                      label="Noise"
+                    />
+                    <template v-if="genParams.layers.noise.enabled">
+                      <NumberInput
+                        id="gen-noise-scale"
+                        label="Scale"
+                        :step="0.01"
+                        :min="0"
+                        v-model="genParams.layers.noise.scale"
+                      />
+                      <NumberInput
+                        id="gen-noise-octaves"
+                        label="Octaves"
+                        :step="1"
+                        :min="1"
+                        :max="8"
+                        v-model="genParams.layers.noise.octaves"
+                      />
+                      <Switch
+                        v-model="genParams.layers.noise.ridged"
+                        label="Ridged (sharp crests)"
+                      />
+                      <NumberInput
+                        id="gen-noise-amount"
+                        label="Amount"
+                        :step="0.05"
+                        :min="0"
+                        v-model="genParams.layers.noise.amount"
+                      />
+                    </template>
+                  </div>
+
+                  <div class="flex flex-col gap-1">
+                    <Switch
+                      v-model="genParams.layers.ripples.enabled"
+                      label="Ripples"
+                    />
+                    <template v-if="genParams.layers.ripples.enabled">
+                      <NumberInput
+                        id="gen-ripples-wavelength"
+                        label="Wavelength (mm)"
+                        :step="0.5"
+                        :min="0.1"
+                        v-model="genParams.layers.ripples.wavelength_mm"
+                      />
+                      <NumberInput
+                        id="gen-ripples-direction"
+                        label="Direction (deg)"
+                        :step="5"
+                        v-model="genParams.layers.ripples.direction_deg"
+                      />
+                      <NumberInput
+                        id="gen-ripples-waviness"
+                        label="Waviness"
+                        :step="0.05"
+                        :min="0"
+                        v-model="genParams.layers.ripples.waviness"
+                      />
+                      <NumberInput
+                        id="gen-ripples-amount"
+                        label="Amount"
+                        :step="0.05"
+                        :min="0"
+                        v-model="genParams.layers.ripples.amount"
+                      />
+                    </template>
+                  </div>
+
+                  <div class="flex flex-col gap-1">
+                    <Switch
+                      v-model="genParams.layers.stones.enabled"
+                      label="Stones"
+                    />
+                    <template v-if="genParams.layers.stones.enabled">
+                      <NumberInput
+                        id="gen-stones-cell"
+                        label="Cell size (mm)"
+                        :step="0.5"
+                        :min="1"
+                        v-model="genParams.layers.stones.cell_mm"
+                      />
+                      <NumberInput
+                        id="gen-stones-gap"
+                        label="Gap / mortar (mm)"
+                        :step="0.1"
+                        :min="0"
+                        v-model="genParams.layers.stones.gap_mm"
+                      />
+                      <NumberInput
+                        id="gen-stones-dome"
+                        label="Dome (0-1)"
+                        :step="0.05"
+                        :min="0"
+                        :max="1"
+                        v-model="genParams.layers.stones.dome"
+                      />
+                      <NumberInput
+                        id="gen-stones-jitter"
+                        label="Height jitter"
+                        :step="0.05"
+                        :min="0"
+                        v-model="genParams.layers.stones.jitter"
+                      />
+                      <NumberInput
+                        id="gen-stones-cluster"
+                        label="Cluster (0-1, lava crust)"
+                        :step="0.05"
+                        :min="0"
+                        :max="1"
+                        v-model="genParams.layers.stones.cluster"
+                      />
+                      <NumberInput
+                        id="gen-stones-rough"
+                        label="Edge roughness (0-1)"
+                        :step="0.05"
+                        :min="0"
+                        :max="1"
+                        v-model="genParams.layers.stones.rough"
+                      />
+                      <NumberInput
+                        id="gen-stones-amount"
+                        label="Amount"
+                        :step="0.05"
+                        :min="0"
+                        v-model="genParams.layers.stones.amount"
+                      />
+                    </template>
+                  </div>
+
+                  <div class="flex flex-col gap-1">
+                    <Switch
+                      v-model="genParams.layers.boulders.enabled"
+                      label="Boulders"
+                    />
+                    <template v-if="genParams.layers.boulders.enabled">
+                      <NumberInput
+                        id="gen-boulders-count"
+                        label="Count"
+                        :step="1"
+                        :min="0"
+                        v-model="genParams.layers.boulders.count"
+                      />
+                      <NumberInput
+                        id="gen-boulders-min"
+                        label="Min diameter (mm)"
+                        :step="1"
+                        :min="1"
+                        v-model="genParams.layers.boulders.min_mm"
+                      />
+                      <NumberInput
+                        id="gen-boulders-max"
+                        label="Max diameter (mm)"
+                        :step="1"
+                        :min="1"
+                        v-model="genParams.layers.boulders.max_mm"
+                      />
+                      <NumberInput
+                        id="gen-boulders-amount"
+                        label="Amount"
+                        :step="0.05"
+                        :min="0"
+                        v-model="genParams.layers.boulders.amount"
+                      />
+                    </template>
+                  </div>
+
+                  <div class="flex flex-col gap-1">
+                    <Switch
+                      v-model="genParams.layers.flow.enabled"
+                      label="Flow"
+                    />
+                    <template v-if="genParams.layers.flow.enabled">
+                      <NumberInput
+                        id="gen-flow-width"
+                        label="Channel width (mm)"
+                        :step="0.5"
+                        :min="0.5"
+                        v-model="genParams.layers.flow.channel_width_mm"
+                      />
+                      <NumberInput
+                        id="gen-flow-meander"
+                        label="Meander scale"
+                        :step="0.05"
+                        :min="0.01"
+                        v-model="genParams.layers.flow.meander_scale"
+                      />
+                      <NumberInput
+                        id="gen-flow-bank"
+                        label="Bank height"
+                        :step="0.1"
+                        :min="0.05"
+                        v-model="genParams.layers.flow.bank_height"
+                      />
+                      <NumberInput
+                        id="gen-flow-amount"
+                        label="Amount"
+                        :step="0.05"
+                        :min="0"
+                        v-model="genParams.layers.flow.amount"
+                      />
+                    </template>
+                  </div>
+
+                  <div class="flex flex-col gap-1">
+                    <Switch
+                      v-model="genParams.layers.camber.enabled"
+                      label="Camber"
+                    />
+                    <NumberInput
+                      v-if="genParams.layers.camber.enabled"
+                      id="gen-camber-amount"
+                      label="Amount"
+                      :step="0.05"
+                      :min="0"
+                      v-model="genParams.layers.camber.amount"
+                    />
+                  </div>
+                </div>
+              </div>
+            </details>
+
+            <div class="flex items-center gap-3">
+              <button
+                class="btn btn-secondary btn-sm grow"
+                :disabled="!canGenerate"
+                @click="startGenerate"
+              >
+                <template v-if="landscapeGen.isRunning.value">
+                  <span class="loading loading-spinner loading-xs"></span>
+                  <span>Generating…</span>
+                </template>
+                <span v-else>Generate landscape</span>
+              </button>
+              <button
+                v-if="landscapeGen.isRunning.value"
+                class="btn btn-error btn-sm"
+                @click="cancelGenerate"
+              >
+                Cancel
+              </button>
+            </div>
+            <div
+              v-if="landscapeGen.failedMessage.value"
+              class="alert alert-error text-xs whitespace-pre-wrap flex-col items-start"
             >
-              <template v-if="debrisScatter.isRunning.value">
-                <span class="loading loading-spinner loading-xs"></span>
-                <span>Scattering…</span>
-              </template>
-              <span v-else>{{
-                hasScatterApplied ? "Re-scatter" : "Scatter"
-              }}</span>
-            </button>
-            <button
-              v-if="debrisScatter.isRunning.value"
-              class="btn btn-error btn-sm"
-              @click="cancelDebrisScatter"
-            >
-              Cancel
-            </button>
-          </div>
-          <div
-            v-if="debrisScatter.isRunning.value"
-            class="flex items-center gap-3"
-          >
-            <ProgressBar :progress="debrisScatterPercent" />
-            <span class="text-sm opacity-70">{{ debrisScatterStepLabel }}</span>
-          </div>
-          <button
-            type="button"
-            class="btn btn-ghost btn-xs self-start"
-            :disabled="!canRemoveScatter"
-            :title="removeScatterBlockedReason || undefined"
-            @click="removeScatter"
-          >
-            Remove scatter
-          </button>
-          <div
-            v-if="debrisScatter.failedMessage.value"
-            class="alert alert-error text-xs whitespace-pre-wrap flex-col items-start"
-          >
-            <span>{{ debrisScatter.failedMessage.value }}</span>
-            <pre
-              v-if="debrisScatter.failedStdoutTail.value"
-              class="font-mono text-[10px] opacity-70 whitespace-pre-wrap mt-1"
-              >{{ debrisScatter.failedStdoutTail.value }}</pre
-            >
+              <span>{{ landscapeGen.failedMessage.value }}</span>
+              <pre
+                v-if="landscapeGen.failedStdoutTail.value"
+                class="font-mono text-[10px] opacity-70 whitespace-pre-wrap mt-1"
+                >{{ landscapeGen.failedStdoutTail.value }}</pre
+              >
+            </div>
           </div>
 
           <details
@@ -1904,767 +1909,1020 @@ const exportToCatalog = async () => {
             >
               <span
                 class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-                >ADVANCED — SCATTER</span
+                >SCATTER</span
               >
             </summary>
-            <div class="collapse-content flex flex-col gap-2.5 px-3">
-              <NumberInput
-                id="scatter-scale-min"
-                label="Scale min ×"
-                :step="0.05"
-                :min="0.1"
-                v-model="debrisParams.scale_min"
-              />
-              <NumberInput
-                id="scatter-scale-max"
-                label="Scale max ×"
-                :step="0.05"
-                :min="0.1"
-                v-model="debrisParams.scale_max"
-              />
-              <NumberInput
-                id="scatter-sink-min"
-                label="Sink min (mm)"
-                :step="0.1"
-                :min="0"
-                v-model="debrisParams.sink_min"
-              />
-              <NumberInput
-                id="scatter-sink-max"
-                label="Sink max (mm)"
-                :step="0.1"
-                :min="0"
-                v-model="debrisParams.sink_max"
-              />
-              <Switch
-                v-model="debrisParams.align_to_surface"
-                label="Align to surface"
-              />
-              <NumberInput
-                id="scatter-max-slope"
-                label="Max slope (deg)"
-                :step="1"
-                :min="0"
-                :max="90"
-                v-model="debrisParams.max_slope_deg"
-              />
-              <NumberInput
-                id="scatter-edge-margin"
-                label="Edge margin (mm)"
-                :step="0.5"
-                :min="0"
-                v-model="debrisParams.edge_margin_mm"
-              />
+            <div class="collapse-content flex flex-col gap-1.5 px-3">
+              <div class="flex flex-wrap gap-1">
+                <button
+                  v-for="preset in SCATTER_PRESETS"
+                  :key="preset.id"
+                  type="button"
+                  class="btn btn-xs"
+                  :class="
+                    preset.id === selectedScatterPresetId ? 'btn-primary' : ''
+                  "
+                  :disabled="!!debrisScatterBlockedReason"
+                  :title="debrisScatterBlockedReason || undefined"
+                  @click="selectScatterPreset(preset)"
+                >
+                  {{ preset.label }}
+                </button>
+              </div>
 
-              <div
-                class="flex flex-col gap-1.5 border-t border-base-content/10 pt-2"
-              >
+              <div class="flex items-center gap-1.5">
+                <span class="text-[11px] text-base-content/50 shrink-0"
+                  >Density /dm²</span
+                >
+                <input
+                  type="number"
+                  class="input input-xs flex-1 font-mono"
+                  min="0"
+                  step="0.5"
+                  :disabled="debrisScatter.isRunning.value"
+                  v-model.number="debrisParams.density_per_dm2"
+                />
+                <!-- Front-row, not an advanced knob: like the terrain's own
+                 feature_scale, this is the "what scale am I basing for"
+                 dial — 1 = the 28-32mm heroic anchor every piece size is
+                 canonical at (docs/SCATTER.md "Scale anchor"); 15mm gaming
+                 wants ~0.5, 54mm display work ~2. -->
                 <span
-                  class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-                  >PIECE MIX — GENERATED</span
+                  class="text-[11px] text-base-content/50 shrink-0"
+                  title="Whole-pass piece rescale — 1 = 28-32mm heroic"
+                  >Scale ×</span
                 >
-                <div
-                  v-for="piece in debrisPieces"
-                  :key="piece.kind"
-                  class="flex items-center gap-1.5"
+                <input
+                  type="number"
+                  class="input input-xs w-16 font-mono"
+                  min="0.1"
+                  step="0.05"
+                  :disabled="debrisScatter.isRunning.value"
+                  v-model.number="debrisParams.scale_factor"
+                />
+              </div>
+
+              <div class="flex items-center gap-1.5">
+                <span class="text-[11px] text-base-content/50 shrink-0"
+                  >Seed</span
                 >
-                  <input
-                    type="checkbox"
-                    class="checkbox checkbox-xs"
-                    v-model="piece.enabled"
-                  />
-                  <span class="text-[11px] flex-1 capitalize">{{
-                    piece.kind
+                <input
+                  type="number"
+                  class="input input-xs flex-1 font-mono"
+                  :disabled="debrisScatter.isRunning.value"
+                  v-model.number="debrisParams.seed"
+                />
+                <button
+                  type="button"
+                  class="btn btn-xs"
+                  title="Reroll seed"
+                  :disabled="debrisScatter.isRunning.value"
+                  @click="rerollDebrisSeed"
+                >
+                  🎲
+                </button>
+              </div>
+
+              <div class="flex items-center gap-3">
+                <button
+                  class="btn btn-secondary btn-sm grow"
+                  :disabled="!canRunDebrisScatter"
+                  :title="debrisScatterBlockedReason || undefined"
+                  @click="startDebrisScatter"
+                >
+                  <template v-if="debrisScatter.isRunning.value">
+                    <span class="loading loading-spinner loading-xs"></span>
+                    <span>Scattering…</span>
+                  </template>
+                  <span v-else>{{
+                    hasScatterApplied ? "Re-scatter" : "Scatter"
                   }}</span>
-                  <input
-                    type="number"
-                    class="input input-xs w-16 font-mono"
-                    min="0"
-                    step="0.1"
-                    :disabled="!piece.enabled"
-                    v-model.number="piece.weight"
+                </button>
+                <button
+                  v-if="debrisScatter.isRunning.value"
+                  class="btn btn-error btn-sm"
+                  @click="cancelDebrisScatter"
+                >
+                  Cancel
+                </button>
+              </div>
+              <div
+                v-if="debrisScatter.isRunning.value"
+                class="flex items-center gap-3"
+              >
+                <ProgressBar :progress="debrisScatterPercent" />
+                <span class="text-sm opacity-70">{{
+                  debrisScatterStepLabel
+                }}</span>
+              </div>
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs self-start"
+                :disabled="!canRemoveScatter"
+                :title="removeScatterBlockedReason || undefined"
+                @click="removeScatter"
+              >
+                Remove scatter
+              </button>
+              <div
+                v-if="debrisScatter.failedMessage.value"
+                class="alert alert-error text-xs whitespace-pre-wrap flex-col items-start"
+              >
+                <span>{{ debrisScatter.failedMessage.value }}</span>
+                <pre
+                  v-if="debrisScatter.failedStdoutTail.value"
+                  class="font-mono text-[10px] opacity-70 whitespace-pre-wrap mt-1"
+                  >{{ debrisScatter.failedStdoutTail.value }}</pre
+                >
+              </div>
+
+              <details
+                class="collapse collapse-arrow border border-base-content/10 bg-base-200/20 rounded-box"
+              >
+                <summary
+                  class="collapse-title min-h-0 py-2.5 px-3 flex items-center gap-2 cursor-pointer"
+                >
+                  <span
+                    class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+                    >ADVANCED — SCATTER</span
+                  >
+                </summary>
+                <div class="collapse-content flex flex-col gap-2.5 px-3">
+                  <NumberInput
+                    id="scatter-scale-min"
+                    label="Scale min ×"
+                    :step="0.05"
+                    :min="0.1"
+                    v-model="debrisParams.scale_min"
                   />
-                </div>
-                <!-- get_scatter_assets() returns [] until S4 curation lands
+                  <NumberInput
+                    id="scatter-scale-max"
+                    label="Scale max ×"
+                    :step="0.05"
+                    :min="0.1"
+                    v-model="debrisParams.scale_max"
+                  />
+                  <NumberInput
+                    id="scatter-sink-min"
+                    label="Sink min (mm)"
+                    :step="0.1"
+                    :min="0"
+                    v-model="debrisParams.sink_min"
+                  />
+                  <NumberInput
+                    id="scatter-sink-max"
+                    label="Sink max (mm)"
+                    :step="0.1"
+                    :min="0"
+                    v-model="debrisParams.sink_max"
+                  />
+                  <Switch
+                    v-model="debrisParams.align_to_surface"
+                    label="Align to surface"
+                  />
+                  <NumberInput
+                    id="scatter-max-slope"
+                    label="Max slope (deg)"
+                    :step="1"
+                    :min="0"
+                    :max="90"
+                    v-model="debrisParams.max_slope_deg"
+                  />
+                  <NumberInput
+                    id="scatter-edge-margin"
+                    label="Edge margin (mm)"
+                    :step="0.5"
+                    :min="0"
+                    v-model="debrisParams.edge_margin_mm"
+                  />
+
+                  <div
+                    class="flex flex-col gap-1.5 border-t border-base-content/10 pt-2"
+                  >
+                    <span
+                      class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+                      >PIECE MIX — GENERATED</span
+                    >
+                    <div
+                      v-for="piece in debrisPieces"
+                      :key="piece.kind"
+                      class="flex items-center gap-1.5"
+                    >
+                      <input
+                        type="checkbox"
+                        class="checkbox checkbox-xs"
+                        v-model="piece.enabled"
+                      />
+                      <span class="text-[11px] flex-1 capitalize">{{
+                        piece.kind
+                      }}</span>
+                      <input
+                        type="number"
+                        class="input input-xs w-16 font-mono"
+                        min="0"
+                        step="0.1"
+                        :disabled="!piece.enabled"
+                        v-model.number="piece.weight"
+                      />
+                    </div>
+                    <!-- get_scatter_assets() returns [] until S4 curation lands
                      (docs/SCATTER.md "Execution phases") — no assets group
                      renders until there's actually something in it, rather
                      than an always-empty list confusing the picker. -->
-              </div>
+                  </div>
+                </div>
+              </details>
             </div>
           </details>
-        </div>
-      </details>
 
-      <div class="flex flex-col gap-1">
-        <span
-          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-          >LANDSCAPE</span
-        >
-        <div class="flex">
-          <input
-            type="text"
-            readonly
-            class="input input-sm flex-1 font-mono text-[11px]"
-            :value="landscapePath || 'No landscape selected'"
-            :title="landscapePath"
-          />
-          <button class="btn btn-sm" @click="chooseLandscape">
-            Choose STL…
-          </button>
+          <div class="flex flex-col gap-1">
+            <span
+              class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+              >LANDSCAPE</span
+            >
+            <div class="flex">
+              <input
+                type="text"
+                readonly
+                class="input input-sm flex-1 font-mono text-[11px]"
+                :value="landscapePath || 'No landscape selected'"
+                :title="landscapePath"
+              />
+              <button class="btn btn-sm" @click="chooseLandscape">
+                Choose STL…
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
-      <div class="flex flex-col gap-1.5">
-        <span
-          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-          >CUTTER PALETTE — CLICK TO PLACE</span
+      <div
+        class="rounded-box border overflow-hidden"
+        :class="activeStep === 2 ? 'border-primary' : 'border-base-content/10'"
+      >
+        <button
+          type="button"
+          class="w-full flex items-center gap-2 p-3 text-left"
+          @click="selectStep(2)"
         >
-        <div class="flex gap-1">
-          <button
-            v-for="f in PALETTE_FAMILIES"
-            :key="f.key"
-            type="button"
-            class="btn btn-xs"
-            :class="paletteFamily === f.key ? 'btn-primary' : 'btn-ghost'"
-            @click="paletteFamily = f.key"
+          <span
+            class="flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-mono shrink-0"
+            :class="
+              activeStep === 2
+                ? 'bg-primary text-primary-content'
+                : step2Done
+                  ? 'bg-success/20 text-success'
+                  : 'bg-base-content/10 text-base-content/50'
+            "
+            >2</span
           >
-            {{ f.label }}
-          </button>
-        </div>
+          <span class="flex-1 min-w-0 flex flex-col">
+            <span
+              class="font-mono font-semibold text-[10px] tracking-widest"
+              :class="
+                activeStep === 2 ? 'text-primary' : 'text-base-content/40'
+              "
+              >LAYOUT</span
+            >
+            <span class="text-[11px] text-base-content/50 truncate">{{
+              step2Summary
+            }}</span>
+          </span>
+          <span
+            v-if="step2Done"
+            class="text-success text-[13px] shrink-0"
+            title="Placements added"
+            >✓</span
+          >
+        </button>
         <div
-          class="flex flex-wrap gap-1"
-          :title="landscapeBounds ? '' : 'Load or generate a landscape first'"
+          v-show="activeStep === 2"
+          class="flex flex-col gap-3.5 px-3 pb-3.5"
         >
-          <button
-            v-for="c in paletteCutters"
-            :key="c.id"
-            type="button"
-            class="btn btn-xs font-mono"
-            :class="generatorCutterId === c.id ? 'btn-primary' : ''"
-            :disabled="locked || !landscapeBounds"
-            :title="c.label"
-            @click="addPlacement(c)"
-          >
-            {{ sizeLabel(c.kind) }}
-          </button>
-        </div>
-        <p v-if="!landscapeBounds" class="text-[10.5px] text-base-content/40">
-          Load or generate a landscape to start placing.
-        </p>
-      </div>
+          <div class="flex flex-col gap-1.5">
+            <span
+              class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+              >CUTTER PALETTE — CLICK TO PLACE</span
+            >
+            <div class="flex gap-1">
+              <button
+                v-for="f in PALETTE_FAMILIES"
+                :key="f.key"
+                type="button"
+                class="btn btn-xs"
+                :class="paletteFamily === f.key ? 'btn-primary' : 'btn-ghost'"
+                @click="paletteFamily = f.key"
+              >
+                {{ f.label }}
+              </button>
+            </div>
+            <div
+              class="flex flex-wrap gap-1"
+              :title="
+                landscapeBounds ? '' : 'Load or generate a landscape first'
+              "
+            >
+              <button
+                v-for="c in paletteCutters"
+                :key="c.id"
+                type="button"
+                class="btn btn-xs font-mono"
+                :class="generatorCutterId === c.id ? 'btn-primary' : ''"
+                :disabled="locked || !landscapeBounds"
+                :title="c.label"
+                @click="addPlacement(c)"
+              >
+                {{ sizeLabel(c.kind) }}
+              </button>
+            </div>
+            <p
+              v-if="!landscapeBounds"
+              class="text-[10.5px] text-base-content/40"
+            >
+              Load or generate a landscape to start placing.
+            </p>
+          </div>
 
-      <div class="flex flex-col gap-1.5">
-        <span
-          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-          >GENERATORS</span
-        >
-        <div class="flex gap-1">
-          <button
-            v-for="m in GENERATOR_MODES"
-            :key="m.key"
-            type="button"
-            class="btn btn-xs"
-            :class="generatorMode === m.key ? 'btn-primary' : 'btn-ghost'"
-            @click="generatorMode = m.key"
-          >
-            {{ m.label }}
-          </button>
-        </div>
-        <!-- Own picker, NOT just "last palette click": selecting a size for
+          <div class="flex flex-col gap-1.5">
+            <span
+              class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+              >GENERATORS</span
+            >
+            <div class="flex gap-1">
+              <button
+                v-for="m in GENERATOR_MODES"
+                :key="m.key"
+                type="button"
+                class="btn btn-xs"
+                :class="generatorMode === m.key ? 'btn-primary' : 'btn-ghost'"
+                @click="generatorMode = m.key"
+              >
+                {{ m.label }}
+              </button>
+            </div>
+            <!-- Own picker, NOT just "last palette click": selecting a size for
              bulk generation through the palette would place a stray base as
              a side effect. A palette click still pre-fills this. -->
-        <select
-          class="select select-xs font-mono"
-          v-model="generatorCutterId"
-          :disabled="locked"
-        >
-          <option value="" disabled>Pick a cutter…</option>
-          <optgroup label="Rounds">
-            <option v-for="c in cutterGroups.rounds" :key="c.id" :value="c.id">
-              {{ c.label }}
-            </option>
-          </optgroup>
-          <optgroup label="Ovals">
-            <option v-for="c in cutterGroups.ovals" :key="c.id" :value="c.id">
-              {{ c.label }}
-            </option>
-          </optgroup>
-          <optgroup label="Squares & rects">
-            <option v-for="c in cutterGroups.rects" :key="c.id" :value="c.id">
-              {{ c.label }}
-            </option>
-          </optgroup>
-        </select>
+            <select
+              class="select select-xs font-mono"
+              v-model="generatorCutterId"
+              :disabled="locked"
+            >
+              <option value="" disabled>Pick a cutter…</option>
+              <optgroup label="Rounds">
+                <option
+                  v-for="c in cutterGroups.rounds"
+                  :key="c.id"
+                  :value="c.id"
+                >
+                  {{ c.label }}
+                </option>
+              </optgroup>
+              <optgroup label="Ovals">
+                <option
+                  v-for="c in cutterGroups.ovals"
+                  :key="c.id"
+                  :value="c.id"
+                >
+                  {{ c.label }}
+                </option>
+              </optgroup>
+              <optgroup label="Squares & rects">
+                <option
+                  v-for="c in cutterGroups.rects"
+                  :key="c.id"
+                  :value="c.id"
+                >
+                  {{ c.label }}
+                </option>
+              </optgroup>
+            </select>
 
-        <div v-if="generatorMode === 'regiment'" class="flex flex-col gap-1.5">
-          <div class="flex items-center gap-1.5">
-            <span class="text-[11px] text-base-content/50 shrink-0 w-10"
-              >Rows</span
-            >
-            <input
-              type="number"
-              min="1"
-              :max="MAX_REGIMENT_DIM"
-              step="1"
-              class="input input-xs flex-1 font-mono"
-              v-model.number="regimentRows"
-            />
-            <span class="text-[11px] text-base-content/50 shrink-0 w-10"
-              >Cols</span
-            >
-            <input
-              type="number"
-              min="1"
-              :max="MAX_REGIMENT_DIM"
-              step="1"
-              class="input input-xs flex-1 font-mono"
-              v-model.number="regimentCols"
-            />
-          </div>
-          <div class="flex items-center gap-1.5">
-            <span class="text-[11px] text-base-content/50 shrink-0 w-10"
-              >Gap</span
-            >
-            <input
-              type="number"
-              min="0"
-              step="0.5"
-              class="input input-xs flex-1 font-mono"
-              v-model.number="regimentGapMm"
-            />
-            <span class="text-[10.5px] text-base-content/40 shrink-0">mm</span>
-          </div>
-          <button
-            type="button"
-            class="btn btn-xs btn-secondary"
-            :disabled="!canPlaceRegiment"
-            :title="generatorBlockedReason"
-            @click="placeRegiment"
-          >
-            Place regiment ({{ regimentPlannedCount }})
-          </button>
-          <p v-if="regimentOutOfBounds" class="text-[10.5px] text-warning">
-            regiment extends past the landscape
-          </p>
-        </div>
-
-        <div v-else class="flex flex-col gap-1.5">
-          <div class="flex items-center gap-1.5">
-            <span class="text-[11px] text-base-content/50 shrink-0 w-10"
-              >Count</span
-            >
-            <input
-              type="number"
-              min="1"
-              :max="MAX_SCATTER_COUNT"
-              step="1"
-              class="input input-xs flex-1 font-mono"
-              v-model.number="scatterCount"
-            />
-          </div>
-          <button
-            type="button"
-            class="btn btn-xs btn-secondary"
-            :disabled="!canScatter"
-            :title="generatorBlockedReason"
-            @click="runScatter"
-          >
-            Scatter
-          </button>
-        </div>
-      </div>
-
-      <div class="flex flex-col gap-1.5">
-        <div class="flex items-center justify-between gap-2">
-          <span
-            class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-            >PLACEMENTS ({{ placements.length }})</span
-          >
-          <button
-            type="button"
-            class="btn btn-ghost btn-xs gap-1"
-            :title="undoBlockedReason || 'Undo (Ctrl/Cmd+Z)'"
-            :disabled="!canUndo"
-            @click="undo"
-          >
-            ↶ Undo
-          </button>
-        </div>
-        <ul
-          v-if="placements.length"
-          class="flex flex-col gap-1 max-h-48 overflow-y-auto"
-        >
-          <template
-            v-for="row in placementRows"
-            :key="row.kind === 'group' ? row.group.id : `p-${row.index}`"
-          >
-            <li
-              v-if="row.kind === 'single'"
-              class="flex items-center gap-1.5 px-2 py-1.5 rounded border cursor-pointer text-[12px]"
-              :class="
-                row.index === selectedIndex
-                  ? 'bg-primary/10 border-primary'
-                  : 'border-base-content/10 hover:border-base-content/30'
-              "
-              @click="selectedIndex = row.index"
-            >
-              <span class="flex-1 truncate font-medium">{{ row.p.name }}</span>
-              <span class="text-base-content/50 font-mono text-[10px]">{{
-                cutterLabel(row.p.cutter)
-              }}</span>
-              <span
-                class="font-mono text-[10px] text-base-content/40 w-9 text-right"
-                >{{ Math.round(row.p.rotation_deg) }}°</span
-              >
-              <span
-                v-if="row.p.magnet"
-                class="badge badge-xs badge-info"
-                title="Magnet pocket"
-                >{{
-                  row.p.magnet.count > 1 ? `M×${row.p.magnet.count}` : "M"
-                }}</span
-              >
-              <button
-                type="button"
-                class="btn btn-ghost btn-xs px-1"
-                title="Rotate -15°"
-                :disabled="locked"
-                @click.stop="rotatePlacement(row.index, -15)"
-              >
-                ↺
-              </button>
-              <button
-                type="button"
-                class="btn btn-ghost btn-xs px-1"
-                title="Rotate +15°"
-                :disabled="locked"
-                @click.stop="rotatePlacement(row.index, 15)"
-              >
-                ↻
-              </button>
-              <button
-                type="button"
-                class="btn btn-ghost btn-xs px-1 text-error"
-                title="Delete placement"
-                :disabled="locked"
-                @click.stop="deletePlacement(row.index)"
-              >
-                ✕
-              </button>
-            </li>
-
-            <li
-              v-else
-              class="flex flex-col gap-1 rounded border border-base-content/10 px-2 py-1.5 text-[12px]"
+            <div
+              v-if="generatorMode === 'regiment'"
+              class="flex flex-col gap-1.5"
             >
               <div class="flex items-center gap-1.5">
-                <span class="flex-1 truncate font-semibold">{{
-                  row.group.label
-                }}</span>
-                <span class="text-base-content/40 font-mono text-[10px]">{{
-                  row.members.length
-                }}</span>
-                <button
-                  type="button"
-                  class="btn btn-ghost btn-xs px-1"
-                  title="Rotate group -15°"
-                  :disabled="locked"
-                  @click.stop="rotateGroupBy(row.group, -15)"
+                <span class="text-[11px] text-base-content/50 shrink-0 w-10"
+                  >Rows</span
                 >
-                  ↺
-                </button>
-                <button
-                  type="button"
-                  class="btn btn-ghost btn-xs px-1"
-                  title="Rotate group +15°"
-                  :disabled="locked"
-                  @click.stop="rotateGroupBy(row.group, 15)"
+                <input
+                  type="number"
+                  min="1"
+                  :max="MAX_REGIMENT_DIM"
+                  step="1"
+                  class="input input-xs flex-1 font-mono"
+                  v-model.number="regimentRows"
+                />
+                <span class="text-[11px] text-base-content/50 shrink-0 w-10"
+                  >Cols</span
                 >
-                  ↻
-                </button>
-                <button
-                  type="button"
-                  class="btn btn-ghost btn-xs px-1.5"
-                  title="Ungroup — release members to single bases"
-                  :disabled="locked"
-                  @click.stop="ungroupGroup(row.group)"
-                >
-                  ungroup
-                </button>
-                <button
-                  type="button"
-                  class="btn btn-ghost btn-xs px-1 text-error"
-                  title="Delete group"
-                  :disabled="locked"
-                  @click.stop="deleteGroup(row.group)"
-                >
-                  ✕
-                </button>
+                <input
+                  type="number"
+                  min="1"
+                  :max="MAX_REGIMENT_DIM"
+                  step="1"
+                  class="input input-xs flex-1 font-mono"
+                  v-model.number="regimentCols"
+                />
               </div>
-              <ul
-                class="flex flex-col gap-1 pl-2 border-l border-base-content/10"
+              <div class="flex items-center gap-1.5">
+                <span class="text-[11px] text-base-content/50 shrink-0 w-10"
+                  >Gap</span
+                >
+                <input
+                  type="number"
+                  min="0"
+                  step="0.5"
+                  class="input input-xs flex-1 font-mono"
+                  v-model.number="regimentGapMm"
+                />
+                <span class="text-[10.5px] text-base-content/40 shrink-0"
+                  >mm</span
+                >
+              </div>
+              <button
+                type="button"
+                class="btn btn-xs btn-secondary"
+                :disabled="!canPlaceRegiment"
+                :title="generatorBlockedReason"
+                @click="placeRegiment"
+              >
+                Place regiment ({{ regimentPlannedCount }})
+              </button>
+              <p v-if="regimentOutOfBounds" class="text-[10.5px] text-warning">
+                regiment extends past the landscape
+              </p>
+            </div>
+
+            <div v-else class="flex flex-col gap-1.5">
+              <div class="flex items-center gap-1.5">
+                <span class="text-[11px] text-base-content/50 shrink-0 w-10"
+                  >Count</span
+                >
+                <input
+                  type="number"
+                  min="1"
+                  :max="MAX_SCATTER_COUNT"
+                  step="1"
+                  class="input input-xs flex-1 font-mono"
+                  v-model.number="scatterCount"
+                />
+              </div>
+              <button
+                type="button"
+                class="btn btn-xs btn-secondary"
+                :disabled="!canScatter"
+                :title="generatorBlockedReason"
+                @click="runScatter"
+              >
+                Scatter
+              </button>
+            </div>
+          </div>
+
+          <div class="flex flex-col gap-1.5">
+            <div class="flex items-center justify-between gap-2">
+              <span
+                class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+                >PLACEMENTS ({{ placements.length }})</span
+              >
+              <button
+                type="button"
+                class="btn btn-ghost btn-xs gap-1"
+                :title="undoBlockedReason || 'Undo (Ctrl/Cmd+Z)'"
+                :disabled="!canUndo"
+                @click="undo"
+              >
+                ↶ Undo
+              </button>
+            </div>
+            <ul
+              v-if="placements.length"
+              class="flex flex-col gap-1 max-h-48 overflow-y-auto"
+            >
+              <template
+                v-for="row in placementRows"
+                :key="row.kind === 'group' ? row.group.id : `p-${row.index}`"
               >
                 <li
-                  v-for="m in row.members"
-                  :key="m.index"
-                  class="flex items-center gap-1.5 py-1 rounded cursor-pointer"
+                  v-if="row.kind === 'single'"
+                  class="flex items-center gap-1.5 px-2 py-1.5 rounded border cursor-pointer text-[12px]"
                   :class="
-                    m.index === selectedIndex
-                      ? 'bg-primary/10'
-                      : 'hover:bg-base-content/5'
+                    row.index === selectedIndex
+                      ? 'bg-primary/10 border-primary'
+                      : 'border-base-content/10 hover:border-base-content/30'
                   "
-                  @click="selectedIndex = m.index"
+                  @click="selectedIndex = row.index"
                 >
                   <span class="flex-1 truncate font-medium">{{
-                    m.p.name
+                    row.p.name
                   }}</span>
                   <span class="text-base-content/50 font-mono text-[10px]">{{
-                    cutterLabel(m.p.cutter)
+                    cutterLabel(row.p.cutter)
                   }}</span>
                   <span
                     class="font-mono text-[10px] text-base-content/40 w-9 text-right"
-                    >{{ Math.round(m.p.rotation_deg) }}°</span
+                    >{{ Math.round(row.p.rotation_deg) }}°</span
                   >
                   <span
-                    v-if="m.p.magnet"
+                    v-if="row.p.magnet"
                     class="badge badge-xs badge-info"
                     title="Magnet pocket"
                     >{{
-                      m.p.magnet.count > 1 ? `M×${m.p.magnet.count}` : "M"
+                      row.p.magnet.count > 1 ? `M×${row.p.magnet.count}` : "M"
                     }}</span
                   >
                   <button
                     type="button"
                     class="btn btn-ghost btn-xs px-1"
-                    title="Rotate group -15° (this base is grouped)"
+                    title="Rotate -15°"
                     :disabled="locked"
-                    @click.stop="rotatePlacement(m.index, -15)"
+                    @click.stop="rotatePlacement(row.index, -15)"
                   >
                     ↺
                   </button>
                   <button
                     type="button"
                     class="btn btn-ghost btn-xs px-1"
-                    title="Rotate group +15° (this base is grouped)"
+                    title="Rotate +15°"
                     :disabled="locked"
-                    @click.stop="rotatePlacement(m.index, 15)"
+                    @click.stop="rotatePlacement(row.index, 15)"
                   >
                     ↻
                   </button>
                   <button
                     type="button"
                     class="btn btn-ghost btn-xs px-1 text-error"
-                    title="Remove from group"
+                    title="Delete placement"
                     :disabled="locked"
-                    @click.stop="deletePlacement(m.index)"
+                    @click.stop="deletePlacement(row.index)"
                   >
                     ✕
                   </button>
                 </li>
-              </ul>
-            </li>
-          </template>
-        </ul>
-        <p v-else class="text-[11px] text-base-content/40">
-          Click a cutter above to place one at the landscape center.
-        </p>
 
-        <div
-          v-if="selectedPlacement"
-          class="flex flex-col gap-1.5 border-t border-base-content/10 pt-2 mt-1"
-        >
-          <span
-            class="font-mono text-[10px] tracking-widest text-base-content/40"
-            >MAGNET — {{ selectedPlacement.name }}</span
-          >
-          <div class="flex flex-wrap gap-1.5 items-center">
-            <button
-              type="button"
-              class="btn btn-xs"
-              :class="!selectedPlacement.magnet ? 'btn-primary' : ''"
-              @click="clearMagnet"
+                <li
+                  v-else
+                  class="flex flex-col gap-1 rounded border border-base-content/10 px-2 py-1.5 text-[12px]"
+                >
+                  <div class="flex items-center gap-1.5">
+                    <span class="flex-1 truncate font-semibold">{{
+                      row.group.label
+                    }}</span>
+                    <span class="text-base-content/40 font-mono text-[10px]">{{
+                      row.members.length
+                    }}</span>
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-xs px-1"
+                      title="Rotate group -15°"
+                      :disabled="locked"
+                      @click.stop="rotateGroupBy(row.group, -15)"
+                    >
+                      ↺
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-xs px-1"
+                      title="Rotate group +15°"
+                      :disabled="locked"
+                      @click.stop="rotateGroupBy(row.group, 15)"
+                    >
+                      ↻
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-xs px-1.5"
+                      title="Ungroup — release members to single bases"
+                      :disabled="locked"
+                      @click.stop="ungroupGroup(row.group)"
+                    >
+                      ungroup
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-ghost btn-xs px-1 text-error"
+                      title="Delete group"
+                      :disabled="locked"
+                      @click.stop="deleteGroup(row.group)"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <ul
+                    class="flex flex-col gap-1 pl-2 border-l border-base-content/10"
+                  >
+                    <li
+                      v-for="m in row.members"
+                      :key="m.index"
+                      class="flex items-center gap-1.5 py-1 rounded cursor-pointer"
+                      :class="
+                        m.index === selectedIndex
+                          ? 'bg-primary/10'
+                          : 'hover:bg-base-content/5'
+                      "
+                      @click="selectedIndex = m.index"
+                    >
+                      <span class="flex-1 truncate font-medium">{{
+                        m.p.name
+                      }}</span>
+                      <span
+                        class="text-base-content/50 font-mono text-[10px]"
+                        >{{ cutterLabel(m.p.cutter) }}</span
+                      >
+                      <span
+                        class="font-mono text-[10px] text-base-content/40 w-9 text-right"
+                        >{{ Math.round(m.p.rotation_deg) }}°</span
+                      >
+                      <span
+                        v-if="m.p.magnet"
+                        class="badge badge-xs badge-info"
+                        title="Magnet pocket"
+                        >{{
+                          m.p.magnet.count > 1 ? `M×${m.p.magnet.count}` : "M"
+                        }}</span
+                      >
+                      <button
+                        type="button"
+                        class="btn btn-ghost btn-xs px-1"
+                        title="Rotate group -15° (this base is grouped)"
+                        :disabled="locked"
+                        @click.stop="rotatePlacement(m.index, -15)"
+                      >
+                        ↺
+                      </button>
+                      <button
+                        type="button"
+                        class="btn btn-ghost btn-xs px-1"
+                        title="Rotate group +15° (this base is grouped)"
+                        :disabled="locked"
+                        @click.stop="rotatePlacement(m.index, 15)"
+                      >
+                        ↻
+                      </button>
+                      <button
+                        type="button"
+                        class="btn btn-ghost btn-xs px-1 text-error"
+                        title="Remove from group"
+                        :disabled="locked"
+                        @click.stop="deletePlacement(m.index)"
+                      >
+                        ✕
+                      </button>
+                    </li>
+                  </ul>
+                </li>
+              </template>
+            </ul>
+            <p v-else class="text-[11px] text-base-content/40">
+              Click a cutter above to place one at the landscape center.
+            </p>
+
+            <div
+              v-if="selectedPlacement"
+              class="flex flex-col gap-1.5 border-t border-base-content/10 pt-2 mt-1"
             >
-              None
-            </button>
-            <button
-              v-for="chip in magnetChips"
-              :key="chip.label"
-              type="button"
-              class="btn btn-xs gap-1"
-              :class="isMagnetSize(chip.spec) ? 'btn-primary' : ''"
-              @click="setMagnetSize(chip.spec)"
-            >
-              {{ chip.label }}
               <span
-                v-if="isSuggestedMagnet(chip.spec)"
-                class="badge badge-xs badge-accent"
-                >suggested{{
-                  suggestedMagnet && suggestedMagnet.count > 1
-                    ? ` ×${suggestedMagnet.count}`
-                    : ""
-                }}</span
+                class="font-mono text-[10px] tracking-widest text-base-content/40"
+                >MAGNET — {{ selectedPlacement.name }}</span
               >
-            </button>
-            <button
-              v-if="
-                suggestedMagnet &&
-                (!selectedPlacement.magnet ||
-                  !isMagnetSize(suggestedMagnet.spec) ||
-                  selectedPlacement.magnet.count !== suggestedMagnet.count)
-              "
-              type="button"
-              class="btn btn-xs btn-outline btn-accent"
-              @click="applySuggestedMagnet"
-            >
-              Use suggested
-            </button>
-            <span
-              v-if="!magnetChips.length"
-              class="text-[10.5px] text-base-content/40"
-            >
-              No magnets in your inventory — add some in Settings.
-            </span>
-          </div>
-          <div
-            v-if="selectedPlacement.magnet"
-            class="flex items-center gap-1.5"
-          >
-            <span class="text-[10.5px] text-base-content/50">Count</span>
-            <div class="flex gap-1">
-              <button
-                v-for="n in MAX_MAGNET_COUNT"
-                :key="n"
-                type="button"
-                class="btn btn-xs"
-                :class="
-                  selectedPlacement.magnet.count === n ? 'btn-primary' : ''
-                "
-                @click="setMagnetCount(n)"
+              <div class="flex flex-wrap gap-1.5 items-center">
+                <button
+                  type="button"
+                  class="btn btn-xs"
+                  :class="!selectedPlacement.magnet ? 'btn-primary' : ''"
+                  @click="clearMagnet"
+                >
+                  None
+                </button>
+                <button
+                  v-for="chip in magnetChips"
+                  :key="chip.label"
+                  type="button"
+                  class="btn btn-xs gap-1"
+                  :class="isMagnetSize(chip.spec) ? 'btn-primary' : ''"
+                  @click="setMagnetSize(chip.spec)"
+                >
+                  {{ chip.label }}
+                  <span
+                    v-if="isSuggestedMagnet(chip.spec)"
+                    class="badge badge-xs badge-accent"
+                    >suggested{{
+                      suggestedMagnet && suggestedMagnet.count > 1
+                        ? ` ×${suggestedMagnet.count}`
+                        : ""
+                    }}</span
+                  >
+                </button>
+                <button
+                  v-if="
+                    suggestedMagnet &&
+                    (!selectedPlacement.magnet ||
+                      !isMagnetSize(suggestedMagnet.spec) ||
+                      selectedPlacement.magnet.count !== suggestedMagnet.count)
+                  "
+                  type="button"
+                  class="btn btn-xs btn-outline btn-accent"
+                  @click="applySuggestedMagnet"
+                >
+                  Use suggested
+                </button>
+                <span
+                  v-if="!magnetChips.length"
+                  class="text-[10.5px] text-base-content/40"
+                >
+                  No magnets in your inventory — add some in Settings.
+                </span>
+              </div>
+              <div
+                v-if="selectedPlacement.magnet"
+                class="flex items-center gap-1.5"
               >
-                {{ n }}
-              </button>
+                <span class="text-[10.5px] text-base-content/50">Count</span>
+                <div class="flex gap-1">
+                  <button
+                    v-for="n in MAX_MAGNET_COUNT"
+                    :key="n"
+                    type="button"
+                    class="btn btn-xs"
+                    :class="
+                      selectedPlacement.magnet.count === n ? 'btn-primary' : ''
+                    "
+                    @click="setMagnetCount(n)"
+                  >
+                    {{ n }}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
       </div>
 
-      <details
-        class="collapse collapse-arrow border border-base-content/10 bg-base-200/20 rounded-box"
+      <div
+        class="rounded-box border overflow-hidden"
+        :class="activeStep === 3 ? 'border-primary' : 'border-base-content/10'"
       >
-        <summary
-          class="collapse-title min-h-0 py-2.5 px-3 flex items-center gap-2 cursor-pointer"
+        <button
+          type="button"
+          class="w-full flex items-center gap-2 p-3 text-left"
+          @click="selectStep(3)"
         >
           <span
-            class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-            >ADVANCED — PLINTH</span
+            class="flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-mono shrink-0"
+            :class="
+              activeStep === 3
+                ? 'bg-primary text-primary-content'
+                : step3Done
+                  ? 'bg-success/20 text-success'
+                  : 'bg-base-content/10 text-base-content/50'
+            "
+            >3</span
           >
-        </summary>
-        <div class="collapse-content flex flex-col gap-2 px-3">
-          <label class="flex items-center gap-2 text-[12px]">
-            <span class="w-28 shrink-0">Height (mm)</span>
-            <input
-              type="number"
-              step="0.1"
-              class="input input-xs flex-1"
-              v-model.number="plinth.height_mm"
-            />
-          </label>
-          <label class="flex items-center gap-2 text-[12px]">
-            <span class="w-28 shrink-0">Taper (°)</span>
-            <input
-              type="number"
-              step="0.5"
-              class="input input-xs flex-1"
-              v-model.number="plinth.taper_deg"
-            />
-          </label>
-          <label class="flex items-center gap-2 text-[12px] cursor-pointer">
-            <input
-              type="checkbox"
-              class="checkbox checkbox-xs"
-              v-model="plinth.hollow"
-            />
-            Hollow (open-bottom shell)
-          </label>
-          <label class="flex items-center gap-2 text-[12px]">
-            <span class="w-28 shrink-0">Wall (mm)</span>
-            <input
-              type="number"
-              step="0.1"
-              class="input input-xs flex-1"
-              v-model.number="plinth.wall_mm"
-            />
-          </label>
-          <label class="flex items-center gap-2 text-[12px]">
-            <span class="w-28 shrink-0">Top plate (mm)</span>
-            <input
-              type="number"
-              step="0.1"
-              class="input input-xs flex-1"
-              v-model.number="plinth.top_mm"
-            />
-          </label>
-          <label class="flex items-center gap-2 text-[12px]">
-            <span class="w-28 shrink-0">Magnet clearance</span>
-            <input
-              type="number"
-              step="0.05"
-              class="input input-xs flex-1"
-              v-model.number="plinth.magnet_clearance_mm"
-            />
-          </label>
-        </div>
-      </details>
-
-      <div class="flex flex-col gap-1">
-        <span
-          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-          >OUTPUT FOLDER</span
-        >
-        <div class="flex">
-          <input
-            type="text"
-            readonly
-            class="input input-sm flex-1 font-mono text-[11px]"
-            :value="outDir || 'No folder selected'"
-            :title="outDir"
-          />
-          <button class="btn btn-sm" @click="chooseOutDir">Choose…</button>
-        </div>
-      </div>
-
-      <div class="flex items-center gap-3">
-        <button
-          class="btn btn-primary grow"
-          :disabled="!canCut"
-          @click="startCut"
-        >
-          <template v-if="baseCut.isRunning.value">
-            <span class="loading loading-spinner"></span>
-            <span>Cutting…</span>
-          </template>
-          <span v-else
-            >Cut {{ placements.length }} base{{
-              placements.length === 1 ? "" : "s"
-            }}</span
-          >
-        </button>
-        <button
-          v-if="baseCut.isRunning.value"
-          class="btn btn-error"
-          @click="cancelCut"
-        >
-          Cancel
-        </button>
-      </div>
-
-      <div v-if="baseCut.isRunning.value" class="flex items-center gap-3">
-        <ProgressBar :progress="baseCut.percent.value" />
-        <span class="text-sm opacity-70">{{ stepLabel }}</span>
-      </div>
-
-      <div
-        v-if="baseCut.validationWarning.value"
-        class="alert alert-warning text-xs whitespace-pre-wrap"
-      >
-        {{ baseCut.validationWarning.value }}
-      </div>
-
-      <div
-        v-if="baseCut.failedMessage.value"
-        class="alert alert-error text-xs whitespace-pre-wrap flex-col items-start"
-      >
-        <span>{{ baseCut.failedMessage.value }}</span>
-        <pre
-          v-if="baseCut.failedStdoutTail.value"
-          class="font-mono text-[10px] opacity-70 whitespace-pre-wrap mt-1"
-          >{{ baseCut.failedStdoutTail.value }}</pre
-        >
-      </div>
-
-      <div v-if="baseCut.results.value.length" class="flex flex-col gap-1">
-        <span
-          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-          >RESULTS</span
-        >
-        <ul class="flex flex-col gap-1 text-[12px]">
-          <li
-            v-for="r in baseCut.results.value"
-            :key="r.index"
-            class="flex items-center gap-2"
-          >
+          <span class="flex-1 min-w-0 flex flex-col">
             <span
+              class="font-mono font-semibold text-[10px] tracking-widest"
               :class="
-                r.ok && r.manifold
-                  ? 'text-success'
-                  : r.ok
-                    ? 'text-warning'
-                    : 'text-error'
+                activeStep === 3 ? 'text-primary' : 'text-base-content/40'
               "
-              >{{ r.ok ? (r.manifold ? "✓" : "⚠") : "✗" }}</span
+              >CUT &amp; EXPORT</span
             >
-            <span class="flex-1 truncate">{{ resultName(r.index) }}</span>
-            <span v-if="!r.ok" class="text-error text-[11px] truncate">{{
-              r.reason
+            <span class="text-[11px] text-base-content/50 truncate">{{
+              step3Summary
             }}</span>
-            <span v-else-if="!r.manifold" class="text-warning text-[11px]"
-              >non-manifold</span
-            >
-          </li>
-        </ul>
-
-        <div
-          v-if="hasSuccessfulResults"
-          class="flex flex-col gap-1.5 border-t border-base-content/10 pt-2 mt-1"
-        >
+          </span>
           <span
-            class="font-mono text-[10px] tracking-widest text-base-content/40"
-            >ADD TO CATALOG</span
+            v-if="step3Done"
+            class="text-success text-[13px] shrink-0"
+            title="Cut finished"
+            >✓</span
           >
-          <template v-if="catalogRoots.length">
-            <select
-              class="select select-xs w-full font-mono"
-              v-model="exportRoot"
-              :disabled="exportBusy"
+        </button>
+        <div
+          v-show="activeStep === 3"
+          class="flex flex-col gap-3.5 px-3 pb-3.5"
+        >
+          <details
+            class="collapse collapse-arrow border border-base-content/10 bg-base-200/20 rounded-box"
+          >
+            <summary
+              class="collapse-title min-h-0 py-2.5 px-3 flex items-center gap-2 cursor-pointer"
             >
-              <option
-                v-for="root in catalogRoots"
-                :key="root.root"
-                :value="root.root"
-                :title="root.root"
+              <span
+                class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+                >ADVANCED — PLINTH</span
               >
-                {{ rootLabel(root.root) }}{{ root.primary ? " (primary)" : "" }}
-              </option>
-            </select>
-            <input
-              type="text"
-              class="input input-xs w-full"
-              placeholder="Group name"
-              :disabled="exportBusy"
-              v-model="exportGroupName"
-            />
-          </template>
-          <p v-else class="text-[10.5px] text-base-content/40">
-            No catalog folder configured — add one in Settings.
-          </p>
-          <button
-            type="button"
-            class="btn btn-xs btn-secondary"
-            :disabled="!canExportToCatalog"
-            :title="exportBlockedReason"
-            @click="exportToCatalog"
-          >
-            <template v-if="exportBusy">
-              <span class="loading loading-spinner loading-xs"></span>
-              <span>Adding…</span>
-            </template>
-            <span v-else
-              >Add {{ successfulOutPaths.length }} base{{
-                successfulOutPaths.length === 1 ? "" : "s"
-              }}
-              to catalog</span
+            </summary>
+            <div class="collapse-content flex flex-col gap-2 px-3">
+              <label class="flex items-center gap-2 text-[12px]">
+                <span class="w-28 shrink-0">Height (mm)</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  class="input input-xs flex-1"
+                  v-model.number="plinth.height_mm"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-[12px]">
+                <span class="w-28 shrink-0">Taper (°)</span>
+                <input
+                  type="number"
+                  step="0.5"
+                  class="input input-xs flex-1"
+                  v-model.number="plinth.taper_deg"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-[12px] cursor-pointer">
+                <input
+                  type="checkbox"
+                  class="checkbox checkbox-xs"
+                  v-model="plinth.hollow"
+                />
+                Hollow (open-bottom shell)
+              </label>
+              <label class="flex items-center gap-2 text-[12px]">
+                <span class="w-28 shrink-0">Wall (mm)</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  class="input input-xs flex-1"
+                  v-model.number="plinth.wall_mm"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-[12px]">
+                <span class="w-28 shrink-0">Top plate (mm)</span>
+                <input
+                  type="number"
+                  step="0.1"
+                  class="input input-xs flex-1"
+                  v-model.number="plinth.top_mm"
+                />
+              </label>
+              <label class="flex items-center gap-2 text-[12px]">
+                <span class="w-28 shrink-0">Magnet clearance</span>
+                <input
+                  type="number"
+                  step="0.05"
+                  class="input input-xs flex-1"
+                  v-model.number="plinth.magnet_clearance_mm"
+                />
+              </label>
+            </div>
+          </details>
+
+          <div class="flex flex-col gap-1">
+            <span
+              class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+              >OUTPUT FOLDER</span
             >
-          </button>
+            <div class="flex">
+              <input
+                type="text"
+                readonly
+                class="input input-sm flex-1 font-mono text-[11px]"
+                :value="outDir || 'No folder selected'"
+                :title="outDir"
+              />
+              <button class="btn btn-sm" @click="chooseOutDir">Choose…</button>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-3">
+            <button
+              class="btn btn-primary grow"
+              :disabled="!canCut"
+              @click="startCut"
+            >
+              <template v-if="baseCut.isRunning.value">
+                <span class="loading loading-spinner"></span>
+                <span>Cutting…</span>
+              </template>
+              <span v-else
+                >Cut {{ placements.length }} base{{
+                  placements.length === 1 ? "" : "s"
+                }}</span
+              >
+            </button>
+            <button
+              v-if="baseCut.isRunning.value"
+              class="btn btn-error"
+              @click="cancelCut"
+            >
+              Cancel
+            </button>
+          </div>
+
+          <div v-if="baseCut.isRunning.value" class="flex items-center gap-3">
+            <ProgressBar :progress="baseCut.percent.value" />
+            <span class="text-sm opacity-70">{{ stepLabel }}</span>
+          </div>
+
+          <div
+            v-if="baseCut.validationWarning.value"
+            class="alert alert-warning text-xs whitespace-pre-wrap"
+          >
+            {{ baseCut.validationWarning.value }}
+          </div>
+
+          <div
+            v-if="baseCut.failedMessage.value"
+            class="alert alert-error text-xs whitespace-pre-wrap flex-col items-start"
+          >
+            <span>{{ baseCut.failedMessage.value }}</span>
+            <pre
+              v-if="baseCut.failedStdoutTail.value"
+              class="font-mono text-[10px] opacity-70 whitespace-pre-wrap mt-1"
+              >{{ baseCut.failedStdoutTail.value }}</pre
+            >
+          </div>
+
+          <div v-if="baseCut.results.value.length" class="flex flex-col gap-1">
+            <span
+              class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+              >RESULTS</span
+            >
+            <ul class="flex flex-col gap-1 text-[12px]">
+              <li
+                v-for="r in baseCut.results.value"
+                :key="r.index"
+                class="flex items-center gap-2"
+              >
+                <span
+                  :class="
+                    r.ok && r.manifold
+                      ? 'text-success'
+                      : r.ok
+                        ? 'text-warning'
+                        : 'text-error'
+                  "
+                  >{{ r.ok ? (r.manifold ? "✓" : "⚠") : "✗" }}</span
+                >
+                <span class="flex-1 truncate">{{ resultName(r.index) }}</span>
+                <span v-if="!r.ok" class="text-error text-[11px] truncate">{{
+                  r.reason
+                }}</span>
+                <span v-else-if="!r.manifold" class="text-warning text-[11px]"
+                  >non-manifold</span
+                >
+              </li>
+            </ul>
+
+            <div
+              v-if="hasSuccessfulResults"
+              class="flex flex-col gap-1.5 border-t border-base-content/10 pt-2 mt-1"
+            >
+              <span
+                class="font-mono text-[10px] tracking-widest text-base-content/40"
+                >ADD TO CATALOG</span
+              >
+              <template v-if="catalogRoots.length">
+                <select
+                  class="select select-xs w-full font-mono"
+                  v-model="exportRoot"
+                  :disabled="exportBusy"
+                >
+                  <option
+                    v-for="root in catalogRoots"
+                    :key="root.root"
+                    :value="root.root"
+                    :title="root.root"
+                  >
+                    {{ rootLabel(root.root)
+                    }}{{ root.primary ? " (primary)" : "" }}
+                  </option>
+                </select>
+                <input
+                  type="text"
+                  class="input input-xs w-full"
+                  placeholder="Group name"
+                  :disabled="exportBusy"
+                  v-model="exportGroupName"
+                />
+              </template>
+              <p v-else class="text-[10.5px] text-base-content/40">
+                No catalog folder configured — add one in Settings.
+              </p>
+              <button
+                type="button"
+                class="btn btn-xs btn-secondary"
+                :disabled="!canExportToCatalog"
+                :title="exportBlockedReason"
+                @click="exportToCatalog"
+              >
+                <template v-if="exportBusy">
+                  <span class="loading loading-spinner loading-xs"></span>
+                  <span>Adding…</span>
+                </template>
+                <span v-else
+                  >Add {{ successfulOutPaths.length }} base{{
+                    successfulOutPaths.length === 1 ? "" : "s"
+                  }}
+                  to catalog</span
+                >
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </section>
