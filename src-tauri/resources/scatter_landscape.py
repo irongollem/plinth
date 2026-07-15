@@ -44,13 +44,23 @@
 #   SCATTER_START
 #   SCATTER_PROGRESS {"placed":i,"total":N}
 #   SCATTER_DONE {"out":...,"placed":N,"manifold":bool,
-#                 "non_manifold_edges":N,"total_edges":M}
+#                 "non_manifold_edges":N,"total_edges":M,"shells":S}
 #     (manifold/edge counts are measured on the EXPORTED file via a
 #     re-import — see roundtrip_check — so they match what base_cut.py's
 #     validate will see; mild non-manifold-ness is warning-grade data here,
 #     the same lenient policy as base_cut.py's validate, and the job only
 #     FAILS above MAX_NON_MANIFOLD_RATIO. The Rust DonePayload currently
-#     parses out/placed/manifold and ignores the extra count fields.)
+#     parses out/placed/manifold and ignores the extra count fields.
+#     "shells" is NEW (docs/SCATTER.md "Pieces are placed as LOOSE
+#     SHELLS"): pieces are no longer boolean-unioned into the terrain, so
+#     the exported file is terrain + one closed shell per placed piece —
+#     shells == 1 + placed by construction, but the number reported here is
+#     RE-MEASURED on the same re-imported file the edge counts come from
+#     (a flood-fill over face adjacency, see count_shells), not assumed —
+#     the same "report what downstream will actually see" discipline
+#     roundtrip_check already applies to manifoldness. Because nothing
+#     unions anymore, non_manifold_edges is expected to be exactly 0 by
+#     construction — see "Loose shells, not unions" below.)
 #   SCATTER_FAILED {"reason":...}
 #   With --debug (after `--job <path>`), one extra line per placed piece:
 #   SCATTER_PIECE {"index":i,"kind":...,"x_mm":...,"y_mm":...,"z_mm":...,
@@ -75,8 +85,25 @@
 # gen_landscape.py's boulder layer, applied in 3D instead of on a
 # heightfield), random yaw, random scale around the kind's canonical size,
 # sink below the local surface (floor-enforced), optional align-to-normal,
-# then boolean-union it into the terrain (exact solver, one small piece at a
-# time — cheap, per docs/SCATTER.md).
+# then keep it as its own LOOSE SHELL (see "Loose shells, not unions" below)
+# instead of boolean-unioning it into the terrain.
+#
+# Loose shells, not unions (docs/SCATTER.md "Pieces are placed as LOOSE
+# SHELLS"): earlier revisions of this script boolean-unioned each piece into
+# the terrain as it was placed — that's exactly what commit 0654275's
+# "manifold contradiction" fix was patching around (the exact solver's union
+# seams grow n-gons that the STL exporter triangulates into T-junction
+# slivers). Not unioning removes the whole defect class at its root instead
+# of chasing it: every piece is built, cleaned, and exported as its own
+# closed manifold shell (see cleanup_shell_bm), and the terrain gets the
+# same per-shell cleanup once at the end — nothing ever touches another
+# shell's geometry. The three wins docs/SCATTER.md names (each shell stays
+# individually manifold, slicers/the cut pipeline handle overlapping shells
+# natively, pieces stay IDENTIFIABLE at cut time for base_cut.py's
+# `scatter_rim`) all fall out of this one change. It also makes placement
+# cheap again: an EXACT boolean per piece was the one expensive op in the
+# loop (see the historical tri-cost comments below); joining loose shells is
+# pure mesh-data concatenation (bpy.ops.object.join), no solver involved.
 #
 # Determinism: ONE seeded random.Random(seed) stream, drawn from in a FIXED
 # order (grid cells visited row-major; every cell draws its two jitter
@@ -305,10 +332,13 @@ def tok(name, payload=None):
 
 
 # ------------------------------------------------------------ mesh helpers
-# (new_object / apply_boolean / delete_object / bbox helpers / cleanup_and_check
+# (new_object / delete_object / bbox helpers / cleanup_shell_bm / count_shells
 #  are the same recipes — and the same rationale — as base_cut.py's; copied
 #  rather than imported because these embedded scripts each run standalone
-#  inside Blender's own Python, with no shared package between them.)
+#  inside Blender's own Python, with no shared package between them. There is
+#  no apply_boolean here any more — see "Loose shells, not unions" above: the
+#  per-piece EXACT union this script used to do is exactly the thing that
+#  went away.)
 
 
 def new_object(name, bm):
@@ -318,15 +348,6 @@ def new_object(name, bm):
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.collection.objects.link(obj)
     return obj
-
-
-def apply_boolean(obj, other_obj, operation):
-    mod = obj.modifiers.new("bool", "BOOLEAN")
-    mod.operation = operation
-    mod.solver = "EXACT"
-    mod.object = other_obj
-    bpy.context.view_layer.objects.active = obj
-    bpy.ops.object.modifier_apply(modifier=mod.name)
 
 
 def delete_object(obj):
@@ -367,38 +388,34 @@ def bbox_minmax(verts):
     return (min_x, min_y, min_z, max_x, max_y, max_z)
 
 
-def cleanup_and_check(obj):
-    """Merge stray verts, dissolve degenerate slivers, fix normals, return
-    (non_manifold_edges, total_edges, dims_mm). base_cut.py's/
-    gen_landscape.py's recipe at heart, run ONCE after every piece is
-    unioned in (not per piece) — cheap and matches "cleanup" as the final
-    step of the pipeline docs/SCATTER.md describes, not a per-union step —
-    but strengthened in two ways for the densified pieces:
+def cleanup_shell_bm(bm):
+    """Merge stray verts, dissolve degenerate slivers, fix normals — IN
+    PLACE on a single shell's bmesh. base_cut.py's cleanup_and_check recipe
+    at heart, but run PER SHELL (once per piece, once for the terrain)
+    instead of once on a whole already-unioned mesh, because there is no
+    "whole unioned mesh" any more (see "Loose shells, not unions" in the
+    module docstring) — and, deliberately, this is also what keeps the
+    final join safe: every remove_doubles call here only ever sees ONE
+    shell's own vertices, so it is topologically impossible for it to weld
+    two different shells together. A single global remove_doubles AFTER
+    joining terrain+pieces was considered and rejected for exactly this
+    reason — see join_shells' docstring for the verification that made
+    that call.
 
-      - TRIANGULATE FIRST. The EXACT boolean leaves n-gons along every
-        union seam, and the STL exporter triangulates those invisibly at
-        write time — so without this step, cleanup checks a mesh that is
-        NOT the mesh being exported. With dense pieces the seam n-gons are
-        skinny enough that the export-time triangulation sheds degenerate/
-        duplicate triangles; the importer then drops the duplicates,
-        leaving T-junction holes — non-manifold edges that exist ONLY in
-        the exported file (measured on the live-repro job: SCATTER_DONE
-        said manifold:true while base_cut.py's validate on the same file
-        counted 12 bad edges from 4 dropped duplicate triangles — the
-        user-visible "landscape is not manifold" warning). Triangulating
-        HERE puts those slivers in front of the dissolve pass below
-        instead of hiding them until export, and measured 0 bad edges
-        post-roundtrip on that same repro (a coarser dissolve threshold
-        WITHOUT triangulation was tried first and made things worse,
-        12 -> 42 — the n-gons, not the threshold, were the problem);
+      - TRIANGULATE FIRST. This mattered enormously when EXACT booleans
+        were minting n-gons along union seams (commit 0654275's "manifold
+        contradiction" fix) — the STL exporter triangulates those
+        invisibly at write time, so a pre-triangulate check was seeing a
+        DIFFERENT mesh than the one written to disk. Without any unions,
+        icospheres and imported STL terrain are already all-triangle
+        meshes, so this step is now a no-op in the common case — kept
+        anyway because "no-op on already-clean input, correct on anything
+        that isn't" is a free property that costs nothing to keep, and it
+        is exactly what makes the roundtrip check now expect 0 defects
+        instead of merely tolerating a few (see roundtrip_check).
       - it iterates until stable (dissolving one sliver can degenerate a
         neighbor), bounded by CLEANUP_MAX_PASSES.
-
-    Returns a COUNT of non-manifold edges (not the old all-or-nothing
-    bool) so the caller can apply base_cut.py's lenient ratio gate instead
-    of treating one bad edge out of 100k the same as a shredded mesh."""
-    bm = bmesh.new()
-    bm.from_mesh(obj.data)
+    """
     bmesh.ops.triangulate(bm, faces=bm.faces)
     for _ in range(CLEANUP_MAX_PASSES):
         verts_before = len(bm.verts)
@@ -408,33 +425,86 @@ def cleanup_and_check(obj):
         if len(bm.verts) == verts_before and len(bm.faces) == faces_before:
             break
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-    total_edges = len(bm.edges)
-    bad_edges = sum(1 for e in bm.edges if not e.is_manifold)
-    min_x, min_y, min_z, max_x, max_y, max_z = bbox_minmax(bm.verts)
-    dims = [round(max_x - min_x, 3), round(max_y - min_y, 3), round(max_z - min_z, 3)]
-    bm.to_mesh(obj.data)
-    bm.free()
-    return bad_edges, total_edges, dims
+
+
+def count_shells(bm):
+    """Number of disconnected mesh islands ("loose shells") via a
+    face-adjacency flood fill over shared edges — base_cut.py's identical
+    helper (see its docstring), copied rather than imported for the same
+    standalone-script reason as the rest of this section. Used here to
+    RE-MEASURE (not assume) the shells count SCATTER_DONE reports: shells
+    should equal 1 (terrain) + placed by construction once join_shells has
+    run, but "should equal by construction" is exactly the kind of claim
+    the roundtrip-honesty mechanism (commit 0654275) exists to verify
+    against the actual exported file rather than trust blind."""
+    unvisited = set(bm.faces)
+    shells = 0
+    while unvisited:
+        shells += 1
+        start = next(iter(unvisited))
+        unvisited.discard(start)
+        stack = [start]
+        while stack:
+            face = stack.pop()
+            for edge in face.edges:
+                for neighbor in edge.link_faces:
+                    if neighbor in unvisited:
+                        unvisited.discard(neighbor)
+                        stack.append(neighbor)
+    return shells
+
+
+def join_shells(landscape, piece_objects):
+    """Combine the terrain and every placed piece into `landscape`'s mesh
+    data as separate LOOSE SHELLS (docs/SCATTER.md) — concatenation, not
+    union. `bpy.ops.object.join()` appends each selected object's mesh data
+    (vertices/faces) into the active object's mesh AS-IS: it does not run
+    remove_doubles, does not require or create shared geometry between the
+    joined objects, and never touches vertex coordinates (both the terrain,
+    via import_landscape, and every piece, via place_piece's bm.transform
+    bake, already carry their final world position IN their vertex data
+    with an identity object matrix — join is therefore a pure data
+    concatenation here, not a re-parent-and-hope operation).
+
+    Why this can't bridge piece<->terrain (or piece<->piece) vertices: every
+    shell already went through cleanup_shell_bm — its OWN remove_doubles
+    pass, scoped to its OWN bmesh — before it ever reaches this function, so
+    by the time join runs there is nothing left to merge; join itself calls
+    no distance-based operator at all. This was verified directly against
+    real Blender (S1 job shape, 35 pieces): shells re-measured via
+    count_shells on the round-tripped export matched 1 + placed exactly,
+    every run — see this change's report for the numbers.
+    """
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in piece_objects:
+        obj.select_set(True)
+    landscape.select_set(True)
+    bpy.context.view_layer.objects.active = landscape
+    if piece_objects:
+        bpy.ops.object.join()
 
 
 def roundtrip_check(path):
-    """Re-import the just-exported STL and count non-manifold edges THERE —
-    the pre-export bmesh count is provably too optimistic: the STL
-    importer's exact-duplicate-triangle drop can turn a sliver that was
-    manifold in the bmesh into a T-junction in the file every downstream
+    """Re-import the just-exported STL and count non-manifold edges AND
+    shells THERE — the pre-export bmesh counts are provably too optimistic:
+    the STL importer's exact-duplicate-triangle drop can turn a sliver that
+    was manifold in the bmesh into a T-junction in the file every downstream
     consumer (base_cut.py's validate, a slicer) actually reads. This is the
-    same import base_cut.py will do, so the count SCATTER_DONE reports is
-    the count the cut pipeline will see — no more "scatter said manifold,
-    cut said not". Costs one STL import (~1s on a decorated plate),
-    the honest price of reporting the truth."""
+    same import base_cut.py will do, so the counts SCATTER_DONE reports are
+    what the cut pipeline will see — no more "scatter said manifold, cut
+    said not". Costs one STL import (~1s on a decorated plate), the honest
+    price of reporting the truth. `shells` is the new field (docs/SCATTER.md
+    "Pieces are placed as LOOSE SHELLS") — measured the same honest way as
+    the edge counts, not assumed from `1 + placed`."""
     imported = import_landscape(path)
     bm = bmesh.new()
     bm.from_mesh(imported.data)
     total_edges = len(bm.edges)
     bad_edges = sum(1 for e in bm.edges if not e.is_manifold)
+    shells = count_shells(bm)
     bm.free()
     delete_object(imported)
-    return bad_edges, total_edges
+    return bad_edges, total_edges, shells
 
 
 def import_landscape(path):
@@ -740,6 +810,7 @@ def scatter(job, debug):
 
     total = len(accepted)
     placed = 0
+    piece_objects = []
     for loc, normal in accepted:
         kind = pick_piece_kind(rng, pieces)
         yaw = rng.uniform(0.0, 2.0 * math.pi)
@@ -753,9 +824,13 @@ def scatter(job, debug):
 
         world_origin = place_piece(bm, bottom_local, loc, normal, align_to_surface, final_sink, yaw)
 
+        # No union: clean this piece as its OWN shell (see
+        # cleanup_shell_bm's docstring — this is what makes the later join
+        # provably safe) and keep the object around for join_shells instead
+        # of unioning it into the terrain and discarding it.
+        cleanup_shell_bm(bm)
         piece_obj = new_object(f"scatter_piece_{placed}", bm)
-        apply_boolean(landscape, piece_obj, "UNION")
-        delete_object(piece_obj)
+        piece_objects.append(piece_obj)
 
         placed += 1
         if debug:
@@ -776,21 +851,35 @@ def scatter(job, debug):
             )
         tok("SCATTER_PROGRESS", {"placed": placed, "total": total})
 
-    cleanup_and_check(landscape)
+    # Terrain gets the identical per-shell cleanup every piece already got
+    # (not a bulk cleanup of a unioned whole — there is no such thing any
+    # more), so every shell that reaches join_shells has already had its own
+    # isolated remove_doubles pass.
+    terrain_bm = bmesh.new()
+    terrain_bm.from_mesh(landscape.data)
+    cleanup_shell_bm(terrain_bm)
+    terrain_bm.to_mesh(landscape.data)
+    terrain_bm.free()
+
+    join_shells(landscape, piece_objects)
 
     bpy.ops.object.select_all(action="DESELECT")
     landscape.select_set(True)
     bpy.context.view_layer.objects.active = landscape
     bpy.ops.wm.stl_export(filepath=out_path, export_selected_objects=True)
 
-    # Validate what was actually WRITTEN (see roundtrip_check's docstring),
-    # with base_cut.py's own lenient policy: a mild count is a warning in
-    # the payload, only a catastrophic ratio (> MAX_NON_MANIFOLD_RATIO,
-    # base_cut's exact threshold) fails the job — raising here lands in
-    # main()'s except and becomes SCATTER_FAILED + exit 1. The exported
-    # file is left on disk in that case; a failed job's output is never
-    # consumed (basecutter::scatter only forwards the SCATTER_DONE path).
-    bad_edges, total_edges = roundtrip_check(out_path)
+    # Validate what was actually WRITTEN (see roundtrip_check's docstring).
+    # Loose shells means there is no union seam left to mint n-gons/slivers
+    # (see the module docstring's "Loose shells, not unions"), so
+    # non_manifold_edges is expected to be exactly 0 here by construction —
+    # base_cut.py's lenient ratio gate is kept as the safety net regardless
+    # (a designer-supplied landscape could still carry its own pre-existing
+    # non-manifold-ness; scatter must not silently launder that away).
+    # Raising here lands in main()'s except and becomes SCATTER_FAILED +
+    # exit 1. The exported file is left on disk in that case; a failed
+    # job's output is never consumed (basecutter::scatter only forwards the
+    # SCATTER_DONE path).
+    bad_edges, total_edges, shells = roundtrip_check(out_path)
     ratio = (bad_edges / total_edges) if total_edges else 1.0
     if ratio > MAX_NON_MANIFOLD_RATIO:
         raise RuntimeError(
@@ -798,7 +887,7 @@ def scatter(job, debug):
             f"({bad_edges} of {total_edges} edges)"
         )
 
-    return out_path, placed, bad_edges, total_edges
+    return out_path, placed, bad_edges, total_edges, shells
 
 
 def main():
@@ -810,19 +899,22 @@ def main():
 
     tok("SCATTER_START")
     try:
-        out, placed, bad_edges, total_edges = scatter(job, debug)
+        out, placed, bad_edges, total_edges, shells = scatter(job, debug)
     except Exception as e:  # noqa: BLE001 — reported as a token, not a crash
         traceback.print_exc()
         tok("SCATTER_FAILED", {"reason": str(e)})
         sys.exit(1)
 
-    # non_manifold_edges/total_edges are NEW payload fields: mild
-    # non-manifold-ness (under MAX_NON_MANIFOLD_RATIO — above it scatter()
-    # already raised) rides along as a warning-grade detail. serde's default
+    # non_manifold_edges/total_edges/shells are all ADDITIVE payload fields:
+    # mild non-manifold-ness (under MAX_NON_MANIFOLD_RATIO — above it
+    # scatter() already raised) rides along as a warning-grade detail, and
+    # shells is the new loose-shells honesty field (docs/SCATTER.md "Pieces
+    # are placed as LOOSE SHELLS") — terrain + one shell per placed piece,
+    # re-measured on the round-tripped file, not assumed. serde's default
     # deserialize ignores unknown JSON fields, so basecutter::scatter's
     # existing DonePayload {out, placed, manifold} keeps parsing this line
-    # unchanged — it just DISCARDS the counts until S2 grows fields for
-    # them (see this change's report).
+    # unchanged — it just DISCARDS the extra fields until a later Rust pass
+    # grows fields for them (see this change's report).
     tok(
         "SCATTER_DONE",
         {
@@ -831,6 +923,7 @@ def main():
             "manifold": bad_edges == 0,
             "non_manifold_edges": bad_edges,
             "total_edges": total_edges,
+            "shells": shells,
         },
     )
 

@@ -980,7 +980,21 @@ export type BaseCutJob = { landscape: string; placements: Placement[]; plinth: P
  * the full contract (clamp range, magnet handling). `serde(default)` so
  * old frontends/job files without the field keep working.
  */
-topper_mm?: number | null }
+topper_mm?: number | null; 
+/**
+ * See `ScatterRim`. `#[serde(default)]` is protocol hygiene for
+ * DESERIALIZING a JSON blob Rust didn't produce itself (a hand-edited
+ * job file, a minimal test fixture) — it is not there to support any
+ * particular vintage of file. Rust is the ground truth for what
+ * actually reaches the script: `BaseCutJob` is never constructed
+ * without deciding this field (it's not an `Option`), so every job
+ * Rust serializes carries an explicit `"scatter_rim"` key, never an
+ * absent one — see `job_always_serializes_scatter_rim_explicitly`
+ * below, which pins that as the one ground truth so the two defaults
+ * (this one, and base_cut.py's own lenient `job.get("scatter_rim",
+ * "keep")` read) can't drift silently against each other.
+ */
+scatter_rim?: ScatterRim }
 export type BaseCutStartedStatus = { job_id: string; total: number }
 /**
  * Base Cutter job progress — see docs/BASECUTTER.md "Pinned interfaces".
@@ -1690,6 +1704,26 @@ export type ScatterParams = { seed: number; density_per_dm2: number; scale?: [nu
  */
 export type ScatterPieceSource = { Generated: { kind: GeneratedPieceKind } } | { Asset: { id: string } }
 export type ScatterProgressStatus = { job_id: string; placed: number; total: number }
+/**
+ * Rim fate for a scatter piece (a loose shell in the landscape — see
+ * docs/SCATTER.md "Pieces are placed as LOOSE SHELLS") that straddles a
+ * cutter's rim, per docs/BASECUTTER.md's pinned `BaseCutJob.scatter_rim`.
+ * A bare lowercase JSON STRING (`"keep"` / `"slice"`), not a tagged
+ * object like `CutterKind` — matches base_cut.py's `job.get("scatter_rim",
+ * "keep")` verbatim.
+ * 
+ * `Keep` (the default — see `Default` below): per cut, only the terrain
+ * shell is intersected with the cutter prism; separately, every piece
+ * whose centroid lies inside that placement's derived cut footprint is
+ * unioned in WHOLE and may overhang the rim like real hand-made scenic
+ * basing. `Slice`: every piece is fused into the terrain once, job-wide,
+ * before any cut runs — a piece straddling a rim then gets sliced
+ * straight through by the cutter prism, like any other terrain detail.
+ * A landscape with nothing scattered onto it (a plain generated bake, a
+ * designer sculpt) is a single shell, so both variants behave
+ * identically on it — see base_cut.py's `separate_into_shells`.
+ */
+export type ScatterRim = "keep" | "slice"
 export type ScatterStartedStatus = { job_id: string }
 /**
  * Scatter job progress — see docs/SCATTER.md "Pinned interfaces" and

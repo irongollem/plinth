@@ -27,6 +27,31 @@ pub fn materialize_base_cut_script(app_handle: &AppHandle) -> Result<PathBuf, Ap
     crate::render::engine::materialize_embedded_script(app_handle, "base_cut.py", BASE_CUT_SCRIPT)
 }
 
+/// Rim fate for a scatter piece (a loose shell in the landscape — see
+/// docs/SCATTER.md "Pieces are placed as LOOSE SHELLS") that straddles a
+/// cutter's rim, per docs/BASECUTTER.md's pinned `BaseCutJob.scatter_rim`.
+/// A bare lowercase JSON STRING (`"keep"` / `"slice"`), not a tagged
+/// object like `CutterKind` — matches base_cut.py's `job.get("scatter_rim",
+/// "keep")` verbatim.
+///
+/// `Keep` (the default — see `Default` below): per cut, only the terrain
+/// shell is intersected with the cutter prism; separately, every piece
+/// whose centroid lies inside that placement's derived cut footprint is
+/// unioned in WHOLE and may overhang the rim like real hand-made scenic
+/// basing. `Slice`: every piece is fused into the terrain once, job-wide,
+/// before any cut runs — a piece straddling a rim then gets sliced
+/// straight through by the cutter prism, like any other terrain detail.
+/// A landscape with nothing scattered onto it (a plain generated bake, a
+/// designer sculpt) is a single shell, so both variants behave
+/// identically on it — see base_cut.py's `separate_into_shells`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum ScatterRim {
+    #[default]
+    Keep,
+    Slice,
+}
+
 /// A base-cut job, as sent from the frontend and forwarded to base_cut.py.
 /// Field names/renames match the script's job JSON verbatim (see its
 /// top docstring and docs/BASECUTTER.md "Pinned interfaces") — `landscape`
@@ -46,6 +71,19 @@ pub struct BaseCutJob {
     /// old frontends/job files without the field keep working.
     #[serde(default)]
     pub topper_mm: Option<f64>,
+    /// See `ScatterRim`. `#[serde(default)]` is protocol hygiene for
+    /// DESERIALIZING a JSON blob Rust didn't produce itself (a hand-edited
+    /// job file, a minimal test fixture) — it is not there to support any
+    /// particular vintage of file. Rust is the ground truth for what
+    /// actually reaches the script: `BaseCutJob` is never constructed
+    /// without deciding this field (it's not an `Option`), so every job
+    /// Rust serializes carries an explicit `"scatter_rim"` key, never an
+    /// absent one — see `job_always_serializes_scatter_rim_explicitly`
+    /// below, which pins that as the one ground truth so the two defaults
+    /// (this one, and base_cut.py's own lenient `job.get("scatter_rim",
+    /// "keep")` read) can't drift silently against each other.
+    #[serde(default)]
+    pub scatter_rim: ScatterRim,
 }
 
 /// One parsed line of base_cut.py's stdout protocol (see its docstring and
@@ -376,6 +414,7 @@ mod tests {
                 name: Some("round32".to_string()),
             }],
             topper_mm: None,
+            scatter_rim: ScatterRim::Keep,
         };
         let json = serde_json::to_value(&job).unwrap();
 
@@ -402,10 +441,72 @@ mod tests {
         assert_eq!(placement["magnet"]["diameter_mm"], 5.0);
         assert_eq!(placement["magnet"]["height_mm"], 1.0);
         assert_eq!(json["topper_mm"], serde_json::Value::Null);
+        // A plain lowercase string, not a tagged object — see ScatterRim's
+        // own doc comment.
+        assert_eq!(json["scatter_rim"], "keep");
 
         let back: BaseCutJob = serde_json::from_value(json).unwrap();
         assert_eq!(back.landscape_path, "/path/to/landscape.stl");
         assert_eq!(back.topper_mm, None);
+        assert_eq!(back.scatter_rim, ScatterRim::Keep);
+    }
+
+    // ---- ScatterRim (docs/BASECUTTER.md's BaseCutJob.scatter_rim) ----
+
+    /// Ground-truth pin (see ScatterRim's field doc comment on BaseCutJob):
+    /// Rust always serializes `scatter_rim` explicitly — never omits it,
+    /// regardless of whether the caller picked the default. A job whose
+    /// `scatter_rim` is `Slice` proves this isn't just "the default happens
+    /// to show up"; the key is there, with the right value, either way.
+    #[test]
+    fn job_always_serializes_scatter_rim_explicitly() {
+        let base = BaseCutJob {
+            landscape_path: "/l.stl".to_string(),
+            out_dir: "/out".to_string(),
+            plinth: PlinthParams::default(),
+            placements: vec![],
+            topper_mm: None,
+            scatter_rim: ScatterRim::Keep,
+        };
+        let json = serde_json::to_value(&base).unwrap();
+        assert_eq!(json["scatter_rim"], "keep");
+
+        let mut sliced = base;
+        sliced.scatter_rim = ScatterRim::Slice;
+        let json = serde_json::to_value(&sliced).unwrap();
+        assert_eq!(json["scatter_rim"], "slice");
+    }
+
+    /// Protocol hygiene, not file-vintage support (see the field's own doc
+    /// comment): a JSON blob that omits `scatter_rim` entirely — Rust never
+    /// produces one, but nothing stops a hand-built test fixture or a
+    /// hand-edited job file from doing so — still deserializes, defaulting
+    /// to `Keep`. This is the DESERIALIZE side only; the serialize side is
+    /// pinned separately above.
+    #[test]
+    fn scatter_rim_omitted_from_json_deserializes_to_keep() {
+        let json = serde_json::json!({
+            "landscape": "/l.stl",
+            "out_dir": "/out",
+            "plinth": PlinthParams::default(),
+            "placements": [],
+        });
+        let job: BaseCutJob = serde_json::from_value(json).unwrap();
+        assert_eq!(job.scatter_rim, ScatterRim::Keep);
+    }
+
+    #[test]
+    fn scatter_rim_slice_round_trips() {
+        let json = serde_json::json!({
+            "landscape": "/l.stl",
+            "out_dir": "/out",
+            "plinth": PlinthParams::default(),
+            "placements": [],
+            "scatter_rim": "slice",
+        });
+        let job: BaseCutJob = serde_json::from_value(json).unwrap();
+        assert_eq!(job.scatter_rim, ScatterRim::Slice);
+        assert_eq!(serde_json::to_value(&job).unwrap()["scatter_rim"], "slice");
     }
 
     /// Pinned interface: `BaseCutJob.topper_mm` serializes verbatim as the
@@ -429,6 +530,7 @@ mod tests {
                 name: Some("topper32".to_string()),
             }],
             topper_mm: Some(1.5),
+            scatter_rim: ScatterRim::Keep,
         };
         let json = serde_json::to_value(&job).unwrap();
         assert_eq!(json["topper_mm"], 1.5);
@@ -476,6 +578,7 @@ mod tests {
                 name: Some("round32".to_string()),
             }],
             topper_mm: None,
+            scatter_rim: ScatterRim::Keep,
         };
         let wire = job_json_with_cut_footprints(&job).unwrap();
         let cut = &wire["placements"][0]["cut"];
@@ -517,6 +620,7 @@ mod tests {
                 name: None,
             }],
             topper_mm: None,
+            scatter_rim: ScatterRim::Keep,
         };
         let json = serde_json::to_value(&job).unwrap();
         assert_eq!(json["placements"][0]["magnet"], serde_json::Value::Null);
@@ -684,6 +788,7 @@ mod tests {
                 name: Some("round32".to_string()),
             }],
             topper_mm: None,
+            scatter_rim: ScatterRim::Keep,
         };
         let path = write_job_file(&dir, &job, "abc123").unwrap();
         assert!(path.is_file());
@@ -694,6 +799,11 @@ mod tests {
         // derived "cut" footprint, not just the raw BaseCutJob fields.
         assert_eq!(value["placements"][0]["cut"]["kind"], "circle");
         assert!(value["placements"][0]["cut"]["diameter_mm"].as_f64().unwrap() < 32.0);
+        // scatter_rim flows into the file Blender reads verbatim, as a
+        // plain lowercase string — same ground-truth pin as
+        // job_always_serializes_scatter_rim_explicitly, exercised here
+        // through the actual write_job_file path.
+        assert_eq!(value["scatter_rim"], "keep");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -736,6 +846,7 @@ mod tests {
                 name: Some("round32".to_string()),
             }],
             topper_mm: None,
+            scatter_rim: ScatterRim::Keep,
         };
         let job_path = write_job_file(&dir, &job, "test-job").expect("write job file");
 

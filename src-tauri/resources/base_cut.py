@@ -29,11 +29,34 @@
 #                     "x_mm": 0.0, "y_mm": 0.0, "rotation_deg": 0.0,
 #                     "magnet": { "diameter_mm": 5.0, "height_mm": 1.0,
 #                                 "count": 1 } } ],
-#   "topper_mm": null
+#   "topper_mm": null,
+#   "scatter_rim": "keep"
 #
 # "cutter" is the NOMINAL (bottom-face) footprint; "cut" is Rust's already-
 # derived top-face footprint (basecutter::job::write_job_file injects it) —
 # the script must not re-derive it from taper/height itself.
+#
+# "scatter_rim" (job-level, not per placement): "keep" (default — an absent
+# key behaves exactly like "keep", mirroring topper_mm's own
+# serde(default)) or "slice". Only meaningful when `landscape` carries
+# scatter shells (docs/SCATTER.md "Pieces are placed as LOOSE SHELLS":
+# terrain + one closed shell per placed piece, never unioned) — a landscape
+# with nothing scattered onto it (a plain generated bake, a designer
+# sculpt) is a single shell and both values behave identically, since
+# there is nothing to separate. "slice": every piece is fused into the
+# terrain ONCE, job-wide, before any cut runs (fuse_pieces_into_terrain) —
+# a piece straddling a rim gets sliced straight through by the cutter
+# prism, like any other terrain detail. "keep": per cut, only the TERRAIN
+# shell is intersected
+# with the cutter prism (seat-and-trim proceeds exactly as if scatter never
+# happened); separately, every piece whose CENTROID (XY, precomputed once
+# per job) lies inside THIS placement's "cut" footprint is unioned in
+# WHOLE — never sliced by the prism — after being carried through the same
+# rigid transform the plug itself got (see incorporate_pieces), so it may
+# overhang the rim like real hand-made scenic basing. A piece can be
+# claimed by more than one placement if their footprints overlap — each
+# cut is independent (see cut_one's docstring for the exact union
+# ordering and why it was chosen).
 #
 # The magnet is per placement (chosen from the user's magnet inventory in
 # the app; null = no pocket); the clearance is per job because hole fit is
@@ -418,6 +441,190 @@ def build_plinth(plinth, cutter, cut, magnet):
     return body
 
 
+# --------------------------------------------------- scatter_rim: shells
+
+def _bbox_diagonal_mm(obj):
+    """3D bounding-box diagonal length of one object's mesh, in its own
+    local/world coordinates (separated shells carry an identity
+    matrix_world — see piece_centroid_xy's docstring — so local == world
+    here). The sizing signal separate_into_shells actually needs: see that
+    function's docstring for why this replaced a vertex-count heuristic."""
+    dx, dy, dz = bbox_dims(obj.data.vertices)
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+
+
+def separate_into_shells(landscape_obj):
+    """Split `landscape_obj` into one object per loose (disconnected) mesh
+    island, via Blender's own LOOSE separate — docs/SCATTER.md "Pieces are
+    placed as LOOSE SHELLS": scatter_landscape.py no longer unions pieces
+    into the terrain, so the file this script imports is terrain + one
+    closed shell per placed piece, and this is the inverse operation that
+    pulls them back apart. Returns (terrain_obj, piece_objs): the shell
+    with the LARGEST BOUNDING-BOX DIAGONAL is the terrain, everything else
+    is a piece.
+
+    This was a vertex-count heuristic in an earlier revision of this
+    function — "a landscape sculpt is thousands to millions of verts, a
+    scatter piece is at most a few thousand" — and that reasoning is
+    exactly backwards for a coarse/low-poly landscape: verified against
+    real Blender, a 100x100mm test plate with only ~2000 base vertices
+    scattered with rocks near scatter_landscape.py's ROCK_MAX_SUBDIV cap
+    (5120 tris, ~2562 verts each) produced SEVERAL rock shells that
+    out-verted the terrain outright, so vertex count picked a 9x9x5.6mm
+    rock as "terrain" — the cutter prism then intersected empty space for
+    every dead-center placement (reported as "cut is empty", the exact
+    bug class this function's diagnostics exist to catch — see cut_one's
+    `shell_diagnostics` parameter). Bounding-box diagonal has no such
+    failure mode: it's a PHYSICAL-SCALE signal, not a mesh-density one.
+    docs/SCATTER.md's own scale anchor guarantees the margin is huge in
+    either direction that matters — "Pieces are placed as LOOSE SHELLS"
+    describes the landscape as "a fair bit larger than any single base"
+    (which itself runs up to 160mm+ in the seed library), while scatter
+    pieces are anchored at 28-32mm-heroic scale (a "large rock tops out
+    around 12mm" even before jitter/scale_factor) — there is no design-
+    intended landscape+scatter combination where a piece's bbox diagonal
+    approaches the terrain's.
+
+    A landscape with nothing scattered onto it — a plain generated bake, a
+    designer sculpt straight off disk — is the normal single-shell case:
+    it comes back with `piece_objs == []`, one shell, nothing to claim.
+    `terrain_obj` may or may not be the SAME Python object as the
+    `landscape_obj` passed in — see the caller warning below.
+
+    CALLER MUST use the RETURNED `terrain_obj`, never the `landscape_obj`
+    it passed in, for anything downstream (the cutter-prism intersect,
+    z-range, etc.). `bpy.ops.mesh.separate(type="LOOSE")` mutates
+    `landscape_obj`'s OWN mesh data in place to hold WHICHEVER shell
+    Blender's operator happens to leave in it — not necessarily the
+    terrain — and creates new objects for the rest. Reusing the original
+    `landscape_obj` reference after calling this function is exactly the
+    bug this docstring exists to prevent. main() reassigns its `landscape`
+    variable to this function's return value for exactly this reason, and
+    cut_one's own empty-plug error is enriched with the shell count /
+    terrain dims computed here so a future regression of this class fails
+    loudly instead of looking like a placement-coordinate bug."""
+    before = set(bpy.data.objects)
+    bpy.ops.object.select_all(action="DESELECT")
+    landscape_obj.select_set(True)
+    bpy.context.view_layer.objects.active = landscape_obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    bpy.ops.mesh.select_all(action="SELECT")
+    bpy.ops.mesh.separate(type="LOOSE")
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+    new_objs = [o for o in bpy.data.objects if o not in before]
+    all_objs = [landscape_obj] + new_objs
+    # Primary: bbox diagonal (the physically meaningful signal — see the
+    # docstring above). Secondary/tertiary: vertex count then object name,
+    # purely to keep the sort fully deterministic in the astronomically
+    # unlikely event two shells tie on bbox diagonal exactly.
+    all_objs.sort(key=lambda o: (_bbox_diagonal_mm(o), len(o.data.vertices), o.name), reverse=True)
+    terrain_obj = all_objs[0]
+    piece_objs = all_objs[1:]
+    terrain_obj.name = "terrain"
+    for i, obj in enumerate(piece_objs):
+        obj.name = f"scatter_piece_{i}"
+    return terrain_obj, piece_objs
+
+
+def piece_centroid_xy(obj):
+    """Mean vertex position (X, Y only — Z doesn't matter for the
+    point-in-footprint test) of one separated piece, in WORLD space.
+    `obj.matrix_world` should be identity after separate_into_shells (the
+    piece's world position is already baked into its vertex coordinates —
+    see scatter_landscape.py's place_piece), but this reads through
+    matrix_world anyway rather than assuming identity, since that's the one
+    API call that's correct regardless. Computed ONCE per piece at job
+    start (docs/BASECUTTER.md's scatter_rim note: "compute each piece's
+    centroid + bbox once"), then reused unchanged for every placement's own
+    point_in_polygon test — the piece doesn't move until a placement claims
+    it and transforms its own COPY (see incorporate_pieces)."""
+    mw = obj.matrix_world
+    verts = obj.data.vertices
+    n = len(verts)
+    if n == 0:
+        return Vector((0.0, 0.0))
+    sum_x = sum_y = 0.0
+    for v in verts:
+        co = mw @ v.co
+        sum_x += co.x
+        sum_y += co.y
+    return Vector((sum_x / n, sum_y / n))
+
+
+def point_in_polygon(pt, poly):
+    """Even-odd (crossing-number) point-in-polygon test, 2D, ray cast along
+    +X. `poly` is a closed ring of world-space Vector((x, y)) points — the
+    same shape footprint_polygon/the `placed` ring in cut_one already use,
+    so this is the natural "is this piece's centroid under this cut" test
+    scatter_rim="keep" needs (docs/BASECUTTER.md: pieces whose CENTROID
+    lies inside the placement's CUT footprint are claimed by that cut).
+    Works for any simple polygon regardless of cutter kind (circle/ellipse/
+    rect all go through footprint_polygon already) and honors whatever
+    rotation/translation the caller baked into `poly` (cut_one passes the
+    already placement-rotated-and-translated `placed` ring, never the
+    origin-centered `cut_poly`)."""
+    x, y = pt.x, pt.y
+    inside = False
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i].x, poly[i].y
+        x2, y2 = poly[(i + 1) % n].x, poly[(i + 1) % n].y
+        if (y1 > y) != (y2 > y):
+            x_at_y = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+            if x < x_at_y:
+                inside = not inside
+    return inside
+
+
+def fuse_pieces_into_terrain(terrain_obj, piece_objs):
+    """scatter_rim="slice": weld every scattered piece into the terrain
+    ONCE, before any cut runs, removing the piece/terrain shell boundary
+    before cut_one ever sees it — a piece straddling a rim then gets
+    sliced straight through by the cutter prism, exactly like any other
+    terrain detail. Each union is a plain EXACT-solver boolean, done here
+    job-wide, once per piece, rather than per cut, since "slice" doesn't
+    distinguish between cuts: a fused piece is just terrain, for every
+    placement in this job. Mutates `terrain_obj` in place and consumes
+    (deletes) every piece object; the caller's `piece_objs` list is empty
+    of anything usable afterward."""
+    for piece_obj in piece_objs:
+        apply_boolean(terrain_obj, piece_obj, "UNION")
+        delete_object(piece_obj)
+
+
+def incorporate_pieces(target, claimed, rehome, seat_shift):
+    """Union each CLAIMED scatter piece (scatter_rim="keep", see cut_one)
+    WHOLE into `target`, after applying the exact same rigid transform the
+    plug itself already got: `rehome` (undo this placement's rotation,
+    recenter the cut at the origin) then a pure Z shift of `seat_shift`
+    (h - seat in normal mode, topper_mm - seat in topper mode — see
+    cut_one) — same two-call sequence, same values, so a piece's embedding
+    depth relative to the terrain (scatter's own "always buried" floor,
+    docs/SCATTER.md) survives the transform exactly as it was at scatter
+    time. The piece is NEVER intersected with the cutter prism: "union it
+    in WHOLE" (docs/BASECUTTER.md) is what lets a piece overhang the rim
+    like real hand-made scenic basing instead of being sliced at the
+    boundary — slicing IS scatter_rim="slice"'s job, done once at job start
+    by fuse_pieces_into_terrain, not here.
+
+    A fresh COPY per placement, never the original piece object: the same
+    piece can be claimed by more than one placement (docs/BASECUTTER.md —
+    "two overlapping cutters can both contain a centroid... each cut is
+    independent"), so the separated piece object must survive untouched,
+    at its original position, for the next placement's own claim test and
+    its own independent copy."""
+    for j, (piece_obj, _centroid) in enumerate(claimed):
+        piece_copy = piece_obj.copy()
+        piece_copy.data = piece_obj.data.copy()
+        piece_copy.name = f"{target.name}_piece_{j}"
+        bpy.context.collection.objects.link(piece_copy)
+        piece_copy.data.transform(rehome)
+        piece_copy.data.transform(Matrix.Translation((0.0, 0.0, seat_shift)))
+        apply_boolean(target, piece_copy, "UNION")
+        delete_object(piece_copy)
+
+
 # ------------------------------------------------------------------ the cut
 
 def seat_height(plug_obj):
@@ -435,7 +642,16 @@ def seat_height(plug_obj):
     return lowest
 
 
-def cut_one(landscape_obj, placement, plinth, out_dir, index, topper_mm=None):
+def cut_one(
+    landscape_obj,
+    placement,
+    plinth,
+    out_dir,
+    index,
+    topper_mm=None,
+    pieces=None,
+    shell_diagnostics=None,
+):
     """Cut one placement.
 
     `topper_mm` is None for the normal seat-on-plinth flow (unchanged). A
@@ -448,9 +664,31 @@ def cut_one(landscape_obj, placement, plinth, out_dir, index, topper_mm=None):
     onto the hard plastic base in topper mode) — see the module docstring's
     "topper_mm" note.
 
+    `pieces` is scatter_rim="keep"'s claim pool: `None` (scatter_rim="slice",
+    or a landscape with no scatter shells at all — see main()) means there
+    is nothing to claim, and this function then does exactly the
+    seat+trim+plinth-union flow with nothing else touching plug/base.
+    Otherwise a list of `(piece_obj, centroid_xy)` — see
+    separate_into_shells/piece_centroid_xy — precomputed ONCE per job, not
+    per placement. `landscape_obj` here is ALWAYS the already-verified
+    terrain shell (main() reassigns its `landscape` variable to
+    separate_into_shells' return value before any cut runs — see that
+    function's docstring for why using anything else is a bug class of its
+    own, not just a style preference).
+
+    `shell_diagnostics` is `(shell_count, terrain_dims_mm)` or `None`
+    (a single-shell landscape — nothing scattered onto it — never
+    separates, so there's nothing extra to report) — folded into the
+    empty-plug error message so
+    a future regression in shell selection fails with facts ("terrain shell
+    is 40x40x2mm, 3 shells detected") instead of the misleading "placement
+    outside the landscape?" a mis-picked tiny piece shell would otherwise
+    produce for a placement that is demonstrably centered on the plate.
+
     Returns (out_path, dims_mm, manifold, extra) where `extra` is a dict of
     additive CUT_DONE payload fields (magnet_ignored / fused+shells),
     empty when there's nothing to report for this cut."""
+    pieces = pieces or []
     cutter = placement["cutter"]
     h = plinth["height_mm"]
     # The cut footprint is Rust's derivation (placement["cut"]), not
@@ -472,28 +710,54 @@ def cut_one(landscape_obj, placement, plinth, out_dir, index, topper_mm=None):
     apply_boolean(plug, prism, "INTERSECT")
     delete_object(prism)
     if len(plug.data.vertices) == 0:
-        raise RuntimeError("cut is empty — placement outside the landscape?")
+        reason = "cut is empty — placement outside the landscape?"
+        if shell_diagnostics is not None:
+            shell_count, terrain_dims = shell_diagnostics
+            reason += (
+                f" ({shell_count} shell(s) detected, terrain shell dims "
+                f"{terrain_dims[0]:.1f}x{terrain_dims[1]:.1f}x{terrain_dims[2]:.1f}mm — "
+                f"if the placement looks correct, this may be a shell "
+                f"mis-selection, not a coordinate problem)"
+            )
+        raise RuntimeError(reason)
 
     # Re-home the plug: placement point to origin, rotation undone, so the
     # exported base is axis-aligned like any standalone model.
     unrot = Matrix.Rotation(-math.radians(placement["rotation_deg"]), 4, "Z")
-    plug.data.transform(
-        unrot @ Matrix.Translation((-placement["x_mm"], -placement["y_mm"], 0.0))
-    )
+    rehome = unrot @ Matrix.Translation((-placement["x_mm"], -placement["y_mm"], 0.0))
+    plug.data.transform(rehome)
 
     seat = seat_height(plug)
     if seat is None:
         raise RuntimeError("no upward-facing surface inside the cut")
+
+    # scatter_rim="keep": which pieces THIS cut claims, by CENTROID (XY)
+    # against the world-space cut footprint `placed` (see point_in_polygon).
+    # Centroids themselves are precomputed once per job (docstring above);
+    # only the inside/outside test is per placement, since it depends on
+    # this placement's own footprint. A piece can be claimed by more than
+    # one placement — see incorporate_pieces' docstring.
+    claimed = [(obj, centroid) for obj, centroid in pieces if point_in_polygon(centroid, placed)]
 
     extra = {}
     if topper_mm is not None:
         # Topper mode: sink so the lowest sculpted point sits topper_mm
         # above a flat bottom at z=0, then trim everything below that plane.
         # That flat trim plane IS the final bottom face — unlike the normal
-        # flow there's no union afterwards, so no WELD_OVERLAP is needed.
-        # Total height falls out of this for free: max_z - (seat - topper_mm)
-        # = topper_mm + (max_z - seat) = topper_mm + relief.
-        plug.data.transform(Matrix.Translation((0.0, 0.0, topper_mm - seat)))
+        # flow there's no plinth union afterwards, so no WELD_OVERLAP is
+        # needed. Total height falls out of this for free: max_z -
+        # (seat - topper_mm) = topper_mm + (max_z - seat) = topper_mm +
+        # relief. Claimed pieces are unioned in WHOLE here, BEFORE the flat
+        # trim (docs/BASECUTTER.md: "Topper mode composes: keep/slice apply
+        # the same way, then the flat trim") — the trim is the one rule
+        # that defines this mode's entire bottom face, so it must run LAST,
+        # after every solid (terrain plug + any claimed pieces) that could
+        # possibly dip below it is already part of the assembly. A piece
+        # that pokes below the trim plane gets trimmed exactly like terrain
+        # would — consistent, not a special case.
+        seat_shift = topper_mm - seat
+        plug.data.transform(Matrix.Translation((0.0, 0.0, seat_shift)))
+        incorporate_pieces(plug, claimed, rehome, seat_shift)
         trim = big_box("trim", -1000.0, 0.0)
         apply_boolean(plug, trim, "DIFFERENCE")
         delete_object(trim)
@@ -505,8 +769,12 @@ def cut_one(landscape_obj, placement, plinth, out_dir, index, topper_mm=None):
     else:
         # Seat: lowest sculpted point onto the plinth top, trim what's
         # beneath (WELD_OVERLAP deep into the top plate, so union gets a
-        # real overlap).
-        plug.data.transform(Matrix.Translation((0.0, 0.0, h - seat)))
+        # real overlap). With `claimed` empty (no scatter, or no piece
+        # under this footprint) this is exactly the seat+trim+plinth-union
+        # flow with nothing else touching plug/base — see cut_one's
+        # docstring.
+        seat_shift = h - seat
+        plug.data.transform(Matrix.Translation((0.0, 0.0, seat_shift)))
         trim = big_box("trim", -1000.0, h - WELD_OVERLAP)
         apply_boolean(plug, trim, "DIFFERENCE")
         delete_object(trim)
@@ -514,6 +782,21 @@ def cut_one(landscape_obj, placement, plinth, out_dir, index, topper_mm=None):
         base = build_plinth(plinth, cutter, placement["cut"], placement.get("magnet"))
         apply_boolean(base, plug, "UNION")
         delete_object(plug)
+        # Claimed pieces union in WHOLE AFTER the plinth union, not before
+        # (docs/BASECUTTER.md gives the choice explicitly) — deliberately,
+        # so the plug<->plinth WELD_OVERLAP seam (the exact union this
+        # tripwire was built to police, see cleanup_and_check/the fused
+        # tripwire below) runs on the SAME two operands, in the SAME order,
+        # as a job with no scatter pieces at all: a keep-mode cut whose
+        # footprint claims zero pieces is therefore not just similar to but
+        # IDENTICAL, boolean-call-for-boolean-call, to a cut with no piece
+        # anywhere near it. When a piece IS claimed, it becomes a third,
+        # separate union against an ALREADY-fused plinth+plug — so the final shell count
+        # below still validates the whole assembly (a piece that fails to
+        # weld is just as visible as a plug that fails to weld), but the
+        # core seam's own correctness is never entangled with, or put at
+        # risk by, whatever geometry a scattered rock happens to bring in.
+        incorporate_pieces(base, claimed, rehome, seat_shift)
 
     manifold, dims, shells = cleanup_and_check(base)
     if topper_mm is None and shells > 1:
@@ -617,6 +900,14 @@ def main():
         if abs(topper_mm - raw_topper_mm) > 1e-9:
             topper_mm_clamped = topper_mm
 
+    # scatter_rim (docs/BASECUTTER.md's BaseCutJob.scatter_rim note):
+    # "keep" (default, mirrors topper_mm's own serde(default) pattern — see
+    # job.rs) or "slice". Only two values reach this script — Rust's
+    # ScatterRim enum is the validation gate — so an unrecognized string
+    # here (a hand-edited job file) is treated as "keep", the safer of the
+    # two (never silently fuses pieces the caller didn't ask to fuse).
+    scatter_rim = job.get("scatter_rim", "keep")
+
     tok("VALIDATING")
     landscape = import_landscape(job["landscape"])
     ok, report = validate(landscape)
@@ -624,17 +915,61 @@ def main():
         # The gate is real (not a dead protocol arm): a catastrophically
         # broken landscape stops here, before any Blender time is spent
         # cutting from it. job.rs treats VALIDATION_FAILED as fatal and
-        # kills the run — see basecutter::job::spawn_and_parse.
+        # kills the run — see basecutter::job::spawn_and_parse. Validation
+        # runs on the STILL-COMBINED import (before separate_into_shells
+        # below): closed shells contribute 0 non-manifold edges regardless
+        # of how many there are, so a multi-shell scattered landscape is
+        # validated exactly like a single-shell one — no separation needed
+        # for this check to be correct (verified against real Blender: a
+        # 26-shell scattered plate validates with non_manifold_edges: 0,
+        # same as an unscattered one).
         tok("VALIDATION_FAILED", report)
         return
     tok("VALIDATED", report)
+
+    # Separate the imported landscape into its loose shells (docs/
+    # SCATTER.md "Pieces are placed as LOOSE SHELLS") and reassign
+    # `landscape` to the VERIFIED terrain shell — see
+    # separate_into_shells' docstring for why reusing the pre-separation
+    # reference here would be a bug, not a style choice. A landscape with
+    # nothing scattered onto it (a plain generated bake, a designer
+    # sculpt) is the normal single-shell case: it comes back with
+    # `piece_objs == []` and `landscape` unchanged in all but name, so
+    # everything below this point is a no-op for it — both scatter_rim
+    # modes are then identical, per the pinned interface.
+    landscape, piece_objs = separate_into_shells(landscape)
+    shell_diagnostics = (
+        1 + len(piece_objs),
+        bbox_dims(landscape.data.vertices),
+    )
+
+    pieces_for_cut = None
+    if scatter_rim == "slice":
+        # Fuse every piece into the terrain ONCE, job-wide, before any cut
+        # runs (see fuse_pieces_into_terrain's docstring). After this,
+        # `landscape` is a single-shell mesh and cut_one needs no
+        # awareness of scatter at all: pieces_for_cut stays None.
+        fuse_pieces_into_terrain(landscape, piece_objs)
+    elif piece_objs:
+        # scatter_rim="keep": precompute every piece's centroid ONCE
+        # (docs/BASECUTTER.md — "compute each piece's centroid + bbox
+        # once"); the per-placement inside/outside test happens inside
+        # cut_one, since it depends on that placement's own cut footprint.
+        pieces_for_cut = [(obj, piece_centroid_xy(obj)) for obj in piece_objs]
 
     done = 0
     for i, placement in enumerate(job["placements"]):
         tok("CUT_START", {"index": i})
         try:
             out, dims, manifold, extra = cut_one(
-                landscape, placement, job["plinth"], job["out_dir"], i, topper_mm
+                landscape,
+                placement,
+                job["plinth"],
+                job["out_dir"],
+                i,
+                topper_mm,
+                pieces_for_cut,
+                shell_diagnostics,
             )
             payload = {"index": i, "out": out, "dims_mm": dims, "manifold": manifold}
             if topper_mm_clamped is not None:
