@@ -1400,20 +1400,21 @@ const exportToCatalog = async () => {
   }
 };
 
-// ---- three-step accordion (side panel UX: "which step am I on") ----
+// ---- four-step accordion (side panel UX: "which step am I on") ----
 // Free navigation, never a locked wizard — activeStep only ever changes via
 // an explicit header click (selectStep) or an auto-advance nudge on a
 // milestone TRANSITION (false -> true, never re-fired on every render while
 // the milestone stays true). Session-only: no localStorage, resets to 1 on
 // reload.
-const activeStep = ref<1 | 2 | 3>(1);
+const activeStep = ref<1 | 2 | 3 | 4>(1);
+type StepNumber = 1 | 2 | 3 | 4;
 /** High-water mark of steps the user has explicitly opened via a header
  * click — NOT bumped by autoAdvance. Once the user has manually looked at a
  * later step, autoAdvance never re-opens an earlier (or equal) one out from
  * under them again this session — "never auto-move backward" plus "respect
  * a manual choice that's already ahead of the milestone". */
-let highestManualStep: 1 | 2 | 3 = 1;
-const selectStep = (step: 1 | 2 | 3) => {
+let highestManualStep: StepNumber = 1;
+const selectStep = (step: StepNumber) => {
   activeStep.value = step;
   if (step > highestManualStep) highestManualStep = step;
 };
@@ -1421,35 +1422,56 @@ const selectStep = (step: 1 | 2 | 3) => {
  * highestManualStep's comment. Called from milestone-transition watchers
  * below, never from a steady-state check (so it fires once per transition,
  * not on every subsequent render while the milestone stays true). */
-const autoAdvance = (target: 1 | 2 | 3) => {
+const autoAdvance = (target: StepNumber) => {
   if (target <= activeStep.value || target <= highestManualStep) return;
   activeStep.value = target;
 };
 
 const step1Done = computed(() => landscapeBounds.value != null);
-const step2Done = computed(() => placements.value.length > 0);
+/** Scatter is OPTIONAL — this ✓ is a "you did scatter" marker, never a gate:
+ * no later step's chip or content keys off it (step 3/4 completion is judged
+ * purely by their own milestones), so skipping scatter entirely never reads
+ * as "blocked". */
+const step2Done = computed(() => hasScatterApplied.value);
+const step3Done = computed(() => placements.value.length > 0);
 /** Latches true the first time a job finishes with >=1 ok result and never
  * resets — unlike baseCut.finishedSummary (which reverts to null the moment
  * the NEXT job starts, see useBaseCut's resetState), this is a "this
  * session" milestone, not a "this job" one. */
 const hasCutMilestone = ref(false);
-const step3Done = computed(() => hasCutMilestone.value);
+const step4Done = computed(() => hasCutMilestone.value);
 
 /** "no landscape yet" / basename + dims (cheap: landscapeBounds is already
- * the loaded extent, no re-measurement needed) + "· scattered" once applied. */
+ * the loaded extent, no re-measurement needed). The "· scattered" note
+ * moved to step 2's own summary when scatter became its own step. */
 const step1Summary = computed(() => {
   if (!landscapeBounds.value) return "no landscape yet";
   const b = landscapeBounds.value;
   const base = landscapePath.value.split(/[/\\]/).pop() || "landscape";
   const w = Math.round(b.maxX - b.minX);
   const d = Math.round(b.maxY - b.minY);
-  return `${base} (${w}×${d}mm)${hasScatterApplied.value ? " · scattered" : ""}`;
+  return `${base} (${w}×${d}mm)`;
+});
+
+/** The seed the last APPLIED scatter actually ran with — captured when the
+ * job finishes, not read live from debrisParams.seed, so rerolling the seed
+ * field after a scatter doesn't lie about what's on the terrain. (Capturing
+ * at finish is safe: the seed input is disabled while a scatter runs.) */
+const lastScatterSeed = ref<number | null>(null);
+watch(debrisScatter.finished, (finished) => {
+  if (finished) lastScatterSeed.value = debrisParams.seed;
+});
+const step2Summary = computed(() => {
+  if (!hasScatterApplied.value) return "not scattered";
+  return lastScatterSeed.value !== null
+    ? `scattered · seed ${lastScatterSeed.value}`
+    : "scattered";
 });
 
 /** "N placements" (+ "· M magnets" counting placements with a magnet set, +
  * "· K grouped" counting groups) — always numeric, no separate empty-state
- * copy (unlike step 1/3): "0 placements" already reads fine here. */
-const step2Summary = computed(() => {
+ * copy (unlike step 1/4): "0 placements" already reads fine here. */
+const step3Summary = computed(() => {
   const n = placements.value.length;
   const magnets = placements.value.filter((p) => p.magnet != null).length;
   let summary = `${n} placement${n === 1 ? "" : "s"}`;
@@ -1460,18 +1482,21 @@ const step2Summary = computed(() => {
 
 /** The last completed job's tally — kept separately from
  * baseCut.finishedSummary (which the toast watcher above clears back to
- * null the moment a new job starts) so the step-3 summary doesn't blank out
+ * null the moment a new job starts) so the step-4 summary doesn't blank out
  * mid-second-run. */
 const lastCutSummary = ref<{ ok_count: number; total: number } | null>(null);
-const step3Summary = computed(() => {
+const step4Summary = computed(() => {
   if (!lastCutSummary.value) return "not cut yet";
   return `${lastCutSummary.value.ok_count}/${lastCutSummary.value.total} cut ok`;
 });
 
 // Auto-advance on milestone transitions (false -> true) only — landscape
-// loads -> open step 2. The step-2 milestone (first placement) deliberately
-// has NO auto-advance wired here (stays on 2, per the docs task): placing a
-// base shouldn't jump the user straight to the cut screen.
+// loads -> open step 2 (SCATTER, the optional decoration pass), NOT layout:
+// jumping straight to LAYOUT hid the scatter section behind a header most
+// users never clicked back to find. Deliberately NO auto-advance out of
+// step 2 (a finished scatter stays put — the user may want to re-scatter;
+// only a manual click moves on) and none on the first placement (stays on
+// 3: placing a base shouldn't jump the user straight to the cut screen).
 watch(landscapeBounds, (loaded, wasLoaded) => {
   if (loaded && !wasLoaded) autoAdvance(2);
 });
@@ -1484,7 +1509,7 @@ watch(baseCut.finishedSummary, (summary) => {
   lastCutSummary.value = summary;
   if (summary.ok_count > 0) {
     hasCutMilestone.value = true;
-    autoAdvance(3);
+    autoAdvance(4);
   }
 });
 </script>
@@ -1499,7 +1524,7 @@ watch(baseCut.finishedSummary, (summary) => {
       </div>
 
       <div
-        class="rounded-box border overflow-hidden"
+        class="rounded-box border overflow-hidden shrink-0"
         :class="activeStep === 1 ? 'border-primary' : 'border-base-content/10'"
       >
         <button
@@ -1901,240 +1926,6 @@ watch(baseCut.finishedSummary, (summary) => {
             </div>
           </div>
 
-          <details
-            class="collapse collapse-arrow border border-base-content/10 bg-base-200/20 rounded-box"
-          >
-            <summary
-              class="collapse-title min-h-0 py-2.5 px-3 flex items-center gap-2 cursor-pointer"
-            >
-              <span
-                class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-                >SCATTER</span
-              >
-            </summary>
-            <div class="collapse-content flex flex-col gap-1.5 px-3">
-              <div class="flex flex-wrap gap-1">
-                <button
-                  v-for="preset in SCATTER_PRESETS"
-                  :key="preset.id"
-                  type="button"
-                  class="btn btn-xs"
-                  :class="
-                    preset.id === selectedScatterPresetId ? 'btn-primary' : ''
-                  "
-                  :disabled="!!debrisScatterBlockedReason"
-                  :title="debrisScatterBlockedReason || undefined"
-                  @click="selectScatterPreset(preset)"
-                >
-                  {{ preset.label }}
-                </button>
-              </div>
-
-              <div class="flex items-center gap-1.5">
-                <span class="text-[11px] text-base-content/50 shrink-0"
-                  >Density /dm²</span
-                >
-                <input
-                  type="number"
-                  class="input input-xs flex-1 font-mono"
-                  min="0"
-                  step="0.5"
-                  :disabled="debrisScatter.isRunning.value"
-                  v-model.number="debrisParams.density_per_dm2"
-                />
-                <!-- Front-row, not an advanced knob: like the terrain's own
-                 feature_scale, this is the "what scale am I basing for"
-                 dial — 1 = the 28-32mm heroic anchor every piece size is
-                 canonical at (docs/SCATTER.md "Scale anchor"); 15mm gaming
-                 wants ~0.5, 54mm display work ~2. -->
-                <span
-                  class="text-[11px] text-base-content/50 shrink-0"
-                  title="Whole-pass piece rescale — 1 = 28-32mm heroic"
-                  >Scale ×</span
-                >
-                <input
-                  type="number"
-                  class="input input-xs w-16 font-mono"
-                  min="0.1"
-                  step="0.05"
-                  :disabled="debrisScatter.isRunning.value"
-                  v-model.number="debrisParams.scale_factor"
-                />
-              </div>
-
-              <div class="flex items-center gap-1.5">
-                <span class="text-[11px] text-base-content/50 shrink-0"
-                  >Seed</span
-                >
-                <input
-                  type="number"
-                  class="input input-xs flex-1 font-mono"
-                  :disabled="debrisScatter.isRunning.value"
-                  v-model.number="debrisParams.seed"
-                />
-                <button
-                  type="button"
-                  class="btn btn-xs"
-                  title="Reroll seed"
-                  :disabled="debrisScatter.isRunning.value"
-                  @click="rerollDebrisSeed"
-                >
-                  🎲
-                </button>
-              </div>
-
-              <div class="flex items-center gap-3">
-                <button
-                  class="btn btn-secondary btn-sm grow"
-                  :disabled="!canRunDebrisScatter"
-                  :title="debrisScatterBlockedReason || undefined"
-                  @click="startDebrisScatter"
-                >
-                  <template v-if="debrisScatter.isRunning.value">
-                    <span class="loading loading-spinner loading-xs"></span>
-                    <span>Scattering…</span>
-                  </template>
-                  <span v-else>{{
-                    hasScatterApplied ? "Re-scatter" : "Scatter"
-                  }}</span>
-                </button>
-                <button
-                  v-if="debrisScatter.isRunning.value"
-                  class="btn btn-error btn-sm"
-                  @click="cancelDebrisScatter"
-                >
-                  Cancel
-                </button>
-              </div>
-              <div
-                v-if="debrisScatter.isRunning.value"
-                class="flex items-center gap-3"
-              >
-                <ProgressBar :progress="debrisScatterPercent" />
-                <span class="text-sm opacity-70">{{
-                  debrisScatterStepLabel
-                }}</span>
-              </div>
-              <button
-                type="button"
-                class="btn btn-ghost btn-xs self-start"
-                :disabled="!canRemoveScatter"
-                :title="removeScatterBlockedReason || undefined"
-                @click="removeScatter"
-              >
-                Remove scatter
-              </button>
-              <div
-                v-if="debrisScatter.failedMessage.value"
-                class="alert alert-error text-xs whitespace-pre-wrap flex-col items-start"
-              >
-                <span>{{ debrisScatter.failedMessage.value }}</span>
-                <pre
-                  v-if="debrisScatter.failedStdoutTail.value"
-                  class="font-mono text-[10px] opacity-70 whitespace-pre-wrap mt-1"
-                  >{{ debrisScatter.failedStdoutTail.value }}</pre
-                >
-              </div>
-
-              <details
-                class="collapse collapse-arrow border border-base-content/10 bg-base-200/20 rounded-box"
-              >
-                <summary
-                  class="collapse-title min-h-0 py-2.5 px-3 flex items-center gap-2 cursor-pointer"
-                >
-                  <span
-                    class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-                    >ADVANCED — SCATTER</span
-                  >
-                </summary>
-                <div class="collapse-content flex flex-col gap-2.5 px-3">
-                  <NumberInput
-                    id="scatter-scale-min"
-                    label="Scale min ×"
-                    :step="0.05"
-                    :min="0.1"
-                    v-model="debrisParams.scale_min"
-                  />
-                  <NumberInput
-                    id="scatter-scale-max"
-                    label="Scale max ×"
-                    :step="0.05"
-                    :min="0.1"
-                    v-model="debrisParams.scale_max"
-                  />
-                  <NumberInput
-                    id="scatter-sink-min"
-                    label="Sink min (mm)"
-                    :step="0.1"
-                    :min="0"
-                    v-model="debrisParams.sink_min"
-                  />
-                  <NumberInput
-                    id="scatter-sink-max"
-                    label="Sink max (mm)"
-                    :step="0.1"
-                    :min="0"
-                    v-model="debrisParams.sink_max"
-                  />
-                  <Switch
-                    v-model="debrisParams.align_to_surface"
-                    label="Align to surface"
-                  />
-                  <NumberInput
-                    id="scatter-max-slope"
-                    label="Max slope (deg)"
-                    :step="1"
-                    :min="0"
-                    :max="90"
-                    v-model="debrisParams.max_slope_deg"
-                  />
-                  <NumberInput
-                    id="scatter-edge-margin"
-                    label="Edge margin (mm)"
-                    :step="0.5"
-                    :min="0"
-                    v-model="debrisParams.edge_margin_mm"
-                  />
-
-                  <div
-                    class="flex flex-col gap-1.5 border-t border-base-content/10 pt-2"
-                  >
-                    <span
-                      class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
-                      >PIECE MIX — GENERATED</span
-                    >
-                    <div
-                      v-for="piece in debrisPieces"
-                      :key="piece.kind"
-                      class="flex items-center gap-1.5"
-                    >
-                      <input
-                        type="checkbox"
-                        class="checkbox checkbox-xs"
-                        v-model="piece.enabled"
-                      />
-                      <span class="text-[11px] flex-1 capitalize">{{
-                        piece.kind
-                      }}</span>
-                      <input
-                        type="number"
-                        class="input input-xs w-16 font-mono"
-                        min="0"
-                        step="0.1"
-                        :disabled="!piece.enabled"
-                        v-model.number="piece.weight"
-                      />
-                    </div>
-                    <!-- get_scatter_assets() returns [] until S4 curation lands
-                     (docs/SCATTER.md "Execution phases") — no assets group
-                     renders until there's actually something in it, rather
-                     than an always-empty list confusing the picker. -->
-                  </div>
-                </div>
-              </details>
-            </div>
-          </details>
-
           <div class="flex flex-col gap-1">
             <span
               class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
@@ -2157,7 +1948,7 @@ watch(baseCut.finishedSummary, (summary) => {
       </div>
 
       <div
-        class="rounded-box border overflow-hidden"
+        class="rounded-box border overflow-hidden shrink-0"
         :class="activeStep === 2 ? 'border-primary' : 'border-base-content/10'"
       >
         <button
@@ -2177,13 +1968,18 @@ watch(baseCut.finishedSummary, (summary) => {
             >2</span
           >
           <span class="flex-1 min-w-0 flex flex-col">
-            <span
-              class="font-mono font-semibold text-[10px] tracking-widest"
-              :class="
-                activeStep === 2 ? 'text-primary' : 'text-base-content/40'
-              "
-              >LAYOUT</span
-            >
+            <span class="flex items-baseline gap-1.5">
+              <span
+                class="font-mono font-semibold text-[10px] tracking-widest"
+                :class="
+                  activeStep === 2 ? 'text-primary' : 'text-base-content/40'
+                "
+                >SCATTER</span
+              >
+              <span class="font-mono text-[9px] text-base-content/30"
+                >optional</span
+              >
+            </span>
             <span class="text-[11px] text-base-content/50 truncate">{{
               step2Summary
             }}</span>
@@ -2191,12 +1987,273 @@ watch(baseCut.finishedSummary, (summary) => {
           <span
             v-if="step2Done"
             class="text-success text-[13px] shrink-0"
-            title="Placements added"
+            title="Scatter applied"
             >✓</span
           >
         </button>
         <div
           v-show="activeStep === 2"
+          class="flex flex-col gap-1.5 px-3 pb-3.5"
+        >
+          <div class="flex flex-wrap gap-1">
+            <button
+              v-for="preset in SCATTER_PRESETS"
+              :key="preset.id"
+              type="button"
+              class="btn btn-xs"
+              :class="
+                preset.id === selectedScatterPresetId ? 'btn-primary' : ''
+              "
+              :disabled="!!debrisScatterBlockedReason"
+              :title="debrisScatterBlockedReason || undefined"
+              @click="selectScatterPreset(preset)"
+            >
+              {{ preset.label }}
+            </button>
+          </div>
+
+          <div class="flex items-center gap-1.5">
+            <span class="text-[11px] text-base-content/50 shrink-0"
+              >Density /dm²</span
+            >
+            <input
+              type="number"
+              class="input input-xs flex-1 font-mono"
+              min="0"
+              step="0.5"
+              :disabled="debrisScatter.isRunning.value"
+              v-model.number="debrisParams.density_per_dm2"
+            />
+            <!-- Front-row, not an advanced knob: like the terrain's own
+                 feature_scale, this is the "what scale am I basing for"
+                 dial — 1 = the 28-32mm heroic anchor every piece size is
+                 canonical at (docs/SCATTER.md "Scale anchor"); 15mm gaming
+                 wants ~0.5, 54mm display work ~2. -->
+            <span
+              class="text-[11px] text-base-content/50 shrink-0"
+              title="Whole-pass piece rescale — 1 = 28-32mm heroic"
+              >Scale ×</span
+            >
+            <input
+              type="number"
+              class="input input-xs w-16 font-mono"
+              min="0.1"
+              step="0.05"
+              :disabled="debrisScatter.isRunning.value"
+              v-model.number="debrisParams.scale_factor"
+            />
+          </div>
+
+          <div class="flex items-center gap-1.5">
+            <span class="text-[11px] text-base-content/50 shrink-0">Seed</span>
+            <input
+              type="number"
+              class="input input-xs flex-1 font-mono"
+              :disabled="debrisScatter.isRunning.value"
+              v-model.number="debrisParams.seed"
+            />
+            <button
+              type="button"
+              class="btn btn-xs"
+              title="Reroll seed"
+              :disabled="debrisScatter.isRunning.value"
+              @click="rerollDebrisSeed"
+            >
+              🎲
+            </button>
+          </div>
+
+          <div class="flex items-center gap-3">
+            <button
+              class="btn btn-secondary btn-sm grow"
+              :disabled="!canRunDebrisScatter"
+              :title="debrisScatterBlockedReason || undefined"
+              @click="startDebrisScatter"
+            >
+              <template v-if="debrisScatter.isRunning.value">
+                <span class="loading loading-spinner loading-xs"></span>
+                <span>Scattering…</span>
+              </template>
+              <span v-else>{{
+                hasScatterApplied ? "Re-scatter" : "Scatter"
+              }}</span>
+            </button>
+            <button
+              v-if="debrisScatter.isRunning.value"
+              class="btn btn-error btn-sm"
+              @click="cancelDebrisScatter"
+            >
+              Cancel
+            </button>
+          </div>
+          <div
+            v-if="debrisScatter.isRunning.value"
+            class="flex items-center gap-3"
+          >
+            <ProgressBar :progress="debrisScatterPercent" />
+            <span class="text-sm opacity-70">{{ debrisScatterStepLabel }}</span>
+          </div>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs self-start"
+            :disabled="!canRemoveScatter"
+            :title="removeScatterBlockedReason || undefined"
+            @click="removeScatter"
+          >
+            Remove scatter
+          </button>
+          <div
+            v-if="debrisScatter.failedMessage.value"
+            class="alert alert-error text-xs whitespace-pre-wrap flex-col items-start"
+          >
+            <span>{{ debrisScatter.failedMessage.value }}</span>
+            <pre
+              v-if="debrisScatter.failedStdoutTail.value"
+              class="font-mono text-[10px] opacity-70 whitespace-pre-wrap mt-1"
+              >{{ debrisScatter.failedStdoutTail.value }}</pre
+            >
+          </div>
+
+          <details
+            class="collapse collapse-arrow border border-base-content/10 bg-base-200/20 rounded-box"
+          >
+            <summary
+              class="collapse-title min-h-0 py-2.5 px-3 flex items-center gap-2 cursor-pointer"
+            >
+              <span
+                class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+                >ADVANCED — SCATTER</span
+              >
+            </summary>
+            <div class="collapse-content flex flex-col gap-2.5 px-3">
+              <NumberInput
+                id="scatter-scale-min"
+                label="Scale min ×"
+                :step="0.05"
+                :min="0.1"
+                v-model="debrisParams.scale_min"
+              />
+              <NumberInput
+                id="scatter-scale-max"
+                label="Scale max ×"
+                :step="0.05"
+                :min="0.1"
+                v-model="debrisParams.scale_max"
+              />
+              <NumberInput
+                id="scatter-sink-min"
+                label="Sink min (mm)"
+                :step="0.1"
+                :min="0"
+                v-model="debrisParams.sink_min"
+              />
+              <NumberInput
+                id="scatter-sink-max"
+                label="Sink max (mm)"
+                :step="0.1"
+                :min="0"
+                v-model="debrisParams.sink_max"
+              />
+              <Switch
+                v-model="debrisParams.align_to_surface"
+                label="Align to surface"
+              />
+              <NumberInput
+                id="scatter-max-slope"
+                label="Max slope (deg)"
+                :step="1"
+                :min="0"
+                :max="90"
+                v-model="debrisParams.max_slope_deg"
+              />
+              <NumberInput
+                id="scatter-edge-margin"
+                label="Edge margin (mm)"
+                :step="0.5"
+                :min="0"
+                v-model="debrisParams.edge_margin_mm"
+              />
+
+              <div
+                class="flex flex-col gap-1.5 border-t border-base-content/10 pt-2"
+              >
+                <span
+                  class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+                  >PIECE MIX — GENERATED</span
+                >
+                <div
+                  v-for="piece in debrisPieces"
+                  :key="piece.kind"
+                  class="flex items-center gap-1.5"
+                >
+                  <input
+                    type="checkbox"
+                    class="checkbox checkbox-xs"
+                    v-model="piece.enabled"
+                  />
+                  <span class="text-[11px] flex-1 capitalize">{{
+                    piece.kind
+                  }}</span>
+                  <input
+                    type="number"
+                    class="input input-xs w-16 font-mono"
+                    min="0"
+                    step="0.1"
+                    :disabled="!piece.enabled"
+                    v-model.number="piece.weight"
+                  />
+                </div>
+                <!-- get_scatter_assets() returns [] until S4 curation lands
+                     (docs/SCATTER.md "Execution phases") — no assets group
+                     renders until there's actually something in it, rather
+                     than an always-empty list confusing the picker. -->
+              </div>
+            </div>
+          </details>
+        </div>
+      </div>
+
+      <div
+        class="rounded-box border overflow-hidden shrink-0"
+        :class="activeStep === 3 ? 'border-primary' : 'border-base-content/10'"
+      >
+        <button
+          type="button"
+          class="w-full flex items-center gap-2 p-3 text-left"
+          @click="selectStep(3)"
+        >
+          <span
+            class="flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-mono shrink-0"
+            :class="
+              activeStep === 3
+                ? 'bg-primary text-primary-content'
+                : step3Done
+                  ? 'bg-success/20 text-success'
+                  : 'bg-base-content/10 text-base-content/50'
+            "
+            >3</span
+          >
+          <span class="flex-1 min-w-0 flex flex-col">
+            <span
+              class="font-mono font-semibold text-[10px] tracking-widest"
+              :class="
+                activeStep === 3 ? 'text-primary' : 'text-base-content/40'
+              "
+              >LAYOUT</span
+            >
+            <span class="text-[11px] text-base-content/50 truncate">{{
+              step3Summary
+            }}</span>
+          </span>
+          <span
+            v-if="step3Done"
+            class="text-success text-[13px] shrink-0"
+            title="Placements added"
+            >✓</span
+          >
+        </button>
+        <div
+          v-show="activeStep === 3"
           class="flex flex-col gap-3.5 px-3 pb-3.5"
         >
           <div class="flex flex-col gap-1.5">
@@ -2661,46 +2718,46 @@ watch(baseCut.finishedSummary, (summary) => {
       </div>
 
       <div
-        class="rounded-box border overflow-hidden"
-        :class="activeStep === 3 ? 'border-primary' : 'border-base-content/10'"
+        class="rounded-box border overflow-hidden shrink-0"
+        :class="activeStep === 4 ? 'border-primary' : 'border-base-content/10'"
       >
         <button
           type="button"
           class="w-full flex items-center gap-2 p-3 text-left"
-          @click="selectStep(3)"
+          @click="selectStep(4)"
         >
           <span
             class="flex items-center justify-center w-5 h-5 rounded-full text-[10px] font-mono shrink-0"
             :class="
-              activeStep === 3
+              activeStep === 4
                 ? 'bg-primary text-primary-content'
-                : step3Done
+                : step4Done
                   ? 'bg-success/20 text-success'
                   : 'bg-base-content/10 text-base-content/50'
             "
-            >3</span
+            >4</span
           >
           <span class="flex-1 min-w-0 flex flex-col">
             <span
               class="font-mono font-semibold text-[10px] tracking-widest"
               :class="
-                activeStep === 3 ? 'text-primary' : 'text-base-content/40'
+                activeStep === 4 ? 'text-primary' : 'text-base-content/40'
               "
               >CUT &amp; EXPORT</span
             >
             <span class="text-[11px] text-base-content/50 truncate">{{
-              step3Summary
+              step4Summary
             }}</span>
           </span>
           <span
-            v-if="step3Done"
+            v-if="step4Done"
             class="text-success text-[13px] shrink-0"
             title="Cut finished"
             >✓</span
           >
         </button>
         <div
-          v-show="activeStep === 3"
+          v-show="activeStep === 4"
           class="flex flex-col gap-3.5 px-3 pb-3.5"
         >
           <details
