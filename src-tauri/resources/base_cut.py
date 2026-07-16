@@ -590,15 +590,31 @@ def fuse_pieces_into_terrain(terrain_obj, piece_objs):
     ONCE, before any cut runs, removing the piece/terrain shell boundary
     before cut_one ever sees it — a piece straddling a rim then gets
     sliced straight through by the cutter prism, exactly like any other
-    terrain detail. Each union is a plain EXACT-solver boolean, done here
-    job-wide, once per piece, rather than per cut, since "slice" doesn't
+    terrain detail. This runs job-wide (not per cut), since "slice" doesn't
     distinguish between cuts: a fused piece is just terrain, for every
-    placement in this job. Mutates `terrain_obj` in place and consumes
-    (deletes) every piece object; the caller's `piece_objs` list is empty
-    of anything usable afterward."""
+    placement in this job.
+
+    The pieces are first JOINED into a single mesh (plain data
+    concatenation, no solver) and then unioned into the terrain in ONE
+    EXACT-solver pass. The obvious alternative — a union per piece in a loop
+    — is quadratic: every union rebuilds the BVH over the whole GROWING
+    terrain, so a dense carpet (hundreds of leaves/twigs) turns into
+    hundreds of ever-costlier solver calls and the cut appears to hang at
+    0%. One join + one union is a single BVH build over the full piece set
+    and yields the same welded solid (EXACT handles the joined mesh's own
+    piece-piece overlaps in the same pass). Mutates `terrain_obj` in place
+    and consumes (deletes) every piece object; the caller's `piece_objs`
+    list is empty of anything usable afterward."""
+    if not piece_objs:
+        return
+    bpy.ops.object.select_all(action="DESELECT")
     for piece_obj in piece_objs:
-        apply_boolean(terrain_obj, piece_obj, "UNION")
-        delete_object(piece_obj)
+        piece_obj.select_set(True)
+    bpy.context.view_layer.objects.active = piece_objs[0]
+    bpy.ops.object.join()  # all pieces collapse into piece_objs[0], no solver
+    merged = piece_objs[0]
+    apply_boolean(terrain_obj, merged, "UNION")
+    delete_object(merged)
 
 
 def incorporate_pieces(target, claimed, rehome, seat_shift):
