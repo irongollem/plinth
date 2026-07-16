@@ -52,11 +52,11 @@ pub fn materialize_scatter_script(app_handle: &AppHandle) -> Result<PathBuf, App
 
 /// A generated piece kind — the only source scatter can actually place
 /// today (docs/SCATTER.md "Execution phases": bundled/user assets are S4).
-/// Serializes lowercase ("pebble"/"rock"/"twig"/"leaf"/"grass"/"mushroom")
+/// Serializes lowercase ("pebble"/"rock"/"twig"/"grass"/"mushroom")
 /// to match scatter_landscape.py's generated-kind set exactly. `Pebble`/
 /// `Rock` are built as noise-displaced icospheres and still live in that
-/// script's `CANONICAL_MM` table; `Twig`/`Leaf`/`Grass`/`Mushroom` are
-/// swept/extruded solids (see `build_twig_piece`/`build_leaf_piece`/
+/// script's `CANONICAL_MM` table; `Twig`/`Grass`/`Mushroom` are
+/// swept/extruded solids (see `build_twig_piece`/
 /// `build_grass_piece`/`build_mushroom_piece` there) — same dispatch shape,
 /// different geometry recipe per kind. `Mushroom` is the one kind that
 /// deliberately stands upright (stem down) rather than lying flat — see
@@ -68,7 +68,6 @@ pub enum GeneratedPieceKind {
     Pebble,
     Rock,
     Twig,
-    Leaf,
     Grass,
     Mushroom,
 }
@@ -959,15 +958,14 @@ mod tests {
         assert_eq!(back, choice);
     }
 
-    /// The non-round Generated kinds (twig/leaf/grass/mushroom) must
+    /// The non-round Generated kinds (twig/grass/mushroom) must
     /// round-trip through the SAME externally-tagged, lowercase shape as
     /// pebble/rock — scatter_landscape.py's generated-kind dispatch matches
     /// on these exact lowercase strings (see its GENERATED_KINDS set).
     #[test]
-    fn twig_leaf_grass_mushroom_piece_kinds_serialize_to_the_pinned_lowercase_shape() {
+    fn twig_grass_mushroom_piece_kinds_serialize_to_the_pinned_lowercase_shape() {
         for (kind, expected) in [
             (GeneratedPieceKind::Twig, "twig"),
-            (GeneratedPieceKind::Leaf, "leaf"),
             (GeneratedPieceKind::Grass, "grass"),
             (GeneratedPieceKind::Mushroom, "mushroom"),
         ] {

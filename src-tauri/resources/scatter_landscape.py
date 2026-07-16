@@ -62,8 +62,8 @@
 #       "pieces": [
 #         {"piece": {"Generated": {"kind": "pebble"}}, "weight": 0.6},
 #         {"piece": {"Generated": {"kind": "rock"}},   "weight": 0.4}
-#         # also: {"Generated": {"kind": "twig"|"leaf"|"grass"|"mushroom"}} —
-#         # see build_twig_piece/build_leaf_piece/build_grass_piece/
+#         # also: {"Generated": {"kind": "twig"|"grass"|"mushroom"}} —
+#         # see build_twig_piece/build_grass_piece/
 #         # build_mushroom_piece
 #       ]
 #     }
@@ -456,12 +456,10 @@ ASPECT_XY_RANGE = (0.80, 1.30)
 #     (rotated about local Z, BEFORE align — see place_piece) spins the
 #     long axis freely around compass headings, and align then tilts the
 #     thin Z axis onto the surface normal, laying the long axis flush
-#     against the ground with whatever heading yaw picked. build_leaf_piece
-#     already used this convention correctly ("Length runs along local +Y
-#     ... its local +Z ... is what align_to_surface tilts to the local
-#     normal, top face up" — see its own docstring); build_twig_piece below
-#     is FIXED to match it (spine now starts along local +X, not +Z) so a
-#     twig lies flat exactly the same way a leaf already does, with its
+#     against the ground with whatever heading yaw picked. build_twig_piece
+#     below follows this convention: its spine starts along local +X (not
+#     +Z), so the thin Z axis is what align_to_surface tilts onto the
+#     normal, laying the twig flat along the ground — with its
 #     kinks giving the "small random roll" natural variety for free — no
 #     extra rotation step needed, and bottom_local/height_local (measured
 #     along Z as always) come out small (the tube's own radius) instead of
@@ -491,16 +489,16 @@ ASPECT_XY_RANGE = (0.80, 1.30)
 #     manifest), so it already lies flat via the untouched default path,
 #     exactly like leaf/pebble/rock need no extra step either.
 
-# --------------------------------------------- twig / leaf / grass pieces
+# --------------------------------------------- twig / grass pieces
 #
-# Three swept/extruded solids, siblings of build_generated_piece but NOT
-# icospheres — an icosphere can't read as a bent stick, a cupped blade, or
-# an upright fin no matter how it's noise-displaced, so each of these gets
-# its own from-scratch mesh recipe (see build_twig_piece/build_leaf_piece/
-# build_grass_piece below). All three share the hard requirement the task
+# Two swept/extruded solids, siblings of build_generated_piece but NOT
+# icospheres — an icosphere can't read as a bent stick or an upright fin
+# no matter how it's noise-displaced, so each of these gets
+# its own from-scratch mesh recipe (see build_twig_piece/
+# build_grass_piece below). Both share the hard requirement the task
 # that added them calls out explicitly: a WATERTIGHT, MANIFOLD SOLID with
 # real thickness — never a zero-thickness plane (the "billboard-plane"
-# lesson: a flat leaf-shaped card is not sliceable/printable no matter how
+# lesson: a flat blade-shaped card is not sliceable/printable no matter how
 # thin the intended piece is meant to read). Every one of them is a closed
 # shell built purely by ADDING vertices/faces (ring sweeps, fan caps) — no
 # boolean operator touches any of them, so none of them can reintroduce the
@@ -538,102 +536,6 @@ TWIG_SEGMENTS = 5  # 6 rings total (base..tip) — enough resolution for 1-2 kin
 TWIG_KINK_ANGLE_RANGE_DEG = (6.0, 22.0)
 TWIG_ONE_KINK_CHANCE = 0.6  # vs. two kinks the rest of the time
 
-# Leaf ("oak leaf" — the task's own naming): a solid blade whose OUTLINE is
-# a NARROW "spine" envelope with explicit, seed-placed OUTWARD LOBE BUMPS
-# added on top (each a gaussian bump centered at its own t, see
-# build_leaf_piece's half_width_at) — rather than either the earlier single
-# continuous taper (no lobes at all) or two interim attempts within this
-# same task pass: connecting just the lobe-tip/sinus EXTREMA with straight
-# segments (zigzagged like a lightning bolt, and broke the cap's
-# fan-from-center triangulation), then a pure cosine ripple modulating the
-# envelope (which could land a lobe's peak exactly at the tip/base where the
-# envelope itself pinches to zero, silently swallowing that lobe depending
-# on the random phase — see build_leaf_piece's docstring for the full
-# history). ADDING explicit bumps at explicit centers, instead of trying to
-# carve lobes out of a taper via subtraction or modulation, guarantees every
-# lobe is a real, independently visible, independently seed-varied outward
-# bulge regardless of where it falls along the taper. See
-# build_leaf_piece's docstring for the resulting tri-budget math.
-LEAF_LENGTH_RANGE_MM = (6.0, 11.0)
-# Widest LOBE's half-width, as a fraction of length — an oak leaf reads
-# noticeably broader relative to its length than the old lanceolate taper
-# did (LEAF_WIDTH_FRACTION_RANGE was 0.42-0.62).
-LEAF_WIDTH_FRACTION_RANGE = (0.55, 0.78)
-LEAF_THICKNESS_RANGE_MM = (0.4, 0.6)  # resin thickness floor (task: "~0.4mm+")
-LEAF_ENVELOPE_TAPER_POWER = 0.85  # >1 sharpens the overall taper, <1 fills it
-                                   # out into a fuller belly (a real oak
-                                   # leaf's overall silhouette, before lobing,
-                                   # is fuller than a willow leaf's point)
-LEAF_SPINE_WIDTH_FRACTION = 0.30  # the un-lobed "spine" width connecting
-                                   # lobes, as a fraction of the full
-                                   # half_width_mm — lobe bumps add ON TOP of
-                                   # this, so a deep sinus between two lobes
-                                   # still reads as a real leaf edge, not a
-                                   # pinch back to nothing. Narrower than an
-                                   # earlier 0.40 so lobes read as distinct
-                                   # rounded bulges rather than a gentle
-                                   # ripple on an already-wide taper (user
-                                   # report on the first working-but-too-
-                                   # subtle render).
-# How many lobes ripple down EACH side — seed-varied per the task's
-# "seed-vary lobe count/size" ask.
-LEAF_LOBE_COUNT_RANGE = (2, 3)
-LEAF_LOBE_SPAN = (0.12, 0.90)  # t-range (base to tip) lobe centers are
-                                # placed within — kept off both the stem
-                                # junction and the very tip so neither gets
-                                # swallowed by a lobe bump
-LEAF_LOBE_CENTER_JITTER_FRACTION = 0.12  # per-lobe center jitter, as a
-                                          # fraction of the even spacing
-                                          # between lobes — organic
-                                          # irregularity, not a perfectly
-                                          # even comb of bumps
-LEAF_LOBE_AMPLITUDE_RANGE = (0.90, 1.20)  # per-lobe peak height, as a
-                                           # fraction of (1 - spine_fraction)
-                                           # — how far a lobe reaches toward
-                                           # (and slightly past) the full
-                                           # envelope width; the task's own
-                                           # "seed-vary lobe size". Raised
-                                           # from an earlier (0.75,1.05) —
-                                           # same "make lobes distinct, not
-                                           # subtle" reasoning as
-                                           # LEAF_SPINE_WIDTH_FRACTION above.
-LEAF_LOBE_SIGMA_FRACTION = 0.40  # each lobe's gaussian bump width, as a
-                                  # fraction of the even spacing between
-                                  # lobe centers — narrower reads as more
-                                  # sharply scalloped, wider as gentler.
-                                  # Narrowed from an earlier 0.55 so
-                                  # adjacent lobes don't blur into one wide
-                                  # bulge — a real sinus dip shows between
-                                  # them.
-# Sample points per side, evaluated ALONG the blade (t in 0..1): every lobe
-# center plus one sinus/base sample between consecutive lobes/ends, so each
-# lobe's peak is always captured exactly rather than hoping a fixed grid
-# happens to land near it — see build_leaf_piece's side_points. With
-# LEAF_LOBE_COUNT_RANGE's max of 3 lobes that's 3 lobe samples + 4
-# in-between samples (before the first lobe, between each pair, after the
-# last) = 7 blade samples, plus 2 more for the stem nub — see
-# build_leaf_piece's docstring for the resulting tri count.
-LEAF_STEM_LENGTH_FRACTION = 0.11  # stem nub length, as a fraction of blade length
-LEAF_STEM_WIDTH_FRACTION = 0.09  # stem nub half-width, as a fraction of the widest lobe
-LEAF_MIDRIB_FRACTION = 0.16  # midrib ridge height, as a fraction of thickness —
-                              # added SYMMETRICALLY to both faces (see
-                              # build_leaf_piece), so local wall thickness only
-                              # ever grows at the ridge, never thins below
-                              # LEAF_THICKNESS_RANGE_MM. Lowered from an
-                              # earlier 0.35 (which, combined with the old
-                              # LEAF_CUP_FRACTION, made leaves read as puffy
-                              # pillows instead of flat blades — user report) —
-                              # a subtle ridge, not a raised spine.
-LEAF_MIDRIB_SHARPNESS = 2.6  # higher = narrower ridge
-LEAF_CUP_FRACTION = 0.25  # edge lift (canoe curl), as a fraction of thickness —
-                           # a whole-cross-section Z offset shared by both faces
-                           # (see build_leaf_piece), so it curls the blade
-                           # without touching local wall thickness at all.
-                           # Lowered from an earlier 0.55 for the same
-                           # "flat and thin, not puffy" reason as
-                           # LEAF_MIDRIB_FRACTION above.
-LEAF_OUTLINE_JITTER_FRACTION = 0.08  # per-lobe outline noise, fraction of half-width
-
 # Grass: a thin upright blade/fin, WIDTH tapering to a near-point tip while
 # THICKNESS stays constant (only width tapers — see build_grass_piece).
 GRASS_HEIGHT_RANGE_MM = (8.0, 16.0)
@@ -656,8 +558,8 @@ GRASS_LEAN_ANGLE_RANGE_DEG = (8.0, 32.0)  # total lean accumulated over the full
 # same "rings bridged by quads" mechanism as build_twig_piece/
 # build_grass_piece) rather than two separate parts glued together, so it
 # is one closed shell by construction — no boolean, no seam. The apex ring
-# collapses to radius 0 (every ring vertex lands at the same point) exactly
-# like build_leaf_piece's pinch-point caps; cleanup_shell_bm's
+# collapses to radius 0 (every ring vertex lands at the same point) — a
+# deliberate coincident-vertex pinch; cleanup_shell_bm's
 # remove_doubles/dissolve_degenerate pass (run on every piece, see that
 # function's docstring) welds the resulting degenerate quads into a proper
 # triangle fan, so no separate fan-cap code is needed at the tip either —
@@ -935,15 +837,15 @@ CANONICAL_MM = {"pebble": PEBBLE_CANONICAL_MM, "rock": ROCK_CANONICAL_MM}
 # The full Generated-kind set (docs/SCATTER.md pins the enum in
 # scatter.rs's GeneratedPieceKind): "pebble"/"rock" are noise-displaced
 # icospheres built from a CANONICAL_MM scalar (build_generated_piece);
-# "twig"/"leaf"/"grass"/"mushroom" are swept/extruded solids, each with its
+# "twig"/"grass"/"mushroom" are swept/extruded solids, each with its
 # own size RANGE baked into its own build function (build_twig_piece/
-# build_leaf_piece/build_grass_piece/build_mushroom_piece) rather than a
+# build_grass_piece/build_mushroom_piece) rather than a
 # single CANONICAL_MM scalar — see those functions' docstrings for why a
 # range reads better than one canonical size for organic debris.
 # validate_pieces checks membership in this set (not CANONICAL_MM) so these
 # non-icosphere kinds are accepted without needing a fake CANONICAL_MM
 # entry.
-GENERATED_KINDS = frozenset({"pebble", "rock", "twig", "leaf", "grass", "mushroom"})
+GENERATED_KINDS = frozenset({"pebble", "rock", "twig", "grass", "mushroom"})
 
 
 def validate_pieces(pieces_json, asset_paths):
@@ -1147,15 +1049,15 @@ def build_twig_piece(rng, scale_range, scale_factor):
     built from a fixed radius around a single center point), so
     cleanup_shell_bm's triangulate step can turn the hexagonal caps and the
     quad side walls into triangles with no manual fan triangulation needed
-    here, unlike build_leaf_piece's non-planar caps.
+    here.
 
     Because the spine now lives in local X (not Z), bottom_local/
     height_local (still measured along Z, same as every build_* function)
     come out as roughly the tube's own RADIUS, not its length — place_piece
     then embeds the twig by that small radius, and align_to_surface's
     local-Z-to-normal tilt lays the whole spine flush against the terrain
-    with whatever heading `yaw` picked, exactly the mechanism
-    build_leaf_piece already uses (see its own docstring) — no separate
+    with whatever heading `yaw` picked, exactly the lie-flat mechanism the
+    "lies_flat" comment block above describes — no separate
     "lay flat" rotation needed here, just building it right-side-around in
     the first place.
 
@@ -1227,187 +1129,6 @@ def build_twig_piece(rng, scale_range, scale_factor):
 
     bm.faces.new(rings[0])
     bm.faces.new(tuple(reversed(rings[-1])))
-
-    bmesh.ops.scale(bm, vec=Vector((final_scale,) * 3), verts=bm.verts)
-    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
-
-    min_z = min((v.co.z for v in bm.verts), default=0.0)
-    max_z = max((v.co.z for v in bm.verts), default=0.0)
-    bottom_local = -min_z
-    height_local = max(1e-6, max_z - min_z)
-    size_mm = length_mm * final_scale
-    return bm, size_mm, bottom_local, height_local
-
-
-def build_leaf_piece(rng, scale_range, scale_factor):
-    """An oak leaf: a solid blade whose outline is a narrow un-lobed SPINE
-    envelope (LEAF_SPINE_WIDTH_FRACTION) with explicit, seed-placed OUTWARD
-    LOBE BUMPS added on top — a gaussian bump per lobe, each centered at its
-    own (seed-jittered) point along the length, reaching (seed-varied)
-    toward the full half_width_mm. This is the THIRD leaf outline this task
-    pass tried, after two that didn't work (see the "Leaf" constants
-    block's own comment for the full history: a single continuous taper had
-    no lobes at all; connecting just the lobe-tip/sinus extrema with
-    straight segments zigzagged like a lightning bolt AND broke the cap's
-    fan-from-center triangulation; a pure cosine ripple modulating the
-    envelope could silently land a lobe's peak exactly at the pinched
-    tip/base depending on the random phase, losing that lobe entirely).
-    ADDING bumps at EXPLICIT centers — rather than subtracting notches out
-    of a taper, or modulating a periodic wave against it — sidesteps both
-    failure modes at once: every lobe is guaranteed visible (it's placed,
-    not hoped-for from a phase alignment), and `side_points` samples the
-    outline AT each lobe's own center (not a fixed independent grid), so a
-    lobe's peak is never missed regardless of where it randomly falls.
-
-    Caps are a single N-GON per side (bm.faces.new(ring), same convention
-    build_twig_piece's ring caps use) rather than a manual fan from a center
-    vertex — the module's own cleanup_shell_bm (called on every piece, see
-    its docstring) already triangulates every face via Blender's own
-    ear-clip triangulator, which handles any simple (non-self-intersecting)
-    polygon correctly regardless of whether it's star-shaped from any
-    particular point. This outline can never self-intersect by construction
-    regardless of how the lobe bumps land: every "lefts" vertex has x <= 0
-    and every "rights" vertex has x >= 0 (mirrored), the two chains only
-    ever touch at their shared pinch-point vertices (never cross), and `t`
-    (hence the length-axis coordinate) is strictly increasing within each
-    chain — so the earlier zigzag version's breakage was specifically the
-    fan-from-center step, not the boundary polygon itself, which is why
-    switching the cap to n-gon-plus-ear-clip-triangulate is the actual fix,
-    not just a side effect of smoother sampling.
-
-    Tri budget (task: "~30-60 tris; at carpet density a heavy leaf explodes
-    STL size"): the boundary loop has `2 * (num_lobes + num_lobes+1 + 2)`
-    vertices (one sample per lobe, one more between/around them, plus 2
-    stem points, doubled for both sides) — 16 for 2 lobes, 18 for 3. An
-    M-vertex n-gon triangulates to M-2 tris, so each cap costs M-2 tris (2
-    caps); the side band is one quad (2 tris) per boundary edge = 2*M.
-    Total tris: 4*M-4, i.e. 60 for 2 lobes, 68 for 3 — landing at/just above
-    the task's "~30-60" target (traded deliberately for enough resolution
-    to read as actual rounded lobes — see this function's own verification
-    render), still far below the ~230-tri cost the original
-    LEAF_BOUNDARY_SAMPLES=14 dense-sampled taper carried.
-
-    The stem-tip/leaf-tip pinch points (t=-LEAF_STEM_LENGTH_FRACTION and
-    t=1, where the left/right boundary samples coincide) produce duplicate
-    coincident vertices by construction — cleanup_shell_bm's
-    remove_doubles/dissolve_degenerate pass (run on every piece by the
-    caller, same as build_generated_piece) welds them and drops the
-    resulting degenerate triangles, the same "near-zero sliver" handling
-    the module docstring's MERGE_DIST_MM comment already names.
-
-    Returns the same (bm, size_mm, bottom_local, height_local) shape as
-    every other build_* function. Length runs along local +Y (not +Z like
-    the round pieces) so a leaf lies flush against the terrain — its local
-    +Z (the top/bottom thickness axis) is what align_to_surface tilts to
-    the local normal, top face up, the same "which local axis becomes
-    vertical" convention place_piece already applies uniformly (see the
-    "lies_flat" comment block earlier in this file).
-    """
-    length_mm = rng.uniform(*LEAF_LENGTH_RANGE_MM)
-    half_width_mm = length_mm * rng.uniform(*LEAF_WIDTH_FRACTION_RANGE)
-    thickness_mm = rng.uniform(*LEAF_THICKNESS_RANGE_MM)
-    user_scale = rng.uniform(scale_range[0], scale_range[1])
-    final_scale = max(1e-6, user_scale * scale_factor)
-
-    # All rng draws for the outline happen in this one fixed-order block
-    # (same discipline build_twig_piece's kink draws follow), before any
-    # geometry is built.
-    num_lobes = rng.randint(*LEAF_LOBE_COUNT_RANGE)
-    lobe_span_lo, lobe_span_hi = LEAF_LOBE_SPAN
-    even_spacing = (lobe_span_hi - lobe_span_lo) / num_lobes
-    lobe_sigma = max(1e-4, even_spacing * LEAF_LOBE_SIGMA_FRACTION)
-    lobe_centers = []
-    lobe_amps = []
-    for i in range(num_lobes):
-        even_t = lobe_span_lo + even_spacing * (i + 0.5)
-        jitter_t = rng.uniform(-1.0, 1.0) * even_spacing * LEAF_LOBE_CENTER_JITTER_FRACTION
-        lobe_centers.append(clamp(even_t + jitter_t, lobe_span_lo, lobe_span_hi))
-        lobe_amps.append((1.0 - LEAF_SPINE_WIDTH_FRACTION) * rng.uniform(*LEAF_LOBE_AMPLITUDE_RANGE))
-    # Independent left/right width scale for natural (not perfectly
-    # mirrored) asymmetry — small, so it still reads as one coherent leaf.
-    left_asym = rng.uniform(0.92, 1.08)
-    right_asym = rng.uniform(0.92, 1.08)
-    outline_offset = Vector((rng.uniform(-1000.0, 1000.0) for _ in range(3)))
-    midrib_height = LEAF_MIDRIB_FRACTION * thickness_mm
-    cup_height = LEAF_CUP_FRACTION * thickness_mm
-
-    def half_width_at(t, asym):
-        # t in [0, 1] along the blade, base to tip. envelope pinches both
-        # ends toward 0 (sin(pi*t)); the SPINE width rides at
-        # LEAF_SPINE_WIDTH_FRACTION of that envelope everywhere, and each
-        # lobe ADDS a gaussian bump on top, reaching further out toward the
-        # full envelope width at its own center. Bumps are additive (never
-        # subtractive), so the outline can only ever bulge OUT from the
-        # spine, never fold back past the centerline.
-        envelope = max(0.0, math.sin(math.pi * t)) ** LEAF_ENVELOPE_TAPER_POWER
-        bump = 0.0
-        for center, amp in zip(lobe_centers, lobe_amps):
-            d = (t - center) / lobe_sigma
-            bump += amp * math.exp(-(d * d))
-        shape = LEAF_SPINE_WIDTH_FRACTION + bump
-        p = Vector((t * 3.0 + outline_offset.x, outline_offset.y, outline_offset.z))
-        wobble = 1.0 + LEAF_OUTLINE_JITTER_FRACTION * noise.noise(p)
-        return max(0.0, half_width_mm * envelope * shape * wobble * asym)
-
-    # Sample AT each lobe's own center (never missing a peak, see this
-    # function's docstring) plus one sample between/around each pair —
-    # before the first lobe, between consecutive lobes, and after the last
-    # — so sinuses are captured too, then the stem nub and tip close it off.
-    blade_ts = [lobe_span_lo * 0.5]
-    for i, center in enumerate(lobe_centers):
-        blade_ts.append(center)
-        next_bound = lobe_centers[i + 1] if i + 1 < len(lobe_centers) else 1.0
-        blade_ts.append((center + next_bound) / 2.0)
-    blade_ts = sorted(set(t for t in blade_ts if 0.0 < t < 1.0)) + [1.0]
-
-    def side_points(asym):
-        pts = [
-            (-LEAF_STEM_LENGTH_FRACTION, LEAF_STEM_WIDTH_FRACTION * 0.5 * half_width_mm * asym),
-            (0.0, LEAF_STEM_WIDTH_FRACTION * half_width_mm * asym),
-        ]
-        for t in blade_ts:
-            pts.append((t, half_width_at(t, asym)))
-        return pts
-
-    left_points = side_points(left_asym)
-    right_points = side_points(right_asym)
-    lefts = [(t * length_mm, -hw) for t, hw in left_points]
-    rights = [(t * length_mm, hw) for t, hw in right_points]
-    loop = lefts + list(reversed(rights))  # closed boundary, one full lap
-
-    def cap_z(sign, side_frac):
-        # sign = +1 (top) / -1 (bottom). midrib is a SYMMETRIC bulge (both
-        # faces pushed apart, so local thickness only ever grows); cup is a
-        # shared Z offset (both faces shifted the SAME direction, so it
-        # curls the whole cross-section without touching local thickness).
-        midrib = midrib_height * math.exp(-((side_frac * LEAF_MIDRIB_SHARPNESS) ** 2))
-        cup_offset = cup_height * (side_frac ** 2)
-        return sign * (thickness_mm / 2.0 + midrib) + cup_offset
-
-    bm = bmesh.new()
-
-    def make_cap(sign):
-        # A single n-gon per cap (see this function's docstring for why —
-        # cleanup_shell_bm's triangulate() does the actual splitting, same
-        # convention build_twig_piece's ring caps use), wound so
-        # recalc_face_normals (called once for the whole piece below) has
-        # a consistent starting orientation to work from.
-        ring_verts = []
-        for y, x in loop:
-            side_frac = 0.0 if half_width_mm <= 1e-9 else x / half_width_mm
-            z = cap_z(sign, side_frac)
-            ring_verts.append(bm.verts.new(Vector((x, y, z))))
-        face = ring_verts if sign > 0 else list(reversed(ring_verts))
-        bm.faces.new(face)
-        return ring_verts
-
-    top_ring = make_cap(1.0)
-    bottom_ring = make_cap(-1.0)
-
-    m = len(top_ring)
-    for i in range(m):
-        i2 = (i + 1) % m
-        bm.faces.new((top_ring[i], top_ring[i2], bottom_ring[i2], bottom_ring[i]))
 
     bmesh.ops.scale(bm, vec=Vector((final_scale,) * 3), verts=bm.verts)
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
@@ -1521,7 +1242,6 @@ def build_mushroom_piece(rng, scale_range, scale_factor):
     than the stem with a defined rim/underside" the task calls for. The
     apex ring's radius is 0 — every one of its MUSHROOM_RING_VERTS vertices
     lands at the exact same point, a deliberate coincident-vertex pinch
-    (same trick build_leaf_piece's two end caps use, see its own docstring)
     that cleanup_shell_bm's remove_doubles/dissolve_degenerate pass (run on
     every piece, see that function's docstring) collapses into a proper
     triangle fan — no separate top-cap code needed. The base ring (radius
@@ -1530,8 +1250,8 @@ def build_mushroom_piece(rng, scale_range, scale_factor):
 
     Cap rings (rim + shoulder, not the stem) get a small per-vertex radius
     jitter (MUSHROOM_CAP_OUTLINE_JITTER_FRACTION) for seed-varied lobe/rim
-    irregularity — same "noise.noise on a per-sample offset" idea
-    build_leaf_piece's outline uses, kept off the stem so it stays a clean
+    irregularity — a "noise.noise on a per-sample offset" idea, kept off
+    the stem so it stays a clean
     read as a narrow stalk under the more organic cap.
 
     Returns the same (bm, size_mm, bottom_local, height_local) shape every
@@ -1966,10 +1686,6 @@ def scatter(job, debug):
                     )
                 elif key == "twig":
                     bm, size_mm, bottom_local, height_local = build_twig_piece(
-                        layer_rng, scale_range, scale_factor
-                    )
-                elif key == "leaf":
-                    bm, size_mm, bottom_local, height_local = build_leaf_piece(
                         layer_rng, scale_range, scale_factor
                     )
                 elif key == "grass":
