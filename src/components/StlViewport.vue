@@ -46,6 +46,7 @@ const emit = defineEmits<{
 
 const container = ref<HTMLDivElement | null>(null);
 const isLoading = ref(false);
+const cropSize = ref(0);
 
 // Keep in sync with LOOK.base_color in render_mini.py
 const DEFAULT_COLOR: [number, number, number] = [0.85, 0.65, 0.43];
@@ -792,11 +793,16 @@ watch(
 
 onMounted(() => {
   if (!container.value) return;
+  cropSize.value = Math.min(
+    container.value.clientWidth,
+    container.value.clientHeight,
+  );
   setupScene(container.value);
   resizeObserver = new ResizeObserver(() => {
     if (!renderer || !camera || !container.value) return;
     const { clientWidth, clientHeight } = container.value;
     if (!clientWidth || !clientHeight) return;
+    cropSize.value = Math.min(clientWidth, clientHeight);
     renderer.setSize(clientWidth, clientHeight);
     camera.aspect = clientWidth / clientHeight;
     camera.updateProjectionMatrix();
@@ -861,17 +867,23 @@ onBeforeUnmount(() => {
       <!-- The render is square; this guide marks the actual capture area
            inside the rectangular viewport -->
       <div
-        class="absolute inset-0 flex items-center justify-center pointer-events-none"
+        class="absolute inset-0 flex items-center justify-center overflow-hidden rounded-box pointer-events-none"
       >
         <div
-          class="h-full max-w-full aspect-square border-x border-dashed border-white/15"
+          class="shrink-0 border-2 border-dashed border-warning/80"
+          :style="{
+            width: `${cropSize}px`,
+            height: `${cropSize}px`,
+            boxShadow: '0 0 0 9999px rgb(0 0 0 / 32%)',
+          }"
         ></div>
       </div>
       <div
         class="absolute bottom-2 left-2 text-xs text-base-content/40 pointer-events-none"
       >
         drag ring: rotate on axis · drag: free rotate · right-drag: orbit ·
-        middle/shift-drag: pan · wheel: zoom · dashed lines: render crop
+        middle/shift-drag: inspect only · wheel: zoom · amber square: render
+        crop
       </div>
       <div
         v-if="spaceMouse.connected.value"

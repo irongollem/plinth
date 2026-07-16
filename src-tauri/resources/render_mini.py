@@ -133,29 +133,30 @@ LOOK = dict(
         # studio rig. AgX is Blender's available filmic equivalent: unlike
         # Standard it keeps the hot cream highlights detailed while its
         # high-contrast look lets unfilled cavities stay genuinely dark.
-        key_color        = (1.0, 0.78, 0.52),
-        fill_color       = (0.86, 0.62, 0.40),
+        key_color        = (1.0, 0.90, 0.48),
+        fill_color       = (0.34, 0.48, 0.76),
         rim_color        = (1.0, 0.56, 0.30),
-        key_energy_mult  = 1.08,
+        key_energy_mult  = 0.90,
         key_size_mult    = 0.42,
-        fill_energy_mult = 0.16,
+        fill_energy_mult = 0.14,
         rim_energy_mult  = 0.75,
         rim_size_mult    = 0.55,
         sss_weight_mult  = 0.30,
-        exposure_shift   = -0.20,
+        exposure_shift   = -0.30,
+        color_saturation = 1.04,
         # A dim studio environment reaches cavities that all three area
         # lights can be occluded from. Camera rays still see pure black.
-        world_color      = (0.72, 0.62, 0.52),
-        world_strength   = 0.14,
+        world_color      = (0.58, 0.60, 0.66),
+        world_strength   = 0.06,
     ),
     translucent = dict(
         # Geometry-driven cured-resin translucency. Thin shells transmit the
         # warm rear light; thick bodies naturally remain opaque.
-        sss_weight       = 0.48,
+        sss_weight       = 0.32,
         sss_radius       = (1.0, 0.32, 0.12),
-        sss_scale        = 0.18,
+        sss_scale        = 0.12,
         transmission     = 0.04,
-        backlight_mult   = 1.65,
+        backlight_mult   = 1.35,
         backlight_color  = (1.0, 0.34, 0.08),
     ),
 )
@@ -475,6 +476,12 @@ def resin_material(obj, color, look="flat", translucent=False):
     # materials already carry the default Principled BSDF + Output nodes
     m = bpy.data.materials.new("Resin")
     b = m.node_tree.nodes.get("Principled BSDF")
+    if look == "marmoset":
+        # Toolbag reference: richer resin beneath a warm key and cool fill.
+        # Work in linear RGB, preserving luminance while expanding chroma.
+        sat = LOOK["marmoset"]["color_saturation"]
+        lum = 0.2126*color[0] + 0.7152*color[1] + 0.0722*color[2]
+        color = tuple(max(0.0, min(1.0, lum + (c-lum)*sat)) for c in color)
     b.inputs["Base Color"].default_value = tuple(color)+(1.0,)
     b.inputs["Metallic"].default_value = 0.0
     b.inputs["Roughness"].default_value = LOOK["roughness"]

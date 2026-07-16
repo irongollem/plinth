@@ -8,7 +8,7 @@ use super::{
     ReleaseSummary,
 };
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Open (and if needed initialize) the catalog database.
 pub fn open(db_path: &Path) -> Result<Connection, AppError> {
@@ -299,6 +299,24 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
     // is just a drop-and-rebuild. Existing dbs kept the old default-tokenizer
     // table via IF NOT EXISTS; replace it and repopulate from current models.
     if version < 5 {
+        conn.execute("DROP TABLE IF EXISTS models_fts", [])
+            .map_err(|e| AppError::ConfigError(format!("Failed to drop old FTS: {}", e)))?;
+        conn.execute(
+            "CREATE VIRTUAL TABLE models_fts USING fts5(
+                 name, description, tags, dir_path, tokenize = 'trigram')",
+            [],
+        )
+        .map_err(|e| AppError::ConfigError(format!("Failed to create trigram FTS: {}", e)))?;
+        rebuild_fts(conn)
+            .map_err(|e| AppError::ConfigError(format!("Failed to rebuild FTS: {}", e)))?;
+    }
+
+    // v6/v7: logical group names are what catalog cards display, but the
+    // first index omitted them. Some development databases were also stamped
+    // v5/v6 while their FTS table still had SQLite's default whole-word
+    // tokenizer. Replace (rather than merely refill) this derived table so
+    // existing catalogs genuinely gain partial trigram matching.
+    if version >= 5 && version < 7 {
         conn.execute("DROP TABLE IF EXISTS models_fts", [])
             .map_err(|e| AppError::ConfigError(format!("Failed to drop old FTS: {}", e)))?;
         conn.execute(
@@ -702,6 +720,7 @@ fn fts_insert_select() -> String {
             "COALESCE((SELECT group_concat(t.tag, ' ') FROM model_tags t
                        WHERE t.dir_path = m.dir_path), '')
                  || ' ' || COALESCE(r.display_name, '')
+                 || ' ' || COALESCE(m.group_name, '')
                  || ' ' || COALESCE(u.designer, m.designer, '')
                  || ' ' || COALESCE(u.sculptor, m.sculptor, '')
                  || ' ' || COALESCE(u.release_name, m.release_name, '')
@@ -4019,6 +4038,39 @@ mod tests {
     }
 
     #[test]
+    fn v6_default_tokenizer_is_replaced_with_trigram_fts() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+
+        // Reproduce the deployed failure: version metadata claimed the FTS
+        // migration had run while the physical table was still whole-word.
+        conn.execute_batch(
+            "DROP TABLE models_fts;
+             CREATE VIRTUAL TABLE models_fts USING fts5(
+                 name, description, tags, dir_path
+             );
+             PRAGMA user_version = 6;",
+        )
+        .unwrap();
+        rebuild_fts(&conn).unwrap();
+        assert_eq!(search(&conn, "new", &[], 10, 0).unwrap().total, 0);
+
+        init_schema(&conn).unwrap();
+
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'models_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("trigram"));
+        assert_eq!(search(&conn, "new", &[], 10, 0).unwrap().total, 1);
+    }
+
+    #[test]
     fn model_columns_self_heal_on_a_version_stamped_db() {
         // Sibling failure: user_version stamped before the group_name ALTER
         // existed in code — the version gate then skipped it forever ("no
@@ -4084,6 +4136,24 @@ mod tests {
         // FTS still finds the group through any variant's name
         let page = search_groups(&conn, "galeb", &[], None, "name", 10, 0).unwrap();
         assert_eq!(page.total, 1);
+
+        // The displayed logical title is independently searchable. Variant
+        // names need not repeat it, and matching is partial + case-insensitive.
+        conn.execute("UPDATE models SET name = 'pose' || pose", [])
+            .unwrap();
+        rebuild_fts(&conn).unwrap();
+        assert_eq!(
+            search_groups(&conn, "gal", &[], None, "name", 10, 0)
+                .unwrap()
+                .total,
+            1
+        );
+        assert_eq!(
+            search_groups(&conn, "GALEB", &[], None, "name", 10, 0)
+                .unwrap()
+                .total,
+            1
+        );
 
         // members ordered: supported A, supported B, unsupported A, ...
         let members = group_members(&conn, "GALEB DUHR").unwrap();
