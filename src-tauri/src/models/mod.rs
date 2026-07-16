@@ -140,6 +140,10 @@ pub struct RenderOptions {
     /// --config. Knob paths and defaults mirror src/utils/renderLookSchema.ts
     #[serde(default)]
     pub look_config: Option<String>,
+    /// Geometry-driven translucent resin: thickness-dependent SSS plus a
+    /// warm rear-light boost. Intended for thin wings, cloth and foliage.
+    #[serde(default)]
+    pub translucent: bool,
     /// Render the configured scale-reference figure beside the model
     /// (settings supply the STL path + height; silently off when unset).
     #[serde(default)]

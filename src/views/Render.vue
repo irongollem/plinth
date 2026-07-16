@@ -219,6 +219,18 @@
 
       <label
         class="label cursor-pointer gap-2 text-sm"
+        title="Uses mesh thickness to make thin wings, cloth and foliage glow under the rear light"
+      >
+        <input
+          type="checkbox"
+          class="checkbox checkbox-sm"
+          v-model="translucent"
+        />
+        Translucent resin
+      </label>
+
+      <label
+        class="label cursor-pointer gap-2 text-sm"
         title="For parts exported around different origins: seats the mini on the part named *base*. Leave off when parts already fit together."
       >
         <input
@@ -759,6 +771,7 @@ const samples = ref(96);
 // "flat" (the handover's locked look) won the three-way comparison against
 // the DTL reference; "resin" adds the physical-print sheen on top of it
 const look = ref<"rich" | "flat" | "resin" | "marmoset">("flat");
+const translucent = ref(false);
 // sRGB of the default linear resin color (0.85, 0.65, 0.43) — pale warm
 // cream, matched against formal DTL product renders
 const DEFAULT_RESIN_HEX = "#edd3af";
@@ -1082,6 +1095,7 @@ const persistRenderSettings = () => {
       resolution: resolution.value,
       samples: samples.value,
       look: look.value,
+      translucent: translucent.value,
       colorHex: colorHex.value,
       advanced: advanced.value,
       branding: brandingPreferences,
@@ -1105,6 +1119,8 @@ const loadRenderSettings = () => {
       resolution.value = saved.resolution;
     if (SAMPLES_OPTIONS.has(saved.samples)) samples.value = saved.samples;
     if (LOOK_OPTIONS.has(saved.look)) look.value = saved.look;
+    if (typeof saved.translucent === "boolean")
+      translucent.value = saved.translucent;
     if (typeof saved.colorHex === "string" && saved.colorHex.startsWith("#"))
       colorHex.value = saved.colorHex;
     // Schema-validated: knobs that vanish in an update (or hand-edited
@@ -1156,6 +1172,7 @@ const exportLook = async () => {
     kind: LOOK_FILE_KIND,
     version: LOOK_FILE_VERSION,
     look: look.value,
+    translucent: translucent.value,
     colorHex: colorHex.value,
     view: { ...view.value },
     resolution: resolution.value,
@@ -1222,6 +1239,15 @@ const importLook = async () => {
     )
   ) {
     look.value = file.look as "rich" | "flat" | "resin" | "marmoset";
+  }
+  if (
+    applyIf(
+      file.translucent !== undefined,
+      typeof file.translucent === "boolean",
+      "translucent resin",
+    )
+  ) {
+    translucent.value = file.translucent as boolean;
   }
   if (
     applyIf(
@@ -1296,6 +1322,7 @@ const resetRenderSettings = () => {
   resolution.value = 1600;
   samples.value = 96;
   look.value = "flat";
+  translucent.value = false;
   colorHex.value = DEFAULT_RESIN_HEX;
   advanced.value = {};
   Object.assign(branding, BRANDING_DEFAULTS);
@@ -1311,6 +1338,7 @@ watch(
     resolution,
     samples,
     look,
+    translucent,
     colorHex,
     advanced,
     branding,
@@ -1423,6 +1451,7 @@ const render = async () => {
     resolution: resolution.value,
     samples: samples.value,
     look: look.value,
+    translucent: translucent.value,
     output_path: outputPath.value || null,
     // The OS save dialog already asked about replacing an explicit choice;
     // default outputs never overwrite — the backend uniquifies with -N

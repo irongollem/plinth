@@ -383,6 +383,11 @@ pub struct MinihoardEntry {
     pub creator_username: Option<String>,
     pub source: Option<String>,
     pub library_added_at: Option<String>,
+    /// Publication date (ISO-8601), when known — the fallback "when is this
+    /// from?" date for the ~88% of entries without a tribe release month.
+    pub published_at: Option<String>,
+    /// Creation date (ISO-8601) — always present; the last-resort date.
+    pub created_at: Option<String>,
     pub yearmonth: Option<String>,
     pub tags: Vec<String>,
     pub downloaded: bool,

@@ -1527,7 +1527,16 @@ export type MinihoardDownloadStatus = { Started: MdStarted } | { ObjectStart: Md
 /**
  * One library object, mirroring minihoard's `list --json` `entry` payload.
  */
-export type MinihoardEntry = { id: number; name: string; creator: string | null; creator_username: string | null; source: string | null; library_added_at: string | null; yearmonth: string | null; tags: string[]; downloaded: boolean }
+export type MinihoardEntry = { id: number; name: string; creator: string | null; creator_username: string | null; source: string | null; library_added_at: string | null; 
+/**
+ * Publication date (ISO-8601), when known — the fallback "when is this
+ * from?" date for the ~88% of entries without a tribe release month.
+ */
+published_at: string | null; 
+/**
+ * Creation date (ISO-8601) — always present; the last-resort date.
+ */
+created_at: string | null; yearmonth: string | null; tags: string[]; downloaded: boolean }
 /**
  * Errors from the typed commands, shaped so the frontend branches on `kind`
  * (a discriminated union in the generated bindings), never on message text —

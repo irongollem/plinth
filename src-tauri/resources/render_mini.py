@@ -148,6 +148,16 @@ LOOK = dict(
         world_color      = (0.72, 0.62, 0.52),
         world_strength   = 0.14,
     ),
+    translucent = dict(
+        # Geometry-driven cured-resin translucency. Thin shells transmit the
+        # warm rear light; thick bodies naturally remain opaque.
+        sss_weight       = 0.48,
+        sss_radius       = (1.0, 0.32, 0.12),
+        sss_scale        = 0.18,
+        transmission     = 0.04,
+        backlight_mult   = 1.65,
+        backlight_color  = (1.0, 0.34, 0.08),
+    ),
 )
 
 # Candidate rotations for the orientation picker. Order is stable — a UI maps
@@ -213,7 +223,8 @@ def parse():
     cfg = dict(paths=[], out=None, rotate=(90,0,0), color=LOOK["base_color"],
                azimuth=-15.0, elev=0.22, zoom=1.15, res=LOOK["res"], samples=LOOK["samples"],
                look="flat", contact=False, sheet_cols=3, sheet_res=420, sheet_samples=24,
-               align=False, batch=None, scale_ref=None, scale_ref_height=28.0, base=None)
+               align=False, translucent=False, batch=None, scale_ref=None,
+               scale_ref_height=28.0, base=None)
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -229,6 +240,7 @@ def parse():
         elif a == "--config":        i+=1  # consumed in pass 1 above
         elif a == "--contact-sheet": cfg["contact"]=True
         elif a == "--align-parts":   cfg["align"]=True
+        elif a == "--translucent":   cfg["translucent"]=True
         elif a == "--sheet-cols":    i+=1; cfg["sheet_cols"]=int(argv[i])
         elif a == "--sheet-res":     i+=1; cfg["sheet_res"]=int(argv[i])
         elif a == "--batch":         i+=1; cfg["batch"]=argv[i]
@@ -458,7 +470,7 @@ def add_standard_base(cfg, obj, dims_mm):
     bpy.context.view_layer.update()
     return base_obj
 
-def resin_material(obj, color, look="flat"):
+def resin_material(obj, color, look="flat", translucent=False):
     # use_nodes is deprecated (always True, no-op) since Blender 5.0 — new
     # materials already carry the default Principled BSDF + Output nodes
     m = bpy.data.materials.new("Resin")
@@ -474,6 +486,15 @@ def resin_material(obj, color, look="flat"):
                       ("Subsurface Radius", LOOK["sss_radius"]),
                       ("Subsurface Scale",  LOOK["sss_scale"])):
         if name in b.inputs: b.inputs[name].default_value = val
+    if translucent:
+        trans = LOOK["translucent"]
+        try: b.subsurface_method = "RANDOM_WALK"
+        except Exception: pass  # Blender versions expose this differently
+        for name, val in (("Subsurface Weight", trans["sss_weight"]),
+                          ("Subsurface Radius", trans["sss_radius"]),
+                          ("Subsurface Scale", trans["sss_scale"]),
+                          ("Transmission Weight", trans["transmission"])):
+            if name in b.inputs: b.inputs[name].default_value = val
     if look == "resin":
         # Cured resin is satin with a tighter glossy layer on top — the
         # dual-lobe "gloss over matte" a single roughness can't give
@@ -492,7 +513,7 @@ def resin_material(obj, color, look="flat"):
         nt.links.new(bump.outputs["Normal"], b.inputs["Normal"])
     obj.data.materials.clear(); obj.data.materials.append(m)
 
-def lights(look="flat"):
+def lights(look="flat", translucent=False):
     # "rich" = the promo-grade tonal shift: a harder (smaller), stronger key
     # against a low fill, so the form rolls from pale cream through warm
     # midtones into deep shadow. All constants live in LOOK["rich"] /
@@ -504,6 +525,8 @@ def lights(look="flat"):
     fill_scale = variant.get("fill_energy_mult", 1.0)
     rim_scale = variant.get("rim_energy_mult", 1.0)
     rim_size = variant.get("rim_size_mult", 1.0)
+    if translucent:
+        rim_scale *= LOOK["translucent"]["backlight_mult"]
     variant_colors = {
         "Key":  variant.get("key_color"),
         "Fill": variant.get("fill_color"),
@@ -516,7 +539,8 @@ def lights(look="flat"):
     }
     def mk(spec, name, energy_scale=1.0, size_scale=1.0):
         d = bpy.data.lights.new(name, "AREA"); d.energy=spec["energy"]*energy_scale; d.size=spec["size"]*size_scale
-        if variant:           d.color = variant_colors[name]
+        if translucent and name == "Rim": d.color = LOOK["translucent"]["backlight_color"]
+        elif variant:         d.color = variant_colors[name]
         elif look == "resin": d.color = resin_colors[name]
         else:                d.color = spec["color"]
         loc = variant.get(name.lower() + "_loc", spec["loc"])
@@ -641,14 +665,14 @@ def build_and_render(cfg, rotate, out, res, samples, index=0, measure=False):
     # here only matters for which prop gets built first.
     base_obj = add_standard_base(cfg, obj, dims_mm)
     ref = add_scale_reference(cfg, obj, dims_mm)
-    resin_material(obj, cfg["color"], cfg["look"])
+    resin_material(obj, cfg["color"], cfg["look"], cfg["translucent"])
     if base_obj is not None:
         # same "stay out of the hero's way" grey as the scale reference
         resin_material(base_obj, BASE_COLOR, cfg["look"])
     if ref is not None:
         # neutral grey: the reference must read as a ruler, not a product
         resin_material(ref, (0.52, 0.54, 0.58), cfg["look"])
-    lights(cfg["look"]); black_world(cfg["look"])
+    lights(cfg["look"], cfg["translucent"]); black_world(cfg["look"])
     stage = [obj]
     if ref is not None: stage.append(ref)
     if base_obj is not None: stage.append(base_obj)
@@ -720,7 +744,7 @@ def run_batch(cfg, manifest_path):
             ecfg["paths"] = e["parts"]
             ecfg["align"] = bool(e.get("align", cfg["align"]))
             for k in ("look", "res", "samples", "azimuth", "elev", "zoom",
-                      "scale_ref", "scale_ref_height", "base"):
+                      "scale_ref", "scale_ref_height", "base", "translucent"):
                 if k in e: ecfg[k] = e[k]
             if "color" in e: ecfg["color"] = tuple(e["color"])
             rotate = tuple(e.get("rotate", (90, 0, 0)))

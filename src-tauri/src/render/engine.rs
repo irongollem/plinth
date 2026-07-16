@@ -503,6 +503,9 @@ pub fn build_render_command(
     if options.align_parts {
         cmd.arg("--align-parts");
     }
+    if options.translucent {
+        cmd.arg("--translucent");
+    }
     // Inline JSON as ONE argv element — no shell is involved, so no quoting
     // or length worries, and concurrent jobs share no temp-file state
     if let Some(config) = options
@@ -789,6 +792,7 @@ mod tests {
             overwrite: false,
             align_parts: false,
             look_config: None,
+            translucent: false,
             scale_reference: false,
             base: None,
         };
@@ -884,6 +888,7 @@ mod tests {
             overwrite: true,
             align_parts: false,
             look_config: Some(r#"{"key":{"energy":1500}}"#.to_string()),
+            translucent: false,
             scale_reference: false,
             base: None,
         };
@@ -947,6 +952,7 @@ mod tests {
             overwrite: true,
             align_parts: false,
             look_config: None,
+            translucent: false,
             scale_reference: false,
             base: None,
         };
@@ -1028,6 +1034,7 @@ mod tests {
             overwrite: false,
             align_parts: false,
             look_config: Some(json.to_string()),
+            translucent: false,
             scale_reference: false,
             base: None,
         };
@@ -1066,6 +1073,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn translucent_material_passes_as_a_flag() {
+        let blender = BlenderInfo {
+            path: "blender".to_string(),
+            version: "Blender 5.1.2".to_string(),
+        };
+        let options = RenderOptions {
+            rotate: (90.0, 0.0, 0.0),
+            color: None,
+            azimuth: None,
+            elevation: None,
+            zoom: None,
+            resolution: None,
+            samples: None,
+            look: Some("marmoset".to_string()),
+            output_path: None,
+            overwrite: false,
+            align_parts: false,
+            look_config: None,
+            translucent: true,
+            scale_reference: false,
+            base: None,
+        };
+        let cmd = build_render_command(
+            &blender,
+            Path::new("render_mini.py"),
+            &["model.stl".to_string()],
+            &options,
+            Path::new("out.png"),
+        );
+        assert!(cmd.as_std().get_args().any(|arg| arg == "--translucent"));
+    }
+
     /// `--base` must carry BOTH the user's nominal footprint and Rust's
     /// already-derived cut (top-face) footprint — the script must never
     /// re-derive the taper shrink itself (docs/BASECUTTER.md "The plinth").
@@ -1090,6 +1130,7 @@ mod tests {
             overwrite: false,
             align_parts: false,
             look_config: None,
+            translucent: false,
             scale_reference: false,
             base: Some(CutterKind::Circle { diameter_mm: 32.0 }),
         };

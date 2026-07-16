@@ -92,11 +92,7 @@ const clearFiles = () => {
       class="border border-base-content/15 rounded-box bg-base-100 p-2 w-full"
     >
       <div class="flex items-center gap-2 mb-3">
-        <button
-          type="button"
-          class="btn btn-primary flex-grow"
-          @click="selectPath"
-        >
+        <button type="button" class="btn btn-primary grow" @click="selectPath">
           <svg
             xmlns="http://www.w3.org/2000/svg"
             class="h-5 w-5 mr-2"
@@ -128,7 +124,7 @@ const clearFiles = () => {
           </thead>
           <tbody>
             <tr v-for="file in modelValue as SelectedFile[]" :key="file.path">
-              <td class="max-w-[200px] truncate" :title="file.name">
+              <td class="max-w-50 truncate" :title="file.name">
                 {{ file.name }}
               </td>
               <td>{{ formatFileSize(file.info.size) }}</td>

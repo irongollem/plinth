@@ -1,6 +1,6 @@
 # Credits — Plinth bundled scatter assets
 
-All nine pieces in this bundle are CC0 (public domain dedication). No
+All pieces in this bundle are CC0 (public domain dedication). No
 attribution is legally owed for any of them, but crediting the source
 institutions/authors is good practice and is recorded here per
 docs/SCATTER.md's "in-app credits panel + CREDITS file when attribution
@@ -51,6 +51,15 @@ National Museum of Natural History, Smithsonian Open Access (CC0)."
 
 Suggested credit line: "Mushroom model by JeremyWoods (OpenGameArt.org),
 CC0."
+
+## Original Plinth procedural assets
+
+The oval leaf, lobed leaf, fallen leaf cluster, grass tuft, broadleaf
+plant, fern frond, crooked twig, and forked twig were generated expressly
+for Plinth from original procedural geometry. They are dedicated to the
+public domain under CC0. The reproducible Blender source is
+`foliage-twigs-source.blend`; its generator is
+`tools/generate_scatter_foliage.py` in the project repository.
 
 ## What did NOT make the bundle
 

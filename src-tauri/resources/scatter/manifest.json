@@ -171,6 +171,86 @@
       "byte_size": 155084,
       "manifold": true,
       "voxel_remesh_used": false
+    },
+    {
+      "id": "leaf-oval",
+      "label": "Oval leaf",
+      "source_file": "leaf-oval.stl",
+      "origin": { "collection": "Original Plinth procedural assets", "source_variant": "tools/generate_scatter_foliage.py / foliage-twigs-source.blend" },
+      "license": "CC0 (original Plinth procedural asset)",
+      "canonical": { "footprint_mm": { "x": 7.197, "y": 3.527 }, "height_mm": 0.386 },
+      "size_reasoning": "A readable fallen leaf at 28-32mm heroic scale, thickened for resin printing.",
+      "tris": 14500, "byte_size": 725084, "manifold": true, "voxel_remesh_used": true
+    },
+    {
+      "id": "leaf-lobed",
+      "label": "Lobed leaf",
+      "source_file": "leaf-lobed.stl",
+      "origin": { "collection": "Original Plinth procedural assets", "source_variant": "tools/generate_scatter_foliage.py / foliage-twigs-source.blend" },
+      "license": "CC0 (original Plinth procedural asset)",
+      "canonical": { "footprint_mm": { "x": 7.8, "y": 4.709 }, "height_mm": 0.405 },
+      "size_reasoning": "Broad lobed silhouette with a reinforced midrib, sized as forest-floor scatter.",
+      "tris": 14500, "byte_size": 725084, "manifold": true, "voxel_remesh_used": true
+    },
+    {
+      "id": "leaf-cluster",
+      "label": "Fallen leaf cluster",
+      "source_file": "leaf-cluster.stl",
+      "origin": { "collection": "Original Plinth procedural assets", "source_variant": "tools/generate_scatter_foliage.py / foliage-twigs-source.blend" },
+      "license": "CC0 (original Plinth procedural asset)",
+      "canonical": { "footprint_mm": { "x": 6.513, "y": 7.516 }, "height_mm": 0.868 },
+      "size_reasoning": "Three fused overlapping leaves make a durable, readable patch without fragile loose shells.",
+      "tris": 14500, "byte_size": 725084, "manifold": true, "voxel_remesh_used": true
+    },
+    {
+      "id": "grass-tuft",
+      "label": "Grass tuft",
+      "source_file": "grass-tuft.stl",
+      "origin": { "collection": "Original Plinth procedural assets", "source_variant": "tools/generate_scatter_foliage.py / foliage-twigs-source.blend" },
+      "license": "CC0 (original Plinth procedural asset)",
+      "canonical": { "footprint_mm": { "x": 5.425, "y": 5.857 }, "height_mm": 5.976 },
+      "size_reasoning": "Compact 6.4mm tuft with deliberately thick printable blades and a buried root mass.",
+      "tris": 14500, "byte_size": 725084, "manifold": true, "voxel_remesh_used": true
+    },
+    {
+      "id": "broadleaf-plant",
+      "label": "Broadleaf plant",
+      "source_file": "broadleaf-plant.stl",
+      "origin": { "collection": "Original Plinth procedural assets", "source_variant": "tools/generate_scatter_foliage.py / foliage-twigs-source.blend" },
+      "license": "CC0 (original Plinth procedural asset)",
+      "canonical": { "footprint_mm": { "x": 7.954, "y": 8.48 }, "height_mm": 2.132 },
+      "size_reasoning": "Low rosette-style undergrowth that survives placement sink while retaining a broad silhouette.",
+      "tris": 14500, "byte_size": 725084, "manifold": true, "voxel_remesh_used": true
+    },
+    {
+      "id": "fern",
+      "label": "Fern frond",
+      "source_file": "fern.stl",
+      "origin": { "collection": "Original Plinth procedural assets", "source_variant": "tools/generate_scatter_foliage.py / foliage-twigs-source.blend" },
+      "license": "CC0 (original Plinth procedural asset)",
+      "canonical": { "footprint_mm": { "x": 6.157, "y": 0.79 }, "height_mm": 5.643 },
+      "size_reasoning": "Small upright frond with fused leaflets and a reinforced central stem for resin printing.",
+      "tris": 14500, "byte_size": 725084, "manifold": true, "voxel_remesh_used": true
+    },
+    {
+      "id": "twig-straight",
+      "label": "Crooked twig",
+      "source_file": "twig-straight.stl",
+      "origin": { "collection": "Original Plinth procedural assets", "source_variant": "tools/generate_scatter_foliage.py / foliage-twigs-source.blend" },
+      "license": "CC0 (original Plinth procedural asset)",
+      "canonical": { "footprint_mm": { "x": 11.078, "y": 1.259 }, "height_mm": 1.087 },
+      "size_reasoning": "An 11mm fallen twig, thick enough to print and naturally oriented flat on the base.",
+      "tris": 14500, "byte_size": 725084, "manifold": true, "voxel_remesh_used": true
+    },
+    {
+      "id": "twig-forked",
+      "label": "Forked twig",
+      "source_file": "twig-forked.stl",
+      "origin": { "collection": "Original Plinth procedural assets", "source_variant": "tools/generate_scatter_foliage.py / foliage-twigs-source.blend" },
+      "license": "CC0 (original Plinth procedural asset)",
+      "canonical": { "footprint_mm": { "x": 11.078, "y": 5.433 }, "height_mm": 1.087 },
+      "size_reasoning": "A wider forked forest-floor silhouette, kept low so placement sink produces strong joints.",
+      "tris": 14500, "byte_size": 725084, "manifold": true, "voxel_remesh_used": true
     }
   ]
 }

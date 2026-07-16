@@ -239,7 +239,8 @@ const months = computed(() => {
   const set = new Set<string>();
   let hasUndated = false;
   for (const e of entries.value) {
-    if (e.yearmonth) set.add(e.yearmonth);
+    const m = entryMonth(e);
+    if (m) set.add(m);
     else hasUndated = true;
   }
   return { sorted: [...set].sort().reverse(), hasUndated };
@@ -247,6 +248,43 @@ const months = computed(() => {
 
 /** "YYYYMM" -> "YYYY-MM". */
 const formatMonth = (ym: string) => `${ym.slice(0, 4)}-${ym.slice(4, 6)}`;
+
+/* The best "when is this from?" month for an entry: the tribe release month if
+   present (only ~12% of the library), else the publication date, else the
+   creation date (always present). So the column shows a real date instead of a
+   dash for the Patreon/Kickstarter shares and purchases that carry no release
+   month. */
+const isoToYearMonth = (iso: string) => iso.slice(0, 4) + iso.slice(5, 7);
+const entryMonth = (e: MinihoardEntry): string | null => {
+  if (e.yearmonth) return e.yearmonth;
+  if (e.published_at) return isoToYearMonth(e.published_at);
+  if (e.created_at) return isoToYearMonth(e.created_at);
+  return null;
+};
+/* Which date entryMonth came from, so a release month and a publication date
+   aren't silently conflated — surfaced as a tooltip on the cell. */
+const monthTitle = (e: MinihoardEntry): string => {
+  if (e.yearmonth) return "Tribe release month";
+  if (e.published_at) return `Published ${e.published_at.slice(0, 10)}`;
+  if (e.created_at) return `Created ${e.created_at.slice(0, 10)}`;
+  return "no date";
+};
+
+/* Source channel codes → friendlier labels; the raw code stays as a tooltip.
+   Unknown codes pass through as-is. */
+const SOURCE_LABELS: Record<string, string> = {
+  TRIBE: "Tribes",
+  USER_GROUP: "Shared",
+  PURCHASE: "Purchase",
+  FRONTIER: "Frontier",
+};
+const sourceLabel = (s: string) => SOURCE_LABELS[s] ?? s;
+const sourceTitle = (s: string) =>
+  s === "USER_GROUP"
+    ? "Shared by the creator (usually Patreon/Kickstarter) — USER_GROUP"
+    : s === "TRIBE"
+      ? "MyMiniFactory Tribes — TRIBE"
+      : s;
 
 const filteredEntries = computed(() => {
   const q = search.value.trim().toLowerCase();
@@ -256,8 +294,8 @@ const filteredEntries = computed(() => {
       return false;
     if (sourceFilter.value && e.source !== sourceFilter.value) return false;
     if (monthFilter.value === "undated") {
-      if (e.yearmonth) return false;
-    } else if (monthFilter.value && e.yearmonth !== monthFilter.value) {
+      if (entryMonth(e)) return false;
+    } else if (monthFilter.value && entryMonth(e) !== monthFilter.value) {
       return false;
     }
     if (q) {
@@ -608,7 +646,9 @@ watch(
       </select>
       <select v-model="sourceFilter" class="select select-sm w-36 text-[11px]">
         <option value="">All sources</option>
-        <option v-for="s in sources" :key="s" :value="s">{{ s }}</option>
+        <option v-for="s in sources" :key="s" :value="s">
+          {{ sourceLabel(s) }}
+        </option>
       </select>
       <label class="flex items-center gap-1.5 text-[11px] text-base-content/60">
         <input
@@ -761,13 +801,20 @@ watch(
                 {{ e.name }}
               </td>
               <td class="text-base-content/60">{{ e.creator ?? "—" }}</td>
-              <td class="font-mono text-[10.5px] text-base-content/50">
-                {{ e.yearmonth ? formatMonth(e.yearmonth) : "—" }}
+              <td
+                class="font-mono text-[10.5px]"
+                :class="e.yearmonth ? 'text-base-content/60' : 'text-base-content/40'"
+                :title="monthTitle(e)"
+              >
+                {{ entryMonth(e) ? formatMonth(entryMonth(e)!) : "—" }}
               </td>
               <td>
-                <span v-if="e.source" class="badge badge-xs badge-ghost">{{
-                  e.source
-                }}</span>
+                <span
+                  v-if="e.source"
+                  class="badge badge-xs badge-ghost"
+                  :title="sourceTitle(e.source)"
+                  >{{ sourceLabel(e.source) }}</span
+                >
               </td>
               <td class="text-success text-center">
                 {{ e.downloaded ? "✓" : "" }}
