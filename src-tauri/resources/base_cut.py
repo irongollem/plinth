@@ -618,19 +618,29 @@ def fuse_pieces_into_terrain(terrain_obj, piece_objs):
 
 
 def incorporate_pieces(target, claimed, rehome, seat_shift):
-    """Union each CLAIMED scatter piece (scatter_rim="keep", see cut_one)
-    WHOLE into `target`, after applying the exact same rigid transform the
-    plug itself already got: `rehome` (undo this placement's rotation,
-    recenter the cut at the origin) then a pure Z shift of `seat_shift`
-    (h - seat in normal mode, topper_mm - seat in topper mode — see
-    cut_one) — same two-call sequence, same values, so a piece's embedding
-    depth relative to the terrain (scatter's own "always buried" floor,
-    docs/SCATTER.md) survives the transform exactly as it was at scatter
-    time. The piece is NEVER intersected with the cutter prism: "union it
-    in WHOLE" (docs/BASECUTTER.md) is what lets a piece overhang the rim
-    like real hand-made scenic basing instead of being sliced at the
-    boundary — slicing IS scatter_rim="slice"'s job, done once at job start
-    by fuse_pieces_into_terrain, not here.
+    """Add each CLAIMED scatter piece (scatter_rim="keep", see cut_one) to
+    `target` as a LOOSE closed shell — a plain data JOIN, never a boolean
+    union. Each piece first gets the exact same rigid transform the plug
+    itself already got: `rehome` (undo this placement's rotation, recenter
+    the cut at the origin) then a pure Z shift of `seat_shift` (h - seat in
+    normal mode, topper_mm - seat in topper mode — see cut_one) — same
+    two-call sequence, same values, so a piece's embedding depth relative to
+    the terrain (scatter's own "always buried" floor, docs/SCATTER.md)
+    survives exactly as it was at scatter time.
+
+    Why JOIN, not UNION: a boolean union WHOLE was the original design, but
+    the EXACT solver SHATTERS on carpet-density scatter — dozens of thin,
+    curled, mutually-overlapping leaf/twig shells make it produce non-
+    manifold slivers and, in the worst case, fragment the base body itself
+    (a 25mm base cut from a forest floor came back as 70+ non-manifold
+    shells; terrain-only cut clean). Loose overlapping closed shells are
+    what the scatter architecture already ships and what slicers union
+    natively at print time (docs/SCATTER.md "Pieces are placed as LOOSE
+    SHELLS... slicers and the cut pipeline handle overlapping shells"), and
+    the piece still overhangs the rim like scenic basing — it's just welded
+    by the slicer, not by a fragile pre-print boolean. The base BODY's own
+    plug/plinth fusion is still a real boolean union, gated separately in
+    cut_one BEFORE these loose pieces are added.
 
     A fresh COPY per placement, never the original piece object: the same
     piece can be claimed by more than one placement (docs/BASECUTTER.md —
@@ -638,6 +648,9 @@ def incorporate_pieces(target, claimed, rehome, seat_shift):
     independent"), so the separated piece object must survive untouched,
     at its original position, for the next placement's own claim test and
     its own independent copy."""
+    if not claimed:
+        return
+    copies = []
     for j, (piece_obj, _centroid) in enumerate(claimed):
         piece_copy = piece_obj.copy()
         piece_copy.data = piece_obj.data.copy()
@@ -645,8 +658,13 @@ def incorporate_pieces(target, claimed, rehome, seat_shift):
         bpy.context.collection.objects.link(piece_copy)
         piece_copy.data.transform(rehome)
         piece_copy.data.transform(Matrix.Translation((0.0, 0.0, seat_shift)))
-        apply_boolean(target, piece_copy, "UNION")
-        delete_object(piece_copy)
+        copies.append(piece_copy)
+    bpy.ops.object.select_all(action="DESELECT")
+    target.select_set(True)
+    for piece_copy in copies:
+        piece_copy.select_set(True)
+    bpy.context.view_layer.objects.active = target
+    bpy.ops.object.join()  # loose shells concatenated into target, no solver
 
 
 # ------------------------------------------------------------------ the cut
@@ -806,6 +824,8 @@ def cut_one(
         seat_shift = topper_mm - seat
         plug.data.transform(Matrix.Translation((0.0, 0.0, seat_shift)))
         incorporate_pieces(plug, claimed, rehome, seat_shift)
+        if claimed:
+            extra["scatter_pieces"] = len(claimed)
         trim = big_box("trim", -1000.0, 0.0)
         apply_boolean(plug, trim, "DIFFERENCE")
         delete_object(trim)
@@ -814,6 +834,7 @@ def cut_one(
             # There's no plinth to pocket a magnet into — surface that
             # instead of silently dropping the placement's magnet spec.
             extra["magnet_ignored"] = True
+        manifold, dims, shells = cleanup_and_check(base)
     else:
         # Seat: lowest sculpted point onto the plinth top, trim what's
         # beneath (WELD_OVERLAP deep into the top plate, so union gets a
@@ -830,33 +851,36 @@ def cut_one(
         base = build_plinth(plinth, cutter, placement["cut"], placement.get("magnet"))
         apply_boolean(base, plug, "UNION")
         delete_object(plug)
-        # Claimed pieces union in WHOLE AFTER the plinth union, not before
-        # (docs/BASECUTTER.md gives the choice explicitly) — deliberately,
-        # so the plug<->plinth WELD_OVERLAP seam (the exact union this
-        # tripwire was built to police, see cleanup_and_check/the fused
-        # tripwire below) runs on the SAME two operands, in the SAME order,
-        # as a job with no scatter pieces at all: a keep-mode cut whose
-        # footprint claims zero pieces is therefore not just similar to but
-        # IDENTICAL, boolean-call-for-boolean-call, to a cut with no piece
-        # anywhere near it. When a piece IS claimed, it becomes a third,
-        # separate union against an ALREADY-fused plinth+plug — so the final shell count
-        # below still validates the whole assembly (a piece that fails to
-        # weld is just as visible as a plug that fails to weld), but the
-        # core seam's own correctness is never entangled with, or put at
-        # risk by, whatever geometry a scattered rock happens to bring in.
-        incorporate_pieces(base, claimed, rehome, seat_shift)
 
-    manifold, dims, shells = cleanup_and_check(base)
-    if topper_mm is None and shells > 1:
-        # The union tripwire: a plug that silently failed to fuse with its
-        # plinth leaves >1 loose shell behind even though the boolean op and
-        # the manifold check both reported success — the exact accident
-        # that motivated topper mode existing (see the module's top
-        # docstring). The cut still counts as a success (the mesh may still
-        # be printable as loose parts); this only makes the silent case
-        # visible.
-        extra["fused"] = False
-        extra["shells"] = shells
+        # Check the base BODY (plug + plinth, the WELD_OVERLAP seam) FIRST,
+        # before any scatter is added. This is the real fusion gate — a plug
+        # that silently failed to weld to its plinth leaves >1 shell behind
+        # even though the boolean and manifold check both "succeeded" (the
+        # accident that motivated topper mode; see the module docstring). By
+        # gating here, a keep-mode cut's core seam is validated
+        # boolean-call-for-boolean-call IDENTICALLY to a scatter-free cut,
+        # and — crucially — the deliberately-LOOSE scatter shells added next
+        # can't false-trip this tripwire, nor can cleanup_and_check's
+        # remove_doubles weld overlapping leaves into non-manifold junctions
+        # (it runs here, on the body alone, not over the loose pieces).
+        manifold, dims, shells = cleanup_and_check(base)
+        if shells > 1:
+            extra["fused"] = False
+            extra["shells"] = shells
+
+        # Claimed pieces join in as LOOSE shells AFTER the body is fused and
+        # checked (see incorporate_pieces for why loose, not unioned). They
+        # overhang the rim like scenic basing and the slicer welds them at
+        # print time. `dims` is re-measured over the whole assembly so the
+        # reported footprint includes an overhanging piece.
+        if claimed:
+            incorporate_pieces(base, claimed, rehome, seat_shift)
+            extra["scatter_pieces"] = len(claimed)
+            verts = base.data.vertices
+            dims = [
+                round(max(v.co[i] for v in verts) - min(v.co[i] for v in verts), 3)
+                for i in range(3)
+            ]
 
     name = placement.get("name") or f"base_{index}"
     out = unique_out_path(out_dir, name)
