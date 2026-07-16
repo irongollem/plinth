@@ -284,18 +284,22 @@ type ScatterMixEntry = {
   enabled: boolean;
   weight: number;
 };
-/** The five GENERATED kinds (docs/SCATTER.md "Placement algorithm") — always
+/** The six GENERATED kinds (docs/SCATTER.md "Placement algorithm") — always
  * offered, independent of what's loaded from the backend. Procedural solids
  * built in-script, same as pebble/rock (commit 6744fc2 added twig/leaf/grass
- * alongside them). See `bundledPieces`/`userLibraryPieces` below for the
- * other two PIECE MIX groups (docs/SCATTER.md "UI (BaseCutter view)":
- * "generated kinds first, then bundled, then user library"). */
+ * alongside them; mushroom joined later as its own procedural kind — see
+ * scatter_landscape.py's build_mushroom_piece — specifically so the forest
+ * preset never has to fall back on the bundled mushroom STL, which renders
+ * as a smooth egg at scatter scale). See `bundledPieces`/`userLibraryPieces`
+ * below for the other two PIECE MIX groups (docs/SCATTER.md "UI (BaseCutter
+ * view)": "generated kinds first, then bundled, then user library"). */
 const debrisPieces = reactive<ScatterMixEntry[]>([
   { kind: "pebble", enabled: true, weight: 1 },
   { kind: "rock", enabled: true, weight: 1 },
   { kind: "twig", enabled: true, weight: 1 },
   { kind: "leaf", enabled: true, weight: 1 },
   { kind: "grass", enabled: true, weight: 1 },
+  { kind: "mushroom", enabled: true, weight: 1 },
 ]);
 
 /** One row per available piece from a non-generated source (BUNDLED or USER
@@ -381,16 +385,27 @@ const debrisParams = reactive<DebrisParams>({
 /** Preset mixes as chips (docs/SCATTER.md UI spec) — a local literal, the
  * cutter-library move: a new mix is a new row here, not a new pipeline.
  * Weights are relative (PieceChoice.weight), not fractions. `weights` is
- * partial over the five GENERATED kinds — an omitted kind defaults to 0
+ * partial over the six GENERATED kinds — an omitted kind defaults to 0
  * (filtered the same as unchecked, see `isMixed`), so existing presets don't
- * need to spell out `twig`/`leaf`/`grass: 0` by hand.
+ * need to spell out `twig`/`leaf`/`grass`/`mushroom: 0` by hand.
  * `assetWeights` is optional and keys BUNDLED asset ids only (the bundled
  * set ships with the app, so a preset can safely reference its ids by name
  * — see `scatter_assets::BUNDLED_ASSETS` for the id table); a preset never
  * touches USER LIBRARY rows, which are specific to whatever the user
  * happens to have in their own folder. `clump` is set explicitly by every
  * preset (unlike the omittable weights) since it's the one ADVANCED knob a
- * preset reaches into — see `draftMatchesSelectedPreset`. */
+ * preset reaches into — see `draftMatchesSelectedPreset`.
+ * `sink_mm` is the SECOND advanced knob a preset may reach into, optional
+ * (most presets leave it at the debrisParams default): forest LITTER is thin
+ * (a 0.5mm leaf, a 1mm twig) and must rest ON the surface, so the Forest
+ * ground preset pins a SHALLOW sink — the default sink_min/sink_max (0.5-2mm,
+ * tuned for chunky rocks/skulls) buries a leaf entirely, leaving a hole in
+ * the litter instead of a leaf on it (the "always buried" floor in
+ * scatter_landscape.py, max(0.4mm, 20% of piece height), still guarantees a
+ * shallow-sink piece is embedded enough not to snap off — see that script's
+ * "Always buried" section). Omitted -> the preset leaves the current
+ * sink_min/sink_max untouched, same as it leaves seed and the other advanced
+ * knobs. */
 type ScatterPreset = {
   id: string;
   label: string;
@@ -398,6 +413,7 @@ type ScatterPreset = {
   clump: number;
   weights: Partial<Record<GeneratedPieceKind, number>>;
   assetWeights?: Record<string, number>;
+  sink_mm?: [number, number];
 };
 const SCATTER_PRESETS: ScatterPreset[] = [
   {
@@ -455,15 +471,45 @@ const SCATTER_PRESETS: ScatterPreset[] = [
   {
     id: "forest-ground",
     label: "Forest ground",
-    density_per_dm2: 18,
+    // Carpet density: 120x80mm is 0.96 "dm2" units (density_per_dm2 is
+    // pieces per 100x100mm — see ScatterParams.density_per_dm2's doc
+    // comment in bindings.ts), so 230/dm2 targets ~220 raw candidates
+    // before edge-margin/slope losses trim it — comfortably inside the
+    // task's 150-300-piece carpet band on that plate size, measured
+    // against a real bake (see this preset's own verification report).
+    density_per_dm2: 230,
+    // Forest litter drifts rather than an even sprinkle — same idea as the
+    // Grass preset below, tuned lower since leaf/twig litter reads as
+    // loose drifts, not tight tufts.
     clump: 0.4,
-    // A drift of leaf litter and fallen twigs with the odd mushroom and a
-    // little grit underneath — leaf/twig/pebble/rock are generated kinds,
-    // the mushroom is the one curated bundled asset that fits (see
-    // assetWeights below; gracefully skipped if the bundled set failed to
-    // load, same as Boneyard's skulls/bones).
-    weights: { leaf: 0.35, twig: 0.25, pebble: 0.15, rock: 0.1 },
-    assetWeights: { mushroom: 0.15 },
+    // Leaves dominate the carpet, twigs are threaded through it, stones
+    // are occasional grit underneath, and the mushroom is RARE — all five
+    // are generated kinds now (see debrisPieces above: mushroom is
+    // build_mushroom_piece, a proper stem+cap toadstool, NOT the bundled
+    // mushroom.stl, which reads as a smooth egg at this scale — task's
+    // explicit call).
+    weights: { leaf: 12, twig: 5, pebble: 2, rock: 0.6, mushroom: 0.3 },
+    // Shallow sink so leaf/twig litter RESTS on the surface instead of
+    // being swallowed by the default 0.5-2mm sink (which buries a 0.5mm
+    // leaf entirely — see ScatterPreset.sink_mm's doc comment). The
+    // "always buried" floor still embeds every piece enough not to snap
+    // off; this just stops the range from pushing them deeper than that.
+    sink_mm: [0.0, 0.4],
+    // Occasional fallen-log/branch/stump ACCENTS (task: "a base
+    // occasionally gets a fallen log/branch/stump") — reusing Boneyard's
+    // own assetWeights mechanism verbatim: weights are relative to the
+    // `weights` sum above (~19.9), so at these values the three hero
+    // pieces combined land around ~1-2% of the carpet, a handful of
+    // pieces on a dense 120x80mm plate rather than wallpaper. Gracefully
+    // skipped if the bundled set failed to load, same as Boneyard's
+    // skulls/bones (see selectScatterPreset's own comment) — the log is
+    // weighted slightly above the branch/stump since a fallen log is the
+    // most common of the three to spot on a real forest floor.
+    assetWeights: {
+      "forest-log-scan": 0.24,
+      "forest-branch-scan": 0.16,
+      "forest-stump-scan": 0.1,
+    },
   },
 ];
 const selectedScatterPresetId = ref<string | null>(null);
@@ -471,6 +517,13 @@ const selectedScatterPresetId = ref<string | null>(null);
 const selectScatterPreset = (preset: ScatterPreset) => {
   debrisParams.density_per_dm2 = preset.density_per_dm2;
   debrisParams.clump = preset.clump;
+  // Optional shallow-sink override (litter presets) — see
+  // ScatterPreset.sink_mm's doc comment. Left untouched when a preset omits
+  // it, same as seed and the other advanced knobs.
+  if (preset.sink_mm) {
+    debrisParams.sink_min = preset.sink_mm[0];
+    debrisParams.sink_max = preset.sink_mm[1];
+  }
   for (const piece of debrisPieces) {
     piece.enabled = true;
     piece.weight = preset.weights[piece.kind] ?? 0;
@@ -509,6 +562,16 @@ const draftMatchesSelectedPreset = computed(() => {
   if (!preset) return false;
   if (debrisParams.density_per_dm2 !== preset.density_per_dm2) return false;
   if (debrisParams.clump !== preset.clump) return false;
+  // Only presets that pin sink_mm are checked against it — a preset that
+  // leaves sink at the debrisParams default (most of them) doesn't detach
+  // just because the user's sink differs from some other preset's.
+  if (
+    preset.sink_mm &&
+    (debrisParams.sink_min !== preset.sink_mm[0] ||
+      debrisParams.sink_max !== preset.sink_mm[1])
+  ) {
+    return false;
+  }
   if (
     debrisPieces.some(
       (p) => !p.enabled || p.weight !== (preset.weights[p.kind] ?? 0),

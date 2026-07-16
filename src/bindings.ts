@@ -1406,14 +1406,18 @@ bank_height: number; amount?: number }
 /**
  * A generated piece kind — the only source scatter can actually place
  * today (docs/SCATTER.md "Execution phases": bundled/user assets are S4).
- * Serializes lowercase ("pebble"/"rock"/"twig"/"leaf"/"grass") to match
- * scatter_landscape.py's generated-kind set exactly. `Pebble`/`Rock` are
- * built as noise-displaced icospheres and still live in that script's
- * `CANONICAL_MM` table; `Twig`/`Leaf`/`Grass` are swept/extruded solids
- * (see `build_twig_piece`/`build_leaf_piece`/`build_grass_piece` there) —
- * same dispatch shape, different geometry recipe per kind.
+ * Serializes lowercase ("pebble"/"rock"/"twig"/"leaf"/"grass"/"mushroom")
+ * to match scatter_landscape.py's generated-kind set exactly. `Pebble`/
+ * `Rock` are built as noise-displaced icospheres and still live in that
+ * script's `CANONICAL_MM` table; `Twig`/`Leaf`/`Grass`/`Mushroom` are
+ * swept/extruded solids (see `build_twig_piece`/`build_leaf_piece`/
+ * `build_grass_piece`/`build_mushroom_piece` there) — same dispatch shape,
+ * different geometry recipe per kind. `Mushroom` is the one kind that
+ * deliberately stands upright (stem down) rather than lying flat — see
+ * scatter_landscape.py's "lies_flat" comment block for why every other
+ * non-round generated kind lies flat and this one doesn't.
  */
-export type GeneratedPieceKind = "pebble" | "rock" | "twig" | "leaf" | "grass"
+export type GeneratedPieceKind = "pebble" | "rock" | "twig" | "leaf" | "grass" | "mushroom"
 /**
  * A named, ready-to-generate parameter set (docs/BASECUTTER.md: "Presets
  * are parameter sets" — the cutter-library move again, a new terrain

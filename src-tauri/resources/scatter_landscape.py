@@ -62,8 +62,9 @@
 #       "pieces": [
 #         {"piece": {"Generated": {"kind": "pebble"}}, "weight": 0.6},
 #         {"piece": {"Generated": {"kind": "rock"}},   "weight": 0.4}
-#         # also: {"Generated": {"kind": "twig"|"leaf"|"grass"}} — see
-#         # build_twig_piece/build_leaf_piece/build_grass_piece
+#         # also: {"Generated": {"kind": "twig"|"leaf"|"grass"|"mushroom"}} —
+#         # see build_twig_piece/build_leaf_piece/build_grass_piece/
+#         # build_mushroom_piece
 #       ]
 #     }
 #     # ... additional layers, same shape, own seed/density/pieces ...
@@ -303,27 +304,57 @@ TARGET_MAX_EDGE_MM = 0.12
 #     caps — still a 256x tri increase over the original 20-tri rock, and
 #     still well short of the formula's uncapped ask, but that's the
 #     "give up precision, not just cheat on cost" compromise.
-#   - PEBBLE_MAX_SUBDIV=4 (1280 tris): pebbles get no fine octave and are
-#     meant to read smooth/round, not textured, so a coarser cap costs
-#     comparatively little visually (still a 16x tri increase over the
-#     original 80-tri pebble) while removing the single biggest chunk of
-#     the regression (most pebbles were landing on the same level-6 cap
-#     as rocks, and there are more pebbles than rocks per the default 0.6/
-#     0.4 weight split).
+#   - PEBBLE_MAX_SUBDIV=2 (80 tris, the bare icosahedron's own next level):
+#     lowered from an earlier 4/1280-tri cap. Turns out "meant to read
+#     smooth/round" was itself the bug the task's forest-floor pass came
+#     back to fix — a round, densely-subdivided pebble reads as a smooth
+#     EGG once shade_smooth blurs its normals (user report verbatim), and
+#     no amount of fine noise fixes a silhouette problem: shade_smooth only
+#     erases NORMAL-level texture, never the actual polygonal OUTLINE a
+#     coarse mesh keeps (see PEBBLE_NOISE_AMOUNT's own comment below for
+#     why silhouette, not texture, is what survives smoothing). Fewer
+#     facets at bigger, asymmetric noise amounts (see PEBBLE_NOISE_AMOUNT /
+#     PEBBLE_SQUASH_Z just below) is what makes a "stone" instead of an
+#     egg — and it costs FEWER tris, which only helps the carpet-density
+#     budget (docs/SCATTER.md "hundreds of pieces").
 # Measured result at these caps: ~12.2s for the same 35-piece/120x80mm job
 # — ~2.0x the original, inside the "if it regresses badly (>3x)" budget.
 # See this commit's report for the full before/after/cap-sweep numbers.
 ROCK_MAX_SUBDIV = 5
-PEBBLE_MAX_SUBDIV = 4
+# Pebble capped at subdiv 1 — the bare 20-triangle icosahedron. Lowered
+# again (was 2, was 4 originally) as the FINAL step of the "smooth egg" fix
+# the forest-floor task reported: at subdiv 2 (80 tris) a noise-displaced
+# squashed pebble, once render_mini.py's shade_smooth interpolates its
+# normals, still reads as a smooth ROUND BALL from top-down (verified in the
+# forest acceptance render) — exactly the egg impression the task says must
+# be ZERO. At subdiv 1 the facets are large enough that shade_smooth CAN'T
+# fully round them away: a 20-tri icosahedron, squashed flat (PEBBLE_SQUASH_Z)
+# and shoved lopsided by one dominant noise lobe (PEBBLE_NOISE_AMOUNT), reads
+# as a small ANGULAR, FACETED chip of stone — the task's own "small, low,
+# angular pebbles ... small + faceted" ask — and the raw STL keeps every
+# facet crisp for the resin printer regardless of the render's shading. It's
+# also the cheapest possible piece (20 tris), which only helps the
+# carpet-density budget (docs/SCATTER.md "hundreds of pieces"). Rock stays
+# high-subdiv/craggy (ROCK_MAX_SUBDIV) — it's the "big textured stone", not
+# the little angular grit pebble is now.
+PEBBLE_MAX_SUBDIV = 1
 
-MIN_SUBDIV = 2  # never below "vaguely round" even for a near-zero piece
+MIN_SUBDIV = 2  # never below "vaguely round" for a piece whose per-kind cap
+                # allows it (rock) — but a per-kind cap BELOW this (pebble,
+                # deliberately faceted at subdiv 1) wins, see
+                # subdivision_for_size's effective-floor note.
 
 
 def subdivision_for_size(size_mm, max_subdiv):
     """Pure function of size_mm (and the per-kind cap) -> Blender's
     icosphere `subdivisions` parameter — the smallest level whose modeled
     max facet edge (see ICOSPHERE_EDGE_K's comment) is <= TARGET_MAX_EDGE_MM,
-    clamped to [MIN_SUBDIV, max_subdiv].
+    clamped to [min(MIN_SUBDIV, max_subdiv), max_subdiv]. The floor is
+    min(MIN_SUBDIV, max_subdiv), NOT MIN_SUBDIV: a per-kind cap deliberately
+    set BELOW MIN_SUBDIV (pebble's faceted subdiv 1 — see PEBBLE_MAX_SUBDIV)
+    must actually be honored, whereas a plain clamp(level, MIN_SUBDIV,
+    max_subdiv) with lo>hi would (wrongly) return MIN_SUBDIV and quietly
+    undo the cap.
 
     Deterministic by construction: takes only size_mm (itself already
     drawn from the seeded rng stream earlier in build_generated_piece) and
@@ -333,7 +364,8 @@ def subdivision_for_size(size_mm, max_subdiv):
     """
     ratio = max(1.0, size_mm * ICOSPHERE_EDGE_K / TARGET_MAX_EDGE_MM)
     level = 1 + math.ceil(math.log2(ratio))
-    return int(clamp(level, MIN_SUBDIV, max_subdiv))
+    effective_min = min(MIN_SUBDIV, max_subdiv)
+    return int(clamp(level, effective_min, max_subdiv))
 
 
 def facet_edge_mm(size_mm, subdiv):
@@ -358,7 +390,12 @@ def facet_edge_mm(size_mm, subdiv):
 # build_generated_piece's docstring. Verified manifold post-cleanup at
 # these values against the low-poly rock subdivision — see the S1
 # verification render.
-PEBBLE_NOISE_AMOUNT = 0.30
+# Bumped from an earlier 0.30 (see PEBBLE_MAX_SUBDIV's comment above: the
+# "smooth egg" fix is coarser facets PLUS a more asymmetric coarse lobe, not
+# a smoother one) — now equal to rock's, so a low-subdivision pebble gets a
+# genuinely lopsided, angular silhouette instead of reading as a shrunk
+# smooth sphere.
+PEBBLE_NOISE_AMOUNT = 0.42
 ROCK_NOISE_AMOUNT = 0.42
 
 # Rock-only THIRD octave: genuine surface grain on top of the two lobes
@@ -390,10 +427,69 @@ FINE_NOISE_FACET_MULT = 4.0
 # sphere, never a perfect ball (the "never spheres" requirement starts here,
 # before noise is even applied). Rock squashes flatter on average (bigger
 # stones settle more) but the ranges deliberately overlap — kind alone
-# should never fully determine silhouette.
-PEBBLE_SQUASH_Z = (0.55, 0.85)
+# should never fully determine silhouette. Pebble's range lowered (was
+# 0.55-0.85) alongside PEBBLE_MAX_SUBDIV/PEBBLE_NOISE_AMOUNT above — a
+# flatter, lower-profile pebble reads as a small embedded stone lying in the
+# litter rather than a ball sitting proud of it (task: "small, low, ANGULAR
+# pebbles — not smooth eggs").
+PEBBLE_SQUASH_Z = (0.35, 0.60)
 ROCK_SQUASH_Z = (0.45, 0.78)
 ASPECT_XY_RANGE = (0.80, 1.30)
+
+# ------------------------------------------------------------- lies_flat
+#
+# Per-kind placement behavior (forest-floor fix): fallen debris rests
+# roughly HORIZONTAL on the surface — free yaw, small random roll, never
+# planted upright like a pole. A piece's final orientation is entirely
+# decided by place_piece's `axis = normal.normalized() if align_to_surface
+# else world Z` then rotating the piece's LOCAL +Z onto that axis — so
+# "lies flat" is not a flag place_piece branches on, it falls out of WHICH
+# of a piece's own axes is built to BE local +Z:
+#   - A piece built with its long/salient axis along local Z (the round
+#     pieces' "up", the ORIGINAL build_twig_piece's spine — "a twig anchors
+#     into the terrain at its base and points up out of it", literally the
+#     planted-pole bug) ends up standing, because align_to_surface always
+#     tilts local Z toward the surface normal (near world-up on a mostly
+#     flat plate).
+#   - A piece built with its long axis IN THE LOCAL XY PLANE and only a
+#     THIN axis (thickness/radius) along local Z lies flat instead: yaw
+#     (rotated about local Z, BEFORE align — see place_piece) spins the
+#     long axis freely around compass headings, and align then tilts the
+#     thin Z axis onto the surface normal, laying the long axis flush
+#     against the ground with whatever heading yaw picked. build_leaf_piece
+#     already used this convention correctly ("Length runs along local +Y
+#     ... its local +Z ... is what align_to_surface tilts to the local
+#     normal, top face up" — see its own docstring); build_twig_piece below
+#     is FIXED to match it (spine now starts along local +X, not +Z) so a
+#     twig lies flat exactly the same way a leaf already does, with its
+#     kinks giving the "small random roll" natural variety for free — no
+#     extra rotation step needed, and bottom_local/height_local (measured
+#     along Z as always) come out small (the tube's own radius) instead of
+#     the whole twig length, so the sink math embeds it properly instead of
+#     burying half its length.
+#   - pebble/rock are round enough (icosphere + squash, no single dominant
+#     axis) that this doesn't apply either way — align_to_surface already
+#     settles them onto the surface like any resting stone.
+#   - mushroom is the deliberate EXCEPTION: it explicitly wants to stand
+#     upright, stem down (see build_mushroom_piece) — built with its stem
+#     along local Z on purpose, so the default align-to-Z-normal behavior
+#     is exactly right for it, unlike twig.
+#   - The three bundled Poly Haven "hero" assets this task adds as low-
+#     weight forest accents (forest-branch-scan/forest-stump-scan) were
+#     scanned/normalized STANDING (Z-up per resources/scatter/manifest.json,
+#     confirmed by measuring their own bounding boxes: the branch and stump
+#     both carry a real vertical extent comparable to or larger than their
+#     footprint) — this script can't rebuild THEIR geometry the way it can
+#     build_twig_piece's, so LIES_FLAT_ASSET_IDS + topple_asset_bm below
+#     apply the SAME "make local Z thin, put the long axis in-plane" idea
+#     as a one-time 90-degree pre-rotation baked into the copied bmesh
+#     before place_piece ever sees it — same destination (a thin axis ends
+#     up as local Z), different mechanism (an explicit rotation instead of
+#     a build-time axis choice), because the geometry itself is fixed data.
+#     forest-log-scan is EXCLUDED from that set: it was already scanned
+#     lying on its side (height_mm 1.454 vs a 15.89mm footprint — see the
+#     manifest), so it already lies flat via the untouched default path,
+#     exactly like leaf/pebble/rock need no extra step either.
 
 # --------------------------------------------- twig / leaf / grass pieces
 #
@@ -442,24 +538,101 @@ TWIG_SEGMENTS = 5  # 6 rings total (base..tip) — enough resolution for 1-2 kin
 TWIG_KINK_ANGLE_RANGE_DEG = (6.0, 22.0)
 TWIG_ONE_KINK_CHANCE = 0.6  # vs. two kinks the rest of the time
 
-# Leaf: a solid blade — an extruded outline with a raised midrib and a
-# gentle cupped (canoe-like) curve across its width.
-LEAF_LENGTH_RANGE_MM = (5.0, 10.0)
-LEAF_WIDTH_FRACTION_RANGE = (0.42, 0.62)  # widest point's half-width, as a fraction of length
-LEAF_THICKNESS_RANGE_MM = (0.5, 0.8)
-LEAF_BOUNDARY_SAMPLES = 14  # boundary verts per side (each cap = 2x this, a closed loop)
-LEAF_TIP_TAPER_POWER = 1.6  # >1 sharpens the taper vs. a plain sine outline
-LEAF_MIDRIB_FRACTION = 0.35  # midrib ridge height, as a fraction of thickness —
+# Leaf ("oak leaf" — the task's own naming): a solid blade whose OUTLINE is
+# a NARROW "spine" envelope with explicit, seed-placed OUTWARD LOBE BUMPS
+# added on top (each a gaussian bump centered at its own t, see
+# build_leaf_piece's half_width_at) — rather than either the earlier single
+# continuous taper (no lobes at all) or two interim attempts within this
+# same task pass: connecting just the lobe-tip/sinus EXTREMA with straight
+# segments (zigzagged like a lightning bolt, and broke the cap's
+# fan-from-center triangulation), then a pure cosine ripple modulating the
+# envelope (which could land a lobe's peak exactly at the tip/base where the
+# envelope itself pinches to zero, silently swallowing that lobe depending
+# on the random phase — see build_leaf_piece's docstring for the full
+# history). ADDING explicit bumps at explicit centers, instead of trying to
+# carve lobes out of a taper via subtraction or modulation, guarantees every
+# lobe is a real, independently visible, independently seed-varied outward
+# bulge regardless of where it falls along the taper. See
+# build_leaf_piece's docstring for the resulting tri-budget math.
+LEAF_LENGTH_RANGE_MM = (6.0, 11.0)
+# Widest LOBE's half-width, as a fraction of length — an oak leaf reads
+# noticeably broader relative to its length than the old lanceolate taper
+# did (LEAF_WIDTH_FRACTION_RANGE was 0.42-0.62).
+LEAF_WIDTH_FRACTION_RANGE = (0.55, 0.78)
+LEAF_THICKNESS_RANGE_MM = (0.4, 0.6)  # resin thickness floor (task: "~0.4mm+")
+LEAF_ENVELOPE_TAPER_POWER = 0.85  # >1 sharpens the overall taper, <1 fills it
+                                   # out into a fuller belly (a real oak
+                                   # leaf's overall silhouette, before lobing,
+                                   # is fuller than a willow leaf's point)
+LEAF_SPINE_WIDTH_FRACTION = 0.30  # the un-lobed "spine" width connecting
+                                   # lobes, as a fraction of the full
+                                   # half_width_mm — lobe bumps add ON TOP of
+                                   # this, so a deep sinus between two lobes
+                                   # still reads as a real leaf edge, not a
+                                   # pinch back to nothing. Narrower than an
+                                   # earlier 0.40 so lobes read as distinct
+                                   # rounded bulges rather than a gentle
+                                   # ripple on an already-wide taper (user
+                                   # report on the first working-but-too-
+                                   # subtle render).
+# How many lobes ripple down EACH side — seed-varied per the task's
+# "seed-vary lobe count/size" ask.
+LEAF_LOBE_COUNT_RANGE = (2, 3)
+LEAF_LOBE_SPAN = (0.12, 0.90)  # t-range (base to tip) lobe centers are
+                                # placed within — kept off both the stem
+                                # junction and the very tip so neither gets
+                                # swallowed by a lobe bump
+LEAF_LOBE_CENTER_JITTER_FRACTION = 0.12  # per-lobe center jitter, as a
+                                          # fraction of the even spacing
+                                          # between lobes — organic
+                                          # irregularity, not a perfectly
+                                          # even comb of bumps
+LEAF_LOBE_AMPLITUDE_RANGE = (0.90, 1.20)  # per-lobe peak height, as a
+                                           # fraction of (1 - spine_fraction)
+                                           # — how far a lobe reaches toward
+                                           # (and slightly past) the full
+                                           # envelope width; the task's own
+                                           # "seed-vary lobe size". Raised
+                                           # from an earlier (0.75,1.05) —
+                                           # same "make lobes distinct, not
+                                           # subtle" reasoning as
+                                           # LEAF_SPINE_WIDTH_FRACTION above.
+LEAF_LOBE_SIGMA_FRACTION = 0.40  # each lobe's gaussian bump width, as a
+                                  # fraction of the even spacing between
+                                  # lobe centers — narrower reads as more
+                                  # sharply scalloped, wider as gentler.
+                                  # Narrowed from an earlier 0.55 so
+                                  # adjacent lobes don't blur into one wide
+                                  # bulge — a real sinus dip shows between
+                                  # them.
+# Sample points per side, evaluated ALONG the blade (t in 0..1): every lobe
+# center plus one sinus/base sample between consecutive lobes/ends, so each
+# lobe's peak is always captured exactly rather than hoping a fixed grid
+# happens to land near it — see build_leaf_piece's side_points. With
+# LEAF_LOBE_COUNT_RANGE's max of 3 lobes that's 3 lobe samples + 4
+# in-between samples (before the first lobe, between each pair, after the
+# last) = 7 blade samples, plus 2 more for the stem nub — see
+# build_leaf_piece's docstring for the resulting tri count.
+LEAF_STEM_LENGTH_FRACTION = 0.11  # stem nub length, as a fraction of blade length
+LEAF_STEM_WIDTH_FRACTION = 0.09  # stem nub half-width, as a fraction of the widest lobe
+LEAF_MIDRIB_FRACTION = 0.16  # midrib ridge height, as a fraction of thickness —
                               # added SYMMETRICALLY to both faces (see
                               # build_leaf_piece), so local wall thickness only
                               # ever grows at the ridge, never thins below
-                              # LEAF_THICKNESS_RANGE_MM
+                              # LEAF_THICKNESS_RANGE_MM. Lowered from an
+                              # earlier 0.35 (which, combined with the old
+                              # LEAF_CUP_FRACTION, made leaves read as puffy
+                              # pillows instead of flat blades — user report) —
+                              # a subtle ridge, not a raised spine.
 LEAF_MIDRIB_SHARPNESS = 2.6  # higher = narrower ridge
-LEAF_CUP_FRACTION = 0.55  # edge lift (canoe curl), as a fraction of thickness —
+LEAF_CUP_FRACTION = 0.25  # edge lift (canoe curl), as a fraction of thickness —
                            # a whole-cross-section Z offset shared by both faces
                            # (see build_leaf_piece), so it curls the blade
-                           # without touching local wall thickness at all
-LEAF_OUTLINE_JITTER_FRACTION = 0.08  # per-sample outline noise, fraction of half-width
+                           # without touching local wall thickness at all.
+                           # Lowered from an earlier 0.55 for the same
+                           # "flat and thin, not puffy" reason as
+                           # LEAF_MIDRIB_FRACTION above.
+LEAF_OUTLINE_JITTER_FRACTION = 0.08  # per-lobe outline noise, fraction of half-width
 
 # Grass: a thin upright blade/fin, WIDTH tapering to a near-point tip while
 # THICKNESS stays constant (only width tapers — see build_grass_piece).
@@ -474,6 +647,69 @@ GRASS_TIP_WIDTH_FRACTION = 0.08  # near-zero but never literally zero — a true
                                   # below already exists for)
 GRASS_SEGMENTS = 5  # 6 rings — enough to carry one smooth lean curve
 GRASS_LEAN_ANGLE_RANGE_DEG = (8.0, 32.0)  # total lean accumulated over the full height
+
+# Mushroom: a surface-of-revolution toadstool — a narrow STEM ring-swept
+# straight up local +Z (the one generated kind that DELIBERATELY stands
+# upright, stem down — see the "lies_flat" comment block above), flaring at
+# a defined RIM into a CAP wider than the stem, domed to an apex. Built as a
+# single revolve (a list of (z, radius) profile rings around the Z axis,
+# same "rings bridged by quads" mechanism as build_twig_piece/
+# build_grass_piece) rather than two separate parts glued together, so it
+# is one closed shell by construction — no boolean, no seam. The apex ring
+# collapses to radius 0 (every ring vertex lands at the same point) exactly
+# like build_leaf_piece's pinch-point caps; cleanup_shell_bm's
+# remove_doubles/dissolve_degenerate pass (run on every piece, see that
+# function's docstring) welds the resulting degenerate quads into a proper
+# triangle fan, so no separate fan-cap code is needed at the tip either —
+# the base ring (radius > 0, sitting at local Z=0, the buried/embedded end)
+# gets an explicit flat n-gon cap the same way build_twig_piece's ring caps
+# do.
+MUSHROOM_HEIGHT_RANGE_MM = (5.0, 9.0)  # total stem+cap height (task: "~5-9mm tall")
+MUSHROOM_STEM_HEIGHT_FRACTION_RANGE = (0.55, 0.72)  # stem's share of total height
+MUSHROOM_STEM_RADIUS_RANGE_MM = (0.35, 0.55)
+# Cap radius as a multiple of the stem's OWN radius — kept well above 1 so
+# the cap always reads as "wider than the stem" (task's explicit ask) even
+# at the low end of both ranges; the wide overlap with rocks/pebbles'
+# ASPECT_XY_RANGE-style "never the same every time" philosophy is
+# deliberate seed variety, not sloppy tuning.
+MUSHROOM_CAP_RADIUS_FACTOR_RANGE = (2.2, 3.4)
+MUSHROOM_CAP_UNDERSIDE_DIP_FRACTION = 0.16  # how far above the stem-top the rim
+                                             # ring sits, as a fraction of cap
+                                             # height — a small positive gap
+                                             # here (not the same Z as the stem
+                                             # top) is what gives the cap's
+                                             # underside a defined, near-vertical
+                                             # RIM WALL instead of a smooth cone,
+                                             # the "defined rim/underside" the
+                                             # task calls for
+MUSHROOM_CAP_SHOULDER_FRACTION = 0.55  # where along the cap's height the
+                                        # dome's "shoulder" ring sits, as a
+                                        # fraction of cap height above the rim
+MUSHROOM_CAP_SHOULDER_RADIUS_FACTOR = 0.78  # shoulder ring radius, as a
+                                             # fraction of the rim radius —
+                                             # <1 so the dome curves INWARD
+                                             # toward the apex instead of
+                                             # flaring further, reading as a
+                                             # rounded toadstool cap from the
+                                             # side
+MUSHROOM_RING_VERTS = 9  # odd count avoids a perfectly mirrored front/back
+                          # facet pair — reads round enough at this scale
+                          # without an icosphere-grade budget (task: "LOW-tri")
+MUSHROOM_CAP_OUTLINE_JITTER_FRACTION = 0.10  # per-vertex radius jitter on the
+                                              # cap rim/shoulder rings only —
+                                              # seed-varied lobe/rim irregularity,
+                                              # same idea as LEAF_OUTLINE_JITTER_FRACTION
+
+# Poly Haven "hero" asset ids that need the topple-to-horizontal pre-rotation
+# (see the "lies_flat" comment block above and topple_asset_bm below) —
+# scanned/normalized STANDING (Z-up per resources/scatter/manifest.json),
+# unlike forest-log-scan which was already scanned lying on its side
+# (height_mm 1.454 vs a 15.89mm footprint) and so needs no extra rotation.
+LIES_FLAT_ASSET_IDS = frozenset({"forest-branch-scan", "forest-stump-scan"})
+# Small random extra tilt applied on top of the fixed 90-degree topple, so a
+# toppled branch/stump doesn't look identically flat every time (task:
+# "small random roll ok").
+TOPPLE_EXTRA_ROLL_RANGE_DEG = (-15.0, 15.0)
 
 # Merge-by-distance / degenerate-face thresholds — same values as
 # base_cut.py's/gen_landscape.py's cleanup_and_check, same reason (the STL
@@ -699,14 +935,15 @@ CANONICAL_MM = {"pebble": PEBBLE_CANONICAL_MM, "rock": ROCK_CANONICAL_MM}
 # The full Generated-kind set (docs/SCATTER.md pins the enum in
 # scatter.rs's GeneratedPieceKind): "pebble"/"rock" are noise-displaced
 # icospheres built from a CANONICAL_MM scalar (build_generated_piece);
-# "twig"/"leaf"/"grass" are swept/extruded solids, each with its own size
-# RANGE baked into its own build function (build_twig_piece/
-# build_leaf_piece/build_grass_piece) rather than a single CANONICAL_MM
-# scalar — see those functions' docstrings for why a range reads better
-# than one canonical size for organic debris. validate_pieces checks
-# membership in this set (not CANONICAL_MM) so the newer three kinds are
-# accepted without needing a fake CANONICAL_MM entry.
-GENERATED_KINDS = frozenset({"pebble", "rock", "twig", "leaf", "grass"})
+# "twig"/"leaf"/"grass"/"mushroom" are swept/extruded solids, each with its
+# own size RANGE baked into its own build function (build_twig_piece/
+# build_leaf_piece/build_grass_piece/build_mushroom_piece) rather than a
+# single CANONICAL_MM scalar — see those functions' docstrings for why a
+# range reads better than one canonical size for organic debris.
+# validate_pieces checks membership in this set (not CANONICAL_MM) so these
+# non-icosphere kinds are accepted without needing a fake CANONICAL_MM
+# entry.
+GENERATED_KINDS = frozenset({"pebble", "rock", "twig", "leaf", "grass", "mushroom"})
 
 
 def validate_pieces(pieces_json, asset_paths):
@@ -892,17 +1129,35 @@ def _ring_frame(tangent):
 def build_twig_piece(rng, scale_range, scale_factor):
     """A bent, tapered hexagonal-cross-section tube — see the "Twig"
     constants block above for the size ranges and the fork-as-kink design
-    call. Built as TWIG_SEGMENTS+1 rings swept along a piecewise-straight
-    spine that starts at local origin pointing local +Z (the direction that
-    later gets aligned to the terrain normal / stays world-up, same as
-    every other piece — a twig anchors into the terrain at its base and
-    points up out of it) and bends by 1-2 small random kinks. Each ring is
+    call, and the "lies_flat" comment block above THAT for why the spine now
+    starts along local +X (a FALLEN twig lying on the ground), not local +Z
+    (an earlier revision literally had it "anchor into the terrain at its
+    base and point up out of it" — the planted-pole bug the forest-floor
+    task reported). Built as TWIG_SEGMENTS+1 rings swept along a
+    piecewise-straight spine that starts at local origin pointing local +X
+    and bends by 1-2 small random kinks — _ring_frame(direction) picks kink
+    axes PERPENDICULAR to the current spine direction (Z or -Y when the
+    spine is still along X), so a kink can rotate the spine WITHIN the
+    horizontal XY plane (a lying twig bending left/right as seen from above)
+    or slightly OUT of it (a bit of vertical waviness, capped at
+    TWIG_KINK_ANGLE_RANGE_DEG per kink so it stays reading as "flat with a
+    small random roll", never enough to flip the twig upright). Each ring is
     a TWIG_RING_VERTS-gon bridged to its neighbor by quads; both end rings
     close with a flat n-gon cap — every ring is planar by construction (it's
     built from a fixed radius around a single center point), so
     cleanup_shell_bm's triangulate step can turn the hexagonal caps and the
     quad side walls into triangles with no manual fan triangulation needed
     here, unlike build_leaf_piece's non-planar caps.
+
+    Because the spine now lives in local X (not Z), bottom_local/
+    height_local (still measured along Z, same as every build_* function)
+    come out as roughly the tube's own RADIUS, not its length — place_piece
+    then embeds the twig by that small radius, and align_to_surface's
+    local-Z-to-normal tilt lays the whole spine flush against the terrain
+    with whatever heading `yaw` picked, exactly the mechanism
+    build_leaf_piece already uses (see its own docstring) — no separate
+    "lay flat" rotation needed here, just building it right-side-around in
+    the first place.
 
     Returns the same (bm, size_mm, bottom_local, height_local) shape
     build_generated_piece does, so the placement loop in scatter() treats
@@ -930,7 +1185,12 @@ def build_twig_piece(rng, scale_range, scale_factor):
     num_rings = TWIG_SEGMENTS + 1
     seg_len = length_mm / TWIG_SEGMENTS
 
-    direction = Vector((0.0, 0.0, 1.0))
+    # Spine starts along local +X — see this function's docstring and the
+    # "lies_flat" comment block above the twig/leaf/grass section header for
+    # why: a twig built this way lies flat by construction (the same
+    # convention build_leaf_piece already uses), instead of standing up
+    # like the old +Z-spine version did.
+    direction = Vector((1.0, 0.0, 0.0))
     position = Vector((0.0, 0.0, 0.0))
     ring_centers = [position.copy()]
     directions = [direction.copy()]
@@ -980,27 +1240,56 @@ def build_twig_piece(rng, scale_range, scale_factor):
 
 
 def build_leaf_piece(rng, scale_range, scale_factor):
-    """A solid leaf blade: a closed-loop outline (tapered at both ends,
-    seed-jittered per-sample) extruded to LEAF thickness, with a raised
-    midrib and a gentle cupped (canoe) curve baked into both the top and
-    bottom surfaces — see the "Leaf" constants block above for exactly how
-    the midrib (a symmetric thickness bulge) and the cup (a whole-
-    cross-section Z offset) are kept from ever thinning the shell below
-    LEAF_THICKNESS_RANGE_MM. The outline's own width profile is a sine
-    taper raised to LEAF_TIP_TAPER_POWER, which pinches to a point at BOTH
-    ends (t=0 and t=1) — a small lanceolate/willow-leaf silhouette, tapered
-    at the tip as required, with a pointed rather than lobed base.
+    """An oak leaf: a solid blade whose outline is a narrow un-lobed SPINE
+    envelope (LEAF_SPINE_WIDTH_FRACTION) with explicit, seed-placed OUTWARD
+    LOBE BUMPS added on top — a gaussian bump per lobe, each centered at its
+    own (seed-jittered) point along the length, reaching (seed-varied)
+    toward the full half_width_mm. This is the THIRD leaf outline this task
+    pass tried, after two that didn't work (see the "Leaf" constants
+    block's own comment for the full history: a single continuous taper had
+    no lobes at all; connecting just the lobe-tip/sinus extrema with
+    straight segments zigzagged like a lightning bolt AND broke the cap's
+    fan-from-center triangulation; a pure cosine ripple modulating the
+    envelope could silently land a lobe's peak exactly at the pinched
+    tip/base depending on the random phase, losing that lobe entirely).
+    ADDING bumps at EXPLICIT centers — rather than subtracting notches out
+    of a taper, or modulating a periodic wave against it — sidesteps both
+    failure modes at once: every lobe is guaranteed visible (it's placed,
+    not hoped-for from a phase alignment), and `side_points` samples the
+    outline AT each lobe's own center (not a fixed independent grid), so a
+    lobe's peak is never missed regardless of where it randomly falls.
 
-    Both caps are built as a triangle fan from an interior CENTER vertex
-    rather than a single n-gon: with midrib/cup shaping, the cap is
-    non-planar, and a plain n-gon leaves Blender's own triangulation
-    heuristic to guess a non-planar face's split — a fan from a well-inside
-    center point is unambiguously correct for any simple (non-self-
-    intersecting) outline that's star-shaped from its centroid, which this
-    one always is by construction (width is a smooth function of position
-    along the length, never doubles back on itself). The two pinch points
-    (t=0 and t=1, where the left/right boundary samples coincide) produce
-    duplicate coincident vertices by construction — cleanup_shell_bm's
+    Caps are a single N-GON per side (bm.faces.new(ring), same convention
+    build_twig_piece's ring caps use) rather than a manual fan from a center
+    vertex — the module's own cleanup_shell_bm (called on every piece, see
+    its docstring) already triangulates every face via Blender's own
+    ear-clip triangulator, which handles any simple (non-self-intersecting)
+    polygon correctly regardless of whether it's star-shaped from any
+    particular point. This outline can never self-intersect by construction
+    regardless of how the lobe bumps land: every "lefts" vertex has x <= 0
+    and every "rights" vertex has x >= 0 (mirrored), the two chains only
+    ever touch at their shared pinch-point vertices (never cross), and `t`
+    (hence the length-axis coordinate) is strictly increasing within each
+    chain — so the earlier zigzag version's breakage was specifically the
+    fan-from-center step, not the boundary polygon itself, which is why
+    switching the cap to n-gon-plus-ear-clip-triangulate is the actual fix,
+    not just a side effect of smoother sampling.
+
+    Tri budget (task: "~30-60 tris; at carpet density a heavy leaf explodes
+    STL size"): the boundary loop has `2 * (num_lobes + num_lobes+1 + 2)`
+    vertices (one sample per lobe, one more between/around them, plus 2
+    stem points, doubled for both sides) — 16 for 2 lobes, 18 for 3. An
+    M-vertex n-gon triangulates to M-2 tris, so each cap costs M-2 tris (2
+    caps); the side band is one quad (2 tris) per boundary edge = 2*M.
+    Total tris: 4*M-4, i.e. 60 for 2 lobes, 68 for 3 — landing at/just above
+    the task's "~30-60" target (traded deliberately for enough resolution
+    to read as actual rounded lobes — see this function's own verification
+    render), still far below the ~230-tri cost the original
+    LEAF_BOUNDARY_SAMPLES=14 dense-sampled taper carried.
+
+    The stem-tip/leaf-tip pinch points (t=-LEAF_STEM_LENGTH_FRACTION and
+    t=1, where the left/right boundary samples coincide) produce duplicate
+    coincident vertices by construction — cleanup_shell_bm's
     remove_doubles/dissolve_degenerate pass (run on every piece by the
     caller, same as build_generated_piece) welds them and drops the
     resulting degenerate triangles, the same "near-zero sliver" handling
@@ -1011,7 +1300,8 @@ def build_leaf_piece(rng, scale_range, scale_factor):
     the round pieces) so a leaf lies flush against the terrain — its local
     +Z (the top/bottom thickness axis) is what align_to_surface tilts to
     the local normal, top face up, the same "which local axis becomes
-    vertical" convention place_piece already applies uniformly.
+    vertical" convention place_piece already applies uniformly (see the
+    "lies_flat" comment block earlier in this file).
     """
     length_mm = rng.uniform(*LEAF_LENGTH_RANGE_MM)
     half_width_mm = length_mm * rng.uniform(*LEAF_WIDTH_FRACTION_RANGE)
@@ -1019,19 +1309,71 @@ def build_leaf_piece(rng, scale_range, scale_factor):
     user_scale = rng.uniform(scale_range[0], scale_range[1])
     final_scale = max(1e-6, user_scale * scale_factor)
 
+    # All rng draws for the outline happen in this one fixed-order block
+    # (same discipline build_twig_piece's kink draws follow), before any
+    # geometry is built.
+    num_lobes = rng.randint(*LEAF_LOBE_COUNT_RANGE)
+    lobe_span_lo, lobe_span_hi = LEAF_LOBE_SPAN
+    even_spacing = (lobe_span_hi - lobe_span_lo) / num_lobes
+    lobe_sigma = max(1e-4, even_spacing * LEAF_LOBE_SIGMA_FRACTION)
+    lobe_centers = []
+    lobe_amps = []
+    for i in range(num_lobes):
+        even_t = lobe_span_lo + even_spacing * (i + 0.5)
+        jitter_t = rng.uniform(-1.0, 1.0) * even_spacing * LEAF_LOBE_CENTER_JITTER_FRACTION
+        lobe_centers.append(clamp(even_t + jitter_t, lobe_span_lo, lobe_span_hi))
+        lobe_amps.append((1.0 - LEAF_SPINE_WIDTH_FRACTION) * rng.uniform(*LEAF_LOBE_AMPLITUDE_RANGE))
+    # Independent left/right width scale for natural (not perfectly
+    # mirrored) asymmetry — small, so it still reads as one coherent leaf.
+    left_asym = rng.uniform(0.92, 1.08)
+    right_asym = rng.uniform(0.92, 1.08)
     outline_offset = Vector((rng.uniform(-1000.0, 1000.0) for _ in range(3)))
     midrib_height = LEAF_MIDRIB_FRACTION * thickness_mm
     cup_height = LEAF_CUP_FRACTION * thickness_mm
-    n = LEAF_BOUNDARY_SAMPLES
 
-    def half_width_at(t):
-        # t in [0, 1] along the length, base (0) to tip (1). sin(pi*t)
-        # pinches both ends to a point; raising it to LEAF_TIP_TAPER_POWER
-        # sharpens the taper without changing where it pinches.
-        base = math.sin(math.pi * t) ** LEAF_TIP_TAPER_POWER
+    def half_width_at(t, asym):
+        # t in [0, 1] along the blade, base to tip. envelope pinches both
+        # ends toward 0 (sin(pi*t)); the SPINE width rides at
+        # LEAF_SPINE_WIDTH_FRACTION of that envelope everywhere, and each
+        # lobe ADDS a gaussian bump on top, reaching further out toward the
+        # full envelope width at its own center. Bumps are additive (never
+        # subtractive), so the outline can only ever bulge OUT from the
+        # spine, never fold back past the centerline.
+        envelope = max(0.0, math.sin(math.pi * t)) ** LEAF_ENVELOPE_TAPER_POWER
+        bump = 0.0
+        for center, amp in zip(lobe_centers, lobe_amps):
+            d = (t - center) / lobe_sigma
+            bump += amp * math.exp(-(d * d))
+        shape = LEAF_SPINE_WIDTH_FRACTION + bump
         p = Vector((t * 3.0 + outline_offset.x, outline_offset.y, outline_offset.z))
         wobble = 1.0 + LEAF_OUTLINE_JITTER_FRACTION * noise.noise(p)
-        return max(0.0, half_width_mm * base * wobble)
+        return max(0.0, half_width_mm * envelope * shape * wobble * asym)
+
+    # Sample AT each lobe's own center (never missing a peak, see this
+    # function's docstring) plus one sample between/around each pair —
+    # before the first lobe, between consecutive lobes, and after the last
+    # — so sinuses are captured too, then the stem nub and tip close it off.
+    blade_ts = [lobe_span_lo * 0.5]
+    for i, center in enumerate(lobe_centers):
+        blade_ts.append(center)
+        next_bound = lobe_centers[i + 1] if i + 1 < len(lobe_centers) else 1.0
+        blade_ts.append((center + next_bound) / 2.0)
+    blade_ts = sorted(set(t for t in blade_ts if 0.0 < t < 1.0)) + [1.0]
+
+    def side_points(asym):
+        pts = [
+            (-LEAF_STEM_LENGTH_FRACTION, LEAF_STEM_WIDTH_FRACTION * 0.5 * half_width_mm * asym),
+            (0.0, LEAF_STEM_WIDTH_FRACTION * half_width_mm * asym),
+        ]
+        for t in blade_ts:
+            pts.append((t, half_width_at(t, asym)))
+        return pts
+
+    left_points = side_points(left_asym)
+    right_points = side_points(right_asym)
+    lefts = [(t * length_mm, -hw) for t, hw in left_points]
+    rights = [(t * length_mm, hw) for t, hw in right_points]
+    loop = lefts + list(reversed(rights))  # closed boundary, one full lap
 
     def cap_z(sign, side_frac):
         # sign = +1 (top) / -1 (bottom). midrib is a SYMMETRIC bulge (both
@@ -1042,30 +1384,21 @@ def build_leaf_piece(rng, scale_range, scale_factor):
         cup_offset = cup_height * (side_frac ** 2)
         return sign * (thickness_mm / 2.0 + midrib) + cup_offset
 
-    lefts = []
-    rights = []
-    for i in range(n + 1):
-        t = i / n
-        y = t * length_mm
-        hw = half_width_at(t)
-        lefts.append((y, -hw))
-        rights.append((y, hw))
-    loop = lefts + list(reversed(rights))  # closed boundary, one full lap
-
     bm = bmesh.new()
 
     def make_cap(sign):
+        # A single n-gon per cap (see this function's docstring for why —
+        # cleanup_shell_bm's triangulate() does the actual splitting, same
+        # convention build_twig_piece's ring caps use), wound so
+        # recalc_face_normals (called once for the whole piece below) has
+        # a consistent starting orientation to work from.
         ring_verts = []
         for y, x in loop:
             side_frac = 0.0 if half_width_mm <= 1e-9 else x / half_width_mm
             z = cap_z(sign, side_frac)
             ring_verts.append(bm.verts.new(Vector((x, y, z))))
-        center = bm.verts.new(Vector((0.0, length_mm * 0.5, cap_z(sign, 0.0))))
-        m = len(ring_verts)
-        for i in range(m):
-            a, b = ring_verts[i], ring_verts[(i + 1) % m]
-            face = (center, a, b) if sign > 0 else (center, b, a)
-            bm.faces.new(face)
+        face = ring_verts if sign > 0 else list(reversed(ring_verts))
+        bm.faces.new(face)
         return ring_verts
 
     top_ring = make_cap(1.0)
@@ -1164,6 +1497,130 @@ def build_grass_piece(rng, scale_range, scale_factor):
     height_local = max(1e-6, max_z - min_z)
     size_mm = height_mm * final_scale
     return bm, size_mm, bottom_local, height_local
+
+
+def build_mushroom_piece(rng, scale_range, scale_factor):
+    """A toadstool: a narrow stem ring-swept straight up local +Z, flaring
+    at a defined rim into a cap wider than the stem, domed to an apex — see
+    the "Mushroom" constants block above for the size ranges and why this
+    is a single surface-of-revolution rather than two glued parts. Unlike
+    every other build_* function above, this one is deliberately built to
+    STAND UPRIGHT (stem down) — see the "lies_flat" comment block earlier
+    in this file — so, unlike build_twig_piece's fix, there is nothing to
+    reorient here: local +Z staying "up" through align_to_surface is
+    exactly the desired stem-down toadstool pose.
+
+    The profile is 5 rings (base -> stem-top -> cap-rim -> cap-shoulder ->
+    apex) revolved around local Z with MUSHROOM_RING_VERTS sides, built with
+    the same "list of rings, bridge consecutive rings with quads" recipe
+    build_twig_piece/build_grass_piece use. The cap-rim ring sits ABOVE the
+    stem-top ring at (nearly) the same radius jump point but a different Z
+    (MUSHROOM_CAP_UNDERSIDE_DIP_FRACTION) — that near-vertical side wall
+    between them is what reads as the cap's own defined underside/rim edge
+    from a side view, the "distinct thin STEM topped by a domed CAP wider
+    than the stem with a defined rim/underside" the task calls for. The
+    apex ring's radius is 0 — every one of its MUSHROOM_RING_VERTS vertices
+    lands at the exact same point, a deliberate coincident-vertex pinch
+    (same trick build_leaf_piece's two end caps use, see its own docstring)
+    that cleanup_shell_bm's remove_doubles/dissolve_degenerate pass (run on
+    every piece, see that function's docstring) collapses into a proper
+    triangle fan — no separate top-cap code needed. The base ring (radius
+    > 0, at local Z=0, the buried end) DOES get an explicit flat n-gon cap,
+    the same as build_twig_piece's ring caps.
+
+    Cap rings (rim + shoulder, not the stem) get a small per-vertex radius
+    jitter (MUSHROOM_CAP_OUTLINE_JITTER_FRACTION) for seed-varied lobe/rim
+    irregularity — same "noise.noise on a per-sample offset" idea
+    build_leaf_piece's outline uses, kept off the stem so it stays a clean
+    read as a narrow stalk under the more organic cap.
+
+    Returns the same (bm, size_mm, bottom_local, height_local) shape every
+    other build_* function does.
+    """
+    total_height_mm = rng.uniform(*MUSHROOM_HEIGHT_RANGE_MM)
+    stem_height_mm = total_height_mm * rng.uniform(*MUSHROOM_STEM_HEIGHT_FRACTION_RANGE)
+    cap_height_mm = max(0.8, total_height_mm - stem_height_mm)
+    stem_radius_mm = rng.uniform(*MUSHROOM_STEM_RADIUS_RANGE_MM)
+    cap_radius_mm = stem_radius_mm * rng.uniform(*MUSHROOM_CAP_RADIUS_FACTOR_RANGE)
+    user_scale = rng.uniform(scale_range[0], scale_range[1])
+    final_scale = max(1e-6, user_scale * scale_factor)
+    jitter_offset = Vector((rng.uniform(-1000.0, 1000.0) for _ in range(3)))
+
+    rim_z = stem_height_mm + cap_height_mm * MUSHROOM_CAP_UNDERSIDE_DIP_FRACTION
+    shoulder_z = stem_height_mm + cap_height_mm * MUSHROOM_CAP_SHOULDER_FRACTION
+    apex_z = stem_height_mm + cap_height_mm
+
+    # (z, radius, jitter_this_ring) — stem rings stay perfectly round
+    # (jitter=False), cap rings (rim/shoulder) get the organic wobble; the
+    # apex is pinned to exactly 0 so its ring collapses to one point (see
+    # this function's docstring).
+    profile = [
+        (0.0, stem_radius_mm, False),
+        (stem_height_mm, stem_radius_mm, False),
+        (rim_z, cap_radius_mm, True),
+        (shoulder_z, cap_radius_mm * MUSHROOM_CAP_SHOULDER_RADIUS_FACTOR, True),
+        (apex_z, 0.0, False),
+    ]
+
+    n = MUSHROOM_RING_VERTS
+    bm = bmesh.new()
+    rings = []
+    for z, r, jitter in profile:
+        ring_verts = []
+        for k in range(n):
+            a = 2.0 * math.pi * k / n
+            radius = r
+            if jitter and r > 1e-9:
+                p = Vector((math.cos(a) * r + jitter_offset.x, math.sin(a) * r + jitter_offset.y, z + jitter_offset.z))
+                radius = max(0.0, r * (1.0 + MUSHROOM_CAP_OUTLINE_JITTER_FRACTION * noise.noise(p)))
+            co = Vector((radius * math.cos(a), radius * math.sin(a), z))
+            ring_verts.append(bm.verts.new(co))
+        rings.append(ring_verts)
+
+    bm.faces.new(rings[0])  # flat base cap (embed/buried end)
+    for i in range(len(rings) - 1):
+        a_ring, b_ring = rings[i], rings[i + 1]
+        for k in range(n):
+            k2 = (k + 1) % n
+            bm.faces.new((a_ring[k], a_ring[k2], b_ring[k2], b_ring[k]))
+    # No explicit apex cap: the last ring's coincident vertices already
+    # close the tip via the degenerate quads above (see docstring).
+
+    bmesh.ops.scale(bm, vec=Vector((final_scale,) * 3), verts=bm.verts)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
+
+    min_z = min((v.co.z for v in bm.verts), default=0.0)
+    max_z = max((v.co.z for v in bm.verts), default=0.0)
+    bottom_local = -min_z
+    height_local = max(1e-6, max_z - min_z)
+    size_mm = total_height_mm * final_scale
+    return bm, size_mm, bottom_local, height_local
+
+
+def topple_asset_bm(bm, rng):
+    """Reorient an Asset piece scanned/normalized STANDING (see
+    LIES_FLAT_ASSET_IDS's comment) into a FALLEN, lying-on-its-side pose —
+    the Asset-source counterpart to build_twig_piece's build-time direction
+    fix (see the "lies_flat" comment block earlier in this file): since this
+    script can't rebuild the imported mesh's own geometry, it instead bakes
+    a fixed 90-degree rotation about local X directly into the copied bmesh
+    BEFORE place_piece ever sees it, turning whatever was the asset's own
+    vertical (local Z, tall as authored) into a horizontal extent — after
+    this call, place_piece's usual "tilt local Z to the surface normal"
+    align step lands the piece's ORIGINAL vertical axis lying flush against
+    the ground instead of standing up out of it. A second, small random
+    rotation (TOPPLE_EXTRA_ROLL_RANGE_DEG) rides along on top so every
+    toppled piece doesn't land at the exact same angle — the "small random
+    roll ok" the task allows.
+
+    Mutates `bm` in place and returns nothing; the caller (scatter()) must
+    RE-MEASURE bottom_local/height_local from `bm` after this call — the
+    ones build_asset_piece returned were measured in the PRE-topple pose and
+    are stale afterwards.
+    """
+    roll_deg = rng.uniform(*TOPPLE_EXTRA_ROLL_RANGE_DEG)
+    matrix = Matrix.Rotation(math.radians(90.0), 4, "X") @ Matrix.Rotation(math.radians(roll_deg), 4, "Y")
+    bm.transform(matrix)
 
 
 class AssetTemplateCache:
@@ -1515,9 +1972,13 @@ def scatter(job, debug):
                     bm, size_mm, bottom_local, height_local = build_leaf_piece(
                         layer_rng, scale_range, scale_factor
                     )
-                else:  # "grass" — validate_pieces already restricted `key`
-                    # to GENERATED_KINDS, so this is the last remaining option
+                elif key == "grass":
                     bm, size_mm, bottom_local, height_local = build_grass_piece(
+                        layer_rng, scale_range, scale_factor
+                    )
+                else:  # "mushroom" — validate_pieces already restricted `key`
+                    # to GENERATED_KINDS, so this is the last remaining option
+                    bm, size_mm, bottom_local, height_local = build_mushroom_piece(
                         layer_rng, scale_range, scale_factor
                     )
                 debug_kind = key
@@ -1525,6 +1986,17 @@ def scatter(job, debug):
                 bm, size_mm, bottom_local, height_local = build_asset_piece(
                     key, template_cache, layer_rng, scale_range, scale_factor
                 )
+                if key in LIES_FLAT_ASSET_IDS:
+                    # See topple_asset_bm's docstring: bakes the fallen-on-
+                    # its-side reorientation into `bm` directly, so
+                    # bottom_local/height_local (measured in the PRE-topple
+                    # pose above) must be re-measured before place_piece
+                    # uses them for the sink-floor/embed math.
+                    topple_asset_bm(bm, layer_rng)
+                    min_z = min((v.co.z for v in bm.verts), default=0.0)
+                    max_z = max((v.co.z for v in bm.verts), default=0.0)
+                    bottom_local = -min_z
+                    height_local = max(1e-6, max_z - min_z)
                 debug_kind = f"asset:{key}"
 
             floor_mm = max(MIN_SINK_MM, SINK_FLOOR_FRACTION * height_local)
