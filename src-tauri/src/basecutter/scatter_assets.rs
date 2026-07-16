@@ -30,7 +30,8 @@ struct BundledAsset {
     footprint_mm: f64,
     height_mm: f64,
     // Read by the manifest-drift test (every row's license is checked
-    // against manifest.json and asserted to contain "CC0") and kept here
+    // against manifest.json and asserted to be an allowed license — CC0, or
+    // CC BY-SA 4.0 for the leaf set) and kept here
     // as the per-piece provenance record — not yet surfaced through any
     // command (get_scatter_credits below covers the whole-bundle credits
     // panel; a future per-asset license display would read this field).
@@ -41,6 +42,13 @@ struct BundledAsset {
 
 const SMITHSONIAN_LICENSE: &str =
     "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")";
+
+// The one non-CC0 admission in the bundle: the Printables organic-leaf set.
+// CC BY-SA carries a share-alike obligation that CC0 does not (a base a user
+// decorates with these inherits the license); it is admitted deliberately —
+// see docs/SCATTER-ASSETS.md and the license allowlist in
+// `bundled_assets_manifold_and_license_allowed_per_manifest`.
+const LEAF_LICENSE: &str = "CC BY-SA 4.0 (Printables)";
 
 /// The bundled set — see this module's doc comment and `BundledAsset`'s.
 /// Order is cosmetic (drives the frontend's default listing order); the
@@ -127,77 +135,73 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         license: "CC0 (as recorded in opengameart-mushroom/LICENSE.txt)",
         bytes: include_bytes!("../../resources/scatter/mushroom.stl"),
     },
+    // Organic-leaf set — decimated to ~1500 tris and normalized to a ~5mm
+    // footprint with a 1.2mm thickness and a baked-in curl (the source models
+    // are ~90mm print-scale; thickness is set deliberately chunky so the leaf
+    // prints and sits proud of the scatter's 0.4mm stitch-sink instead of
+    // vanishing into it). See tools/curate_leaves.py. CC BY-SA 4.0.
     BundledAsset {
-        id: "leaf-oval",
-        label: "Oval leaf",
-        filename: "leaf-oval.stl",
-        footprint_mm: 7.197,
-        height_mm: 0.386,
-        license: "CC0 (original Plinth procedural asset)",
-        bytes: include_bytes!("../../resources/scatter/leaf-oval.stl"),
+        id: "leaf-maple",
+        label: "Maple leaf",
+        filename: "leaf-maple.stl",
+        footprint_mm: 4.9663,
+        height_mm: 1.6860,
+        license: LEAF_LICENSE,
+        bytes: include_bytes!("../../resources/scatter/leaf-maple.stl"),
     },
     BundledAsset {
-        id: "leaf-lobed",
-        label: "Lobed leaf",
-        filename: "leaf-lobed.stl",
-        footprint_mm: 7.8,
-        height_mm: 0.405,
-        license: "CC0 (original Plinth procedural asset)",
-        bytes: include_bytes!("../../resources/scatter/leaf-lobed.stl"),
+        id: "leaf-apple",
+        label: "Apple leaf",
+        filename: "leaf-apple.stl",
+        footprint_mm: 4.9696,
+        height_mm: 1.4742,
+        license: LEAF_LICENSE,
+        bytes: include_bytes!("../../resources/scatter/leaf-apple.stl"),
     },
     BundledAsset {
-        id: "leaf-cluster",
-        label: "Fallen leaf cluster",
-        filename: "leaf-cluster.stl",
-        footprint_mm: 7.516,
-        height_mm: 0.868,
-        license: "CC0 (original Plinth procedural asset)",
-        bytes: include_bytes!("../../resources/scatter/leaf-cluster.stl"),
+        id: "leaf-cherry",
+        label: "Cherry leaf",
+        filename: "leaf-cherry.stl",
+        footprint_mm: 4.9996,
+        height_mm: 1.4852,
+        license: LEAF_LICENSE,
+        bytes: include_bytes!("../../resources/scatter/leaf-cherry.stl"),
     },
     BundledAsset {
-        id: "grass-tuft",
-        label: "Grass tuft",
-        filename: "grass-tuft.stl",
-        footprint_mm: 5.857,
-        height_mm: 5.976,
-        license: "CC0 (original Plinth procedural asset)",
-        bytes: include_bytes!("../../resources/scatter/grass-tuft.stl"),
+        id: "leaf-oak",
+        label: "Oak leaf",
+        filename: "leaf-oak.stl",
+        footprint_mm: 4.9992,
+        height_mm: 1.5903,
+        license: LEAF_LICENSE,
+        bytes: include_bytes!("../../resources/scatter/leaf-oak.stl"),
     },
     BundledAsset {
-        id: "broadleaf-plant",
-        label: "Broadleaf plant",
-        filename: "broadleaf-plant.stl",
-        footprint_mm: 8.48,
-        height_mm: 2.132,
-        license: "CC0 (original Plinth procedural asset)",
-        bytes: include_bytes!("../../resources/scatter/broadleaf-plant.stl"),
+        id: "leaf-hazel",
+        label: "Hazel leaf",
+        filename: "leaf-hazel.stl",
+        footprint_mm: 4.9889,
+        height_mm: 1.5061,
+        license: LEAF_LICENSE,
+        bytes: include_bytes!("../../resources/scatter/leaf-hazel.stl"),
     },
     BundledAsset {
-        id: "fern",
-        label: "Fern frond",
-        filename: "fern.stl",
-        footprint_mm: 6.157,
-        height_mm: 5.643,
-        license: "CC0 (original Plinth procedural asset)",
-        bytes: include_bytes!("../../resources/scatter/fern.stl"),
+        id: "forest-branch-scan",
+        label: "Broken forest branch",
+        filename: "forest-branch-scan.stl",
+        footprint_mm: 10.920,
+        height_mm: 5.483,
+        license: "CC0 (Poly Haven)",
+        bytes: include_bytes!("../../resources/scatter/forest-branch-scan.stl"),
     },
     BundledAsset {
-        id: "twig-straight",
-        label: "Crooked twig",
-        filename: "twig-straight.stl",
-        footprint_mm: 11.078,
-        height_mm: 1.087,
-        license: "CC0 (original Plinth procedural asset)",
-        bytes: include_bytes!("../../resources/scatter/twig-straight.stl"),
-    },
-    BundledAsset {
-        id: "twig-forked",
-        label: "Forked twig",
-        filename: "twig-forked.stl",
-        footprint_mm: 11.078,
-        height_mm: 1.087,
-        license: "CC0 (original Plinth procedural asset)",
-        bytes: include_bytes!("../../resources/scatter/twig-forked.stl"),
+        id: "forest-log-scan",
+        label: "Fallen forest log",
+        filename: "forest-log-scan.stl",
+        footprint_mm: 15.890,
+        height_mm: 1.454,
+        license: "CC0 (Poly Haven)",
+        bytes: include_bytes!("../../resources/scatter/forest-log-scan.stl"),
     },
 ];
 
@@ -212,8 +216,8 @@ const MANIFEST_JSON: &str = include_str!("../../resources/scatter/manifest.json"
 /// The curated CREDITS.md, embedded verbatim (docs/SCATTER.md "Bundled
 /// assets": "listed in an in-app credits panel + CREDITS file when
 /// attribution is owed"). Every bundled piece is CC0 (nothing legally
-/// owed), but the file records the source institutions/authors anyway —
-/// see the file itself. Exposed as its own command rather than folded into
+/// owed) EXCEPT the CC BY-SA 4.0 leaf set, whose attribution the file
+/// carries — see the file itself. Exposed as its own command rather than folded into
 /// `ScatterAsset` since it's one shared document, not a per-asset field.
 #[tauri::command]
 #[specta::specta]
@@ -514,12 +518,18 @@ mod tests {
     }
 
     #[test]
-    fn bundled_assets_all_cc0_and_manifold_per_manifest() {
+    fn bundled_assets_manifold_and_license_allowed_per_manifest() {
         let manifest: Value = serde_json::from_str(MANIFEST_JSON).unwrap();
         for entry in manifest["assets"].as_array().unwrap() {
+            // CC0 is the default admission bar (docs/SCATTER-ASSETS.md); CC
+            // BY-SA 4.0 is the one deliberate exception (the Printables leaf
+            // set — see LEAF_LICENSE). Anything else is not cleared to ship.
+            let license = entry["license"].as_str().unwrap();
             assert!(
-                entry["license"].as_str().unwrap().contains("CC0"),
-                "every bundled piece must be CC0 per docs/SCATTER-ASSETS.md's admission bar"
+                license.contains("CC0") || license.contains("CC BY-SA 4.0"),
+                "bundled piece '{}' has un-cleared license '{}' — only CC0 or CC BY-SA 4.0 ship",
+                entry["id"].as_str().unwrap(),
+                license
             );
             assert!(entry["manifold"].as_bool().unwrap());
             assert!(entry["tris"].as_u64().unwrap() <= 15_000);

@@ -473,38 +473,43 @@ const SCATTER_PRESETS: ScatterPreset[] = [
   {
     id: "forest-ground",
     label: "Forest ground",
-    // INTERIM MIX. The leaf carpet that used to dominate this preset is gone
-    // for now: the generated "leaf" kind read as oversized spiky cards and
-    // was removed, and the leaf carpet is being re-sourced as a bundled
-    // ASSET (a real leaf STL, decimated to scatter scale). Until that lands,
-    // this preset is twig litter + grit + the occasional mushroom — a bare
-    // forest floor, deliberately sparser than the leaf-carpet target. The
-    // three Poly Haven fallen-wood scans (log/branch/stump) were also
-    // dropped from the mix: they are hollow photogrammetry and the topple
-    // pass lays them on their side, turning that cavity into an upward-
-    // facing resin trap. They remain selectable in the BUNDLED mix for
-    // anyone who wants to experiment, just not auto-included here.
-    //
-    // Density is tuned DOWN for the sparser mix (a twig-only carpet at the
-    // old 230/dm2 read as a chaotic stick pile); it rises again, and a
-    // `leaf` assetWeight returns, once the leaf asset is bundled.
-    density_per_dm2: 80,
+    // Carpet density: at 230/dm2 a 120x80mm plate (~0.96 dm2 units) targets
+    // ~220 raw candidates before edge-margin/slope trim — a dense forest
+    // litter. The leaves (bundled ASSETS below) dominate that carpet, with
+    // twigs threaded through and grit/mushrooms underneath.
+    density_per_dm2: 230,
     // Forest litter drifts rather than an even sprinkle — same idea as the
-    // Grass preset below, tuned lower since twig litter reads as
+    // Grass preset below, tuned lower since leaf/twig litter reads as
     // loose drifts, not tight tufts.
     clump: 0.4,
-    // Twigs are the bulk of the litter, stones are occasional grit
+    // Twigs thread through the leaf carpet, stones are occasional grit
     // underneath, and the mushroom is RARE — all generated kinds (see
     // debrisPieces above: mushroom is build_mushroom_piece, a proper
     // stem+cap toadstool, NOT the bundled mushroom.stl, which reads as a
-    // smooth egg at this scale).
-    weights: { twig: 6, pebble: 3, rock: 1, mushroom: 0.5 },
-    // Shallow sink so thin twig litter RESTS on the surface instead of
-    // being swallowed by the default 0.5-2mm sink (see ScatterPreset.sink_mm's
-    // doc comment). The "always buried" floor still embeds every piece
-    // enough not to snap off; this just stops the range from pushing them
-    // deeper than that.
+    // smooth egg at this scale). The LEAVES themselves come from the bundled
+    // set via assetWeights below, not a generated kind (the generated leaf
+    // was removed — it read as an oversized spiky card).
+    weights: { twig: 5, pebble: 2, rock: 0.6, mushroom: 0.3 },
+    // Shallow sink so the thin curled leaves and twig litter REST on the
+    // surface instead of being swallowed by the default 0.5-2mm sink (see
+    // ScatterPreset.sink_mm's doc comment). The "always buried" floor still
+    // embeds every piece enough not to snap off; this just stops the range
+    // from pushing them deeper than that.
     sink_mm: [0.0, 0.4],
+    // The leaf carpet: the five bundled leaf species (CC BY-SA, see
+    // scatter_assets::LEAF_LICENSE) at heavy weight so they dominate the
+    // litter, roughly evenly across species. Relative to the `weights` sum
+    // above (~7.9), a combined leaf weight of ~50 puts leaves at ~85% of the
+    // carpet — hundreds of leaves with twigs and grit mixed in. Gracefully
+    // skipped if the bundled set failed to load, same as Boneyard's
+    // skulls/bones (see selectScatterPreset's own comment).
+    assetWeights: {
+      "leaf-oak": 10,
+      "leaf-maple": 10,
+      "leaf-hazel": 10,
+      "leaf-cherry": 10,
+      "leaf-apple": 10,
+    },
   },
 ];
 const selectedScatterPresetId = ref<string | null>(null);

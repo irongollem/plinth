@@ -68,11 +68,46 @@ def normalize(obj, target_footprint, rotation):
 
 def make_printable(obj):
     select(obj)
+    if obj.name == "forest-stump-scan":
+        # This scan is an open photogrammetry cap rather than a volume.
+        # Give it a printable underside before voxelizing the surface.
+        solid = obj.modifiers.new("printable_backing", "SOLIDIFY")
+        solid.thickness = 0.45
+        solid.offset = -1.0
+        solid.use_rim = True
+        bpy.ops.object.modifier_apply(modifier=solid.name)
     remesh = obj.modifiers.new("watertight_scan", "REMESH")
     remesh.mode = "VOXEL"
     remesh.voxel_size = VOXEL_MM
     remesh.use_smooth_shade = True
     bpy.ops.object.modifier_apply(modifier=remesh.name)
+
+    # Photogrammetry sources can contain a few floating voxel specks. Keep
+    # only the connected body of the scanned object, never texture debris.
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    unseen = set(bm.verts)
+    islands = []
+    while unseen:
+        island = {unseen.pop()}
+        stack = list(island)
+        while stack:
+            v = stack.pop()
+            for edge in v.link_edges:
+                other = edge.other_vert(v)
+                if other in unseen:
+                    unseen.remove(other)
+                    island.add(other)
+                    stack.append(other)
+        islands.append(island)
+    def island_extent(island):
+        xs = [v.co.x for v in island]; ys = [v.co.y for v in island]; zs = [v.co.z for v in island]
+        return (max(xs) - min(xs)) ** 2 + (max(ys) - min(ys)) ** 2 + (max(zs) - min(zs)) ** 2
+    print("ISLANDS", obj.name, len(islands), sorted([(len(i), island_extent(i) ** 0.5) for i in islands], reverse=True)[:8])
+    keep = max(islands, key=island_extent)
+    bmesh.ops.delete(bm, geom=[v for v in bm.verts if v not in keep], context="VERTS")
+    bm.to_mesh(obj.data)
+    bm.free()
 
     smooth = obj.modifiers.new("scan_cleanup", "SMOOTH")
     smooth.factor = 0.18

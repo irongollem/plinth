@@ -1,8 +1,10 @@
 # Credits — Plinth bundled scatter assets
 
-All pieces in this bundle are CC0 (public domain dedication). No
-attribution is legally owed for any of them, but crediting the source
-institutions/authors is good practice and is recorded here per
+Every piece in this bundle is CC0 (public domain dedication) EXCEPT the
+organic-leaf set, which is CC BY-SA 4.0 and DOES carry a legal attribution
+and share-alike obligation — see the "Printables — organic leaf set"
+section below. For the CC0 pieces no attribution is owed, but crediting the
+source institutions/authors is good practice and is recorded here per
 docs/SCATTER.md's "in-app credits panel + CREDITS file when attribution
 is owed" convention (owed or not).
 
@@ -52,14 +54,47 @@ National Museum of Natural History, Smithsonian Open Access (CC0)."
 Suggested credit line: "Mushroom model by JeremyWoods (OpenGameArt.org),
 CC0."
 
-## Original Plinth procedural assets
+## Poly Haven — forest-floor scans
 
-The oval leaf, lobed leaf, fallen leaf cluster, grass tuft, broadleaf
-plant, fern frond, crooked twig, and forked twig were generated expressly
-for Plinth from original procedural geometry. They are dedicated to the
-public domain under CC0. The reproducible Blender source is
-`foliage-twigs-source.blend`; its generator is
-`tools/generate_scatter_foliage.py` in the project repository.
+These two photogrammetry-derived meshes are published under CC0 by
+Poly Haven. Attribution is not legally required, but the creator details
+and original asset pages are preserved here:
+
+- **Broken forest branch** (`forest-branch-scan.stl`) — source asset
+  `dead_quiver_branch_01`. Photography: Greg Zaal. Modeling: Jenelle van
+  Heerden. <https://polyhaven.com/a/dead_quiver_branch_01>
+- **Fallen forest log** (`forest-log-scan.stl`) — source asset
+  `dead_tree_trunk`. Author: Rob Tuytel.
+  <https://polyhaven.com/a/dead_tree_trunk>
+
+The bundle contains geometry only—no Poly Haven textures. The source
+meshes were scaled to 28–32mm tabletop use, voxel-remeshed into one closed
+shell, stripped of floating scan fragments, and capped at 15,000 triangles.
+The reproducible conversion script is `tools/curate_polyhaven_forest.py`.
+
+## Printables — organic leaf set (CC BY-SA 4.0)
+
+The five leaf pieces are derived from the "Organic Leaves Set (realistic
+look)" published on Printables under **CC BY-SA 4.0**. This is the only
+non-CC0 asset in the bundle: attribution is legally required, and any work
+that incorporates these leaves (a decorated base, an exported/printed
+model) is itself CC BY-SA 4.0 (attribution + share-alike).
+
+- **Maple / Apple / Cherry / Oak / Hazel leaf**
+  (`leaf-maple.stl`, `leaf-apple.stl`, `leaf-cherry.stl`, `leaf-oak.stl`,
+  `leaf-hazel.stl`) — source: "Organic Leaves Set (realistic look)".
+  Author: credited on the source page linked below (the specific username
+  was not recorded at curation time; attribution is via the canonical
+  Printables link, which names the creator).
+  <https://www.printables.com/model/324354-organic-leaves-set-realistic-look>
+  License: CC BY-SA 4.0 <https://creativecommons.org/licenses/by-sa/4.0/>
+
+Changes made: decimated to ~1,500 triangles, XY-normalized to a ~5mm
+footprint with the blade thickness set to 1.2mm (the ~90mm print original
+would downscale to unprintable foil, and a thin leaf vanishes into the
+scatter's 0.4mm stitch-sink; 1.2mm is deliberately chunky so it prints and
+sits proud), and a gentle curl baked in so the leaves cup rather than lie
+flat. The reproducible conversion script is `tools/curate_leaves.py`.
 
 ## What did NOT make the bundle
 

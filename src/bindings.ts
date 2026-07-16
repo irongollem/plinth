@@ -944,8 +944,8 @@ async getScatterAssets() : Promise<Result<ScatterAsset[], AppError>> {
  * The curated CREDITS.md, embedded verbatim (docs/SCATTER.md "Bundled
  * assets": "listed in an in-app credits panel + CREDITS file when
  * attribution is owed"). Every bundled piece is CC0 (nothing legally
- * owed), but the file records the source institutions/authors anyway —
- * see the file itself. Exposed as its own command rather than folded into
+ * owed) EXCEPT the CC BY-SA 4.0 leaf set, whose attribution the file
+ * carries — see the file itself. Exposed as its own command rather than folded into
  * `ScatterAsset` since it's one shared document, not a per-asset field.
  */
 async getScatterCredits() : Promise<string> {
