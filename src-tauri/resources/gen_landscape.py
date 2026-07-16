@@ -1,9 +1,10 @@
 # Parametric landscape generator — bakes a heightfield terrain STL from a
 # JSON parameter set. See docs/BASECUTTER.md "The landscape generator
 # (phase 6)": the point is that every starter terrain (cobblestone street,
-# sandy dunes, rocky ground, lava flow) is a heightfield, and a displaced
-# grid with a skirt and bottom cap is watertight by construction — no
-# undercuts, no designer sculpt required, no bundled STL assets.
+# sandy dunes, rocky ground, lava flow, forest floor) is a heightfield, and
+# a displaced grid with a skirt and bottom cap is watertight by
+# construction — no undercuts, no designer sculpt required, no bundled STL
+# assets.
 #
 # PRESETS LIVE IN RUST (basecutter::generator::get_landscape_presets), NOT
 # HERE — this script only knows parameters, never preset names.

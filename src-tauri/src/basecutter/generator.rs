@@ -305,6 +305,34 @@ pub struct GeneratorPreset {
 ///   boulders again (see the phase's verification renders).
 /// - **lava-flow**: the flow channel field + a light ridged-noise crust so
 ///   the banks aren't perfectly smooth.
+/// - **forest-floor**: bare dirt under trees, not a heightfield showpiece —
+///   it exists to be SCATTERED onto (the Forest ground scatter preset drops
+///   leaf litter/twigs/mushrooms on top), so the terrain itself stays quiet.
+///   ONE noise layer, no other layer enabled: `scale: 0.045` (~22mm
+///   wavelength) is octave 1 — the gentle rolling undulation, about the
+///   size of a mini's own base, so a 30-40mm close-up sees one soft rise/
+///   fall, not a flat plain. `octaves: 5` piles progressively finer/weaker
+///   components on the SAME layer (lacunarity 2.0/persistence 0.5 are
+///   fixed in `_fractal`), landing at ~11.1/5.6/2.8/1.4mm — the earthy
+///   surface grain, for free, off the one layer, no second layer or new
+///   param needed. First tuning pass used scale 0.02/octaves 5 (~50mm
+///   base, ~1.6mm finest octave): the real-Blender bake was readable
+///   top-down but a 30mm raking close-up came back nearly flat — a
+///   scanline diagnostic on the baked heights showed the fine octaves'
+///   *combined* weight is fixed by octave count/persistence regardless of
+///   `scale` (~22% for octaves 3-5 either way), but at a 50mm base
+///   wavelength that 22% is spread thin over a much bigger close-up
+///   footprint; shrinking the base wavelength to ~22mm concentrates the
+///   same relative grain into a close-up-sized area, which is what
+///   actually reads as texture at 30-40mm (see the phase's verification
+///   renders). `ridged: false` because dirt isn't sharp ridges.
+///   `relief_mm: 3.5` sits between cobblestone's 1.6 subtle-texture and
+///   sandy's 4.0 dune body — "a few mm", not dunes. `resolution_mm: 0.4`
+///   (same as cobblestone/lava) resolves the ~1.4mm finest octave with a
+///   few samples per wavelength; verts stay in the tens of thousands,
+///   nowhere near MAX_GRID_VERTS. Camber is left off — this is soil, not
+///   a crowned street; the noise alone already keeps it from reading dead
+///   flat.
 pub fn seed_presets() -> Vec<GeneratorPreset> {
     vec![
         GeneratorPreset {
@@ -459,6 +487,50 @@ pub fn seed_presets() -> Vec<GeneratorPreset> {
                         ridged: true,
                         amount: 0.3,
                     },
+                    ..Default::default()
+                },
+            },
+        },
+        GeneratorPreset {
+            id: "forest-floor".to_string(),
+            label: "Forest floor".to_string(),
+            params: LandscapeParams {
+                seed: 5,
+                width_mm: 120.0,
+                depth_mm: 80.0,
+                // Fine enough to resolve the ~1.4mm top octave (see the
+                // doc comment above) with a few samples per wavelength —
+                // still tiny against MAX_GRID_VERTS (well under 100k verts
+                // on a 120x80 plate).
+                resolution_mm: 0.4,
+                feature_scale: 1.0,
+                carrier_mm: 2.0,
+                // A few mm of relief — soil, not dunes.
+                relief_mm: 3.5,
+                layers: LandscapeLayers {
+                    // One layer does both jobs: scale 0.045 (~22mm
+                    // wavelength, about a mini-base's own size) is the
+                    // gentle rolling undulation; the extra octaves ride on
+                    // top of the SAME layer at progressively smaller
+                    // wavelength/weaker amplitude (fixed lacunarity 2.0 /
+                    // persistence 0.5 in _fractal), landing around 1.4mm
+                    // at octave 5 — that's the earthy surface grain, no
+                    // second layer needed. Base wavelength matters here,
+                    // not just octave count: a 50mm base (tried first)
+                    // spread the same relative grain weight too thin
+                    // across a close-up-sized patch to actually read (see
+                    // the doc comment above).
+                    noise: NoiseLayer {
+                        enabled: true,
+                        scale: 0.045,
+                        octaves: 5,
+                        ridged: false,
+                        amount: 1.0,
+                    },
+                    // stones/boulders/ripples/flow/camber all stay off
+                    // (Default::default()): no cobbles, no boulders, no
+                    // ripples, no lava, no street crown — this terrain
+                    // exists to be scattered onto, not to be the show.
                     ..Default::default()
                 },
             },
@@ -953,12 +1025,12 @@ mod tests {
     }
 
     #[test]
-    fn get_landscape_presets_has_the_four_seed_presets() {
+    fn get_landscape_presets_has_the_five_seed_presets() {
         let presets = seed_presets();
         let ids: Vec<&str> = presets.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["cobblestone-street", "sandy", "rocky", "lava-flow"]
+            vec!["cobblestone-street", "sandy", "rocky", "lava-flow", "forest-floor"]
         );
         for preset in &presets {
             assert!(preset.params.width_mm > 0.0);
@@ -1012,6 +1084,31 @@ mod tests {
         assert!(preset.params.layers.stones.enabled);
         assert!(preset.params.layers.stones.cluster > 0.5);
         assert!(preset.params.layers.stones.rough > 0.5);
+    }
+
+    /// Forest floor is quiet dirt, not a heightfield showpiece — pins that
+    /// only noise is on (no stones/boulders/ripples/flow/camber) and that
+    /// it stacks enough octaves to carry both the gentle rolling scale and
+    /// the fine earthy grain from the one layer (see seed_presets' doc
+    /// comment for why no second layer or new param was needed).
+    #[test]
+    fn forest_floor_preset_enables_only_soft_multi_octave_noise() {
+        let preset = seed_presets()
+            .into_iter()
+            .find(|p| p.id == "forest-floor")
+            .unwrap();
+        assert!(preset.params.layers.noise.enabled);
+        assert!(!preset.params.layers.noise.ridged);
+        assert!(
+            preset.params.layers.noise.octaves >= 4,
+            "forest floor needs enough octaves to carry fine grain on top of the rolling base"
+        );
+        assert!(!preset.params.layers.stones.enabled);
+        assert!(!preset.params.layers.boulders.enabled);
+        assert!(!preset.params.layers.ripples.enabled);
+        assert!(!preset.params.layers.flow.enabled);
+        // relief stays modest — soil, not dunes or mountains.
+        assert!(preset.params.relief_mm <= 5.0);
     }
 
     #[test]
