@@ -970,18 +970,22 @@ onBeforeUnmount(() => {
       v-if="isLoading"
       class="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/50 rounded-box"
     >
-      <span class="loading loading-spinner loading-lg"></span>
-      <span class="text-sm opacity-70">Loading landscape…</span>
+      <span class="loading loading-spinner loading-lg text-white/80"></span>
+      <span class="text-sm text-white/70">Loading landscape…</span>
     </div>
+    <!-- The viewport canvas is always dark regardless of app theme, so text
+         overlaid on it uses fixed light colours (text-white/*) rather than
+         theme-driven base-content, which would render dark-on-dark in light
+         mode. -->
     <div
       v-if="!landscapePath"
-      class="absolute inset-0 flex items-center justify-center text-base-content/40 pointer-events-none"
+      class="absolute inset-0 flex items-center justify-center text-white/40 pointer-events-none"
     >
       Select a landscape STL to place cutters
     </div>
     <div
       v-else
-      class="absolute bottom-2 left-2 text-xs text-base-content/40 pointer-events-none"
+      class="absolute bottom-2 left-2 text-xs text-white/45 pointer-events-none"
     >
       drag: move · empty-drag or ⇧/⌘-drag: pan · handle: rotate (⇧ snaps 15°) ·
       [ and ] keys: rotate selection · delete: remove · right-drag: tilt/rotate
