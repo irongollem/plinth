@@ -122,13 +122,42 @@ fn read_local_manifest(dest: &Path) -> Option<Manifest> {
 }
 
 /// A manifest-relative name that stays inside its component dir. Hostile
-/// names ("../x", absolute) read as None and are ignored wholesale.
-fn safe_relative(name: &str) -> Option<&Path> {
+/// names read as None and are ignored wholesale: `is_absolute()` catches
+/// POSIX-absolute and `C:\x`, `ParentDir` catches `../x`, and `Prefix`
+/// catches the forms `is_absolute()` misses on Windows — a drive-relative
+/// `C:foo` (no leading slash, still resolves against drive C's cwd) or a
+/// `\\?\`/UNC path. `PathBuf::join` treats any component carrying a `Prefix`
+/// as a full replacement of the base, not an append, so letting one through
+/// here would silently retarget the whole destination.
+///
+/// `Component::Prefix` is only ever produced by the platform path parser
+/// when the *build* targets Windows — on a non-Windows host (our CI, most
+/// contributors' machines) `Path::new("C:evil.stl")` parses to a single
+/// harmless-looking `Normal` component, so the manifest's userbase being
+/// mostly Windows doesn't mean the binary that validates it is. The drive
+/// prefix and any backslash (the Windows separator, otherwise just an
+/// ordinary — and suspicious, since our own writer never emits one — byte
+/// on POSIX) are therefore also checked textually so the guard holds no
+/// matter which OS built it.
+///
+/// `pub(crate)` so `manifest::extract_component_archive` — which faces the
+/// same attacker-authored manifest names — shares this one rule instead of
+/// re-deriving it.
+pub(crate) fn safe_relative(name: &str) -> Option<&Path> {
+    let bytes = name.as_bytes();
+    let has_drive_prefix =
+        bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if name.contains('\\') || has_drive_prefix {
+        return None;
+    }
     let path = Path::new(name);
     if path.is_absolute()
-        || path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
+        || path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
     {
         return None;
     }
@@ -181,7 +210,21 @@ pub fn inspect_package(
         .iter()
         .map(|component| {
             let component_dest = dest.join(layout::sanitize_segment(&component.name));
-            let (state, detail) = if !package_dir.join(&component.archive).is_file() {
+            // component.archive is attacker-authorable manifest text; reject
+            // before it ever becomes a path so a value like "../../secrets"
+            // or "C:evil.zip" can't be opened/hashed/extracted from outside
+            // package_dir. Reported through the same MissingArchive state a
+            // legitimate absent sibling gets — the outcome for the UI is
+            // identical ("can't import this component").
+            let (state, detail) = if safe_relative(&component.archive).is_none() {
+                (
+                    ComponentState::MissingArchive,
+                    Some(format!(
+                        "'{}' is not a safe archive path — refusing to import",
+                        component.archive
+                    )),
+                )
+            } else if !package_dir.join(&component.archive).is_file() {
                 (
                     ComponentState::MissingArchive,
                     Some(format!(
@@ -398,6 +441,14 @@ pub fn import_release(
             if updating && contains_pack_sidecar(&component_dest) {
                 return Err("packed at rest — unpack it in the catalog first, then update".into());
             }
+            // Same guard as inspect_package: an attacker-authored archive
+            // name must not resolve outside package_dir before we open it.
+            if safe_relative(&component.archive).is_none() {
+                return Err(format!(
+                    "archive '{}' is not a safe path — refusing to import",
+                    component.archive
+                ));
+            }
             let archive_path = package_dir.join(&component.archive);
             if !archive_path.is_file() {
                 return Err(format!("archive '{}' is missing", component.archive));
@@ -500,6 +551,22 @@ mod tests {
                 "images":[],"other_files":[]}"#,
         )
         .unwrap();
+    }
+
+    /// safe_relative is the guard both extract_component_archive (via
+    /// manifest names) and inspect_package/import_release (via
+    /// component.archive) rely on — pin its rule directly.
+    #[test]
+    fn safe_relative_rejects_traversal_absolute_and_drive_relative_names() {
+        assert!(safe_relative("variant_b/base.stl").is_some(), "legit subdir kept");
+        assert!(safe_relative("../escape.stl").is_none(), "parent-dir escape");
+        assert!(safe_relative("a/../../b").is_none(), "buried parent-dir escape");
+        assert!(safe_relative("/etc/passwd").is_none(), "posix-absolute");
+        // Textual check: on a non-Windows build, Path's parser wouldn't
+        // otherwise see this as anything but a plain relative component.
+        assert!(safe_relative("C:evil.stl").is_none(), "drive-relative");
+        assert!(safe_relative(r"C:\evil.stl").is_none(), "drive-absolute");
+        assert!(safe_relative(r"\\server\share\x").is_none(), "unc-style");
     }
 
     fn write_model_json(component: &Path, name: &str, files: &[&str]) {
@@ -812,6 +879,78 @@ mod tests {
         );
         let inspection = inspect_package(&out2.join("release.3pk"), &library).unwrap();
         assert_eq!(inspection.components[0].state, ComponentState::Changed);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// component.archive is attacker-authored manifest text; a value that
+    /// escapes package_dir ("../secret.zip") must be refused before it's
+    /// ever opened — not followed to hash/extract a file the import was
+    /// never meant to touch.
+    #[test]
+    fn refuses_a_malicious_component_archive_path() {
+        let dir = temp("evilarchive");
+        let out = dir.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+
+        // Stands in for whatever a "../" archive path would actually reach.
+        std::fs::write(dir.join("secret.zip"), b"top-secret-bytes").unwrap();
+
+        let manifest = Manifest::new(
+            manifest::ManifestRelease {
+                name: "Evil Release".into(),
+                designer: "Attacker".into(),
+                date: "2026-01".into(),
+                version: "1".into(),
+                description: "".into(),
+                tags: vec![],
+                images: vec![],
+            },
+            vec![Component {
+                name: "comp".into(),
+                archive: "../secret.zip".into(),
+                checksum: "blake3:deadbeef".into(),
+                size_bytes: 0,
+                dedup: false,
+                models: vec![],
+            }],
+            "0.1.0",
+        );
+        std::fs::write(out.join("manifest.json"), manifest.to_json().unwrap()).unwrap();
+        write_release_json(&out);
+        compress_files(
+            &[out.join("manifest.json"), out.join("release.json")],
+            std::fs::File::create(out.join("release.3pk")).unwrap(),
+            None::<fn(u32) -> bool>,
+        )
+        .unwrap();
+
+        let library = dir.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+
+        let inspection = inspect_package(&out.join("release.3pk"), &library).unwrap();
+        assert_eq!(
+            inspection.components[0].state,
+            ComponentState::MissingArchive
+        );
+        assert!(inspection.components[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("not a safe"));
+
+        let outcome = import_release(&out.join("release.3pk"), &library, None).unwrap();
+        assert_eq!(outcome.components, 0, "the hostile component must not import");
+        assert!(
+            outcome.errors[0].contains("not a safe path"),
+            "{:?}",
+            outcome.errors
+        );
+        let release_dir = Path::new(&outcome.dest_dir);
+        assert!(
+            !release_dir.join("comp").exists(),
+            "nothing extracted from the escaped archive"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

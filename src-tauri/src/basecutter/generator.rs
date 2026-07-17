@@ -804,6 +804,30 @@ fn landscape_output_dir(app_handle: &AppHandle) -> Result<PathBuf, AppError> {
     Ok(dir)
 }
 
+/// `preset_id` crosses the Tauri IPC bridge from an untrusted frontend and
+/// is used below as `out_dir.join(format!("{slug}-{seed}.stl"))` — an
+/// absolute path, a `..` component, or a drive/UNC prefix would make
+/// `PathBuf::join` discard `out_dir` entirely and write the STL wherever
+/// the caller chose instead. Rather than sanitizing the string, reject
+/// anything that isn't one of the actual preset ids `seed_presets()` knows
+/// about: `preset_id` is only ever meant to be a chip id, never
+/// user-composed text (that's what `LandscapeParams` is for), so an
+/// allow-list is both the stronger guard and the more honest one.
+fn validate_preset_id(preset_id: Option<&str>) -> Result<(), AppError> {
+    match preset_id {
+        None => Ok(()),
+        Some(id) => {
+            if seed_presets().iter().any(|preset| preset.id == id) {
+                Ok(())
+            } else {
+                Err(AppError::InvalidInput(format!(
+                    "Unknown landscape preset id '{id}'"
+                )))
+            }
+        }
+    }
+}
+
 /// `preset_id` is the preset chip's id ("cobblestone-street", ...) when
 /// starting from a chip, None for a from-scratch custom bake — only used to
 /// name the output file (docs/BASECUTTER.md:
@@ -825,6 +849,7 @@ pub async fn start_landscape_generation(
             "Relief height must not be negative".to_string(),
         ));
     }
+    validate_preset_id(preset_id.as_deref())?;
 
     let blender = crate::render::engine::detect_blender_cached().await?;
     let script = materialize_gen_landscape_script(&app_handle)?;
@@ -1036,6 +1061,29 @@ mod tests {
             assert!(preset.params.width_mm > 0.0);
             assert!(preset.params.depth_mm > 0.0);
             assert!(preset.params.relief_mm > 0.0);
+        }
+    }
+
+    // ---- validate_preset_id (IPC is the trust boundary: preset_id lands
+    // in `out_dir.join(...)`, so an attacker-chosen id must not escape it) ----
+
+    #[test]
+    fn validate_preset_id_accepts_none_and_known_ids() {
+        assert!(validate_preset_id(None).is_ok());
+        for preset in seed_presets() {
+            assert!(validate_preset_id(Some(&preset.id)).is_ok());
+        }
+    }
+
+    #[test]
+    fn validate_preset_id_rejects_a_traversal_attempt() {
+        for bad in ["../../evil", "/etc/passwd", "C:evil", "a/b", "a\\b", "not-a-real-preset"] {
+            let err = validate_preset_id(Some(bad))
+                .expect_err(&format!("'{bad}' must be rejected as a preset id"));
+            assert!(
+                err.to_string().contains("Unknown landscape preset id"),
+                "error should explain why '{bad}' was rejected: {err}"
+            );
         }
     }
 

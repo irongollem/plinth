@@ -148,17 +148,42 @@ pub fn extract_component_archive(
         .extract(dest_dir)
         .map_err(|e| AppError::IoError(format!("Extraction failed: {}", e)))?;
 
-    // First extracted path per checksum = the donor for elided twins
+    // First extracted path per checksum = the donor for elided twins.
+    // `entry.name` comes straight from the untrusted manifest — a name like
+    // "../../foo", an absolute path, or a Windows drive-relative "C:foo"
+    // must not become a hardlink/copy target outside dest_dir, so every name
+    // goes through the same guard `file::import::safe_relative` uses for
+    // manifest paths elsewhere. A hostile name here is just skipped: it
+    // can't donate (and if some *other*, legitimate entry needed exactly
+    // that missing file, the rematerialization loop below will say so).
     let mut by_checksum: std::collections::HashMap<&str, std::path::PathBuf> =
         std::collections::HashMap::new();
     for entry in files {
-        let path = dest_dir.join(&entry.name);
+        let Some(rel) = crate::file::import::safe_relative(&entry.name) else {
+            continue;
+        };
+        let path = dest_dir.join(rel);
         if path.is_file() {
             by_checksum.entry(entry.checksum.as_str()).or_insert(path);
         }
     }
     for entry in files {
-        let path = dest_dir.join(&entry.name);
+        let Some(rel) = crate::file::import::safe_relative(&entry.name) else {
+            return Err(AppError::InvalidInput(format!(
+                "Manifest entry '{}' is not a safe relative path — refusing to write outside the destination",
+                entry.name
+            )));
+        };
+        let path = dest_dir.join(rel);
+        // Belt-and-suspenders: the guard above should already make this
+        // impossible, but a path that somehow escapes dest_dir must never
+        // be hardlinked/copied to.
+        if !path.starts_with(dest_dir) {
+            return Err(AppError::InvalidInput(format!(
+                "Manifest entry '{}' resolves outside the destination directory",
+                entry.name
+            )));
+        }
         if path.exists() {
             continue;
         }
@@ -322,6 +347,84 @@ mod tests {
             std::fs::read(out.join("variant_b/base.stl")).unwrap()
         );
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A single-file archive plus a `dest` root, for the traversal tests
+    /// below — the archive contents are irrelevant, only the ManifestFile
+    /// list under test matters.
+    fn archive_and_dest(dir: &Path, tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let src = dir.join(format!("src_{}", tag));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("dummy.stl"), b"dummy").unwrap();
+        let archive_path = dir.join(format!("{}.zip", tag));
+        crate::file::compressors::compress_files(
+            &[src],
+            std::fs::File::create(&archive_path).unwrap(),
+            None::<fn(u32) -> bool>,
+        )
+        .unwrap();
+        (archive_path, dir.join(format!("dest_{}", tag)))
+    }
+
+    fn traversal_file(name: &str) -> ManifestFile {
+        ManifestFile {
+            name: name.into(),
+            checksum: "blake3:whatever".into(),
+            size_bytes: 0,
+            pose: None,
+            support_status: None,
+        }
+    }
+
+    /// A manifest entry named "../escape.stl" must not resolve above
+    /// dest_dir — extraction refuses it instead of hard-linking/copying a
+    /// donor out to the parent directory.
+    #[test]
+    fn rejects_a_parent_dir_escape_in_a_manifest_name() {
+        let dir = std::env::temp_dir().join(format!("stlpack_3pk_trav1_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let (archive_path, dest) = archive_and_dest(&dir, "parent");
+        let files = vec![traversal_file("../escape.stl")];
+        let result = extract_component_archive(&archive_path, &dest, &files);
+        assert!(matches!(result, Err(AppError::InvalidInput(_))));
+        assert!(
+            !dir.join("escape.stl").exists(),
+            "must not write outside dest_dir"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An absolute manifest name must not be joined verbatim onto dest_dir
+    /// (PathBuf::join replaces the base entirely for an absolute arg).
+    #[test]
+    fn rejects_an_absolute_path_in_a_manifest_name() {
+        let dir = std::env::temp_dir().join(format!("stlpack_3pk_trav2_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let (archive_path, dest) = archive_and_dest(&dir, "abs");
+        let outside = dir.join("outside.stl");
+        let evil_name = outside.to_string_lossy().into_owned();
+        let files = vec![traversal_file(&evil_name)];
+        let result = extract_component_archive(&archive_path, &dest, &files);
+        assert!(matches!(result, Err(AppError::InvalidInput(_))));
+        assert!(!outside.exists(), "must not write outside dest_dir");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A Windows drive-relative name ("C:evil.stl") is not `is_absolute()`
+    /// in Rust's model, but carries a `Component::Prefix` that makes
+    /// `PathBuf::join` replace the base — the guard must reject it too.
+    #[test]
+    fn rejects_a_windows_drive_relative_name() {
+        let dir = std::env::temp_dir().join(format!("stlpack_3pk_trav3_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let (archive_path, dest) = archive_and_dest(&dir, "drive");
+        let files = vec![traversal_file("C:evil.stl")];
+        let result = extract_component_archive(&archive_path, &dest, &files);
+        assert!(matches!(result, Err(AppError::InvalidInput(_))));
         std::fs::remove_dir_all(&dir).ok();
     }
 

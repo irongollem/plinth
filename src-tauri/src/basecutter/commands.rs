@@ -48,6 +48,61 @@ fn placement_label(placement: &Placement, index: usize) -> String {
     }
 }
 
+/// Windows reserved device names — case-insensitive, and reserved with or
+/// without an extension (`NUL.stl` is just as unusable as `NUL`). The
+/// userbase is mostly Windows (per docs), so this matters in practice, not
+/// just in theory.
+const WINDOWS_RESERVED_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Whether `segment` is safe to use as a single bare filename component —
+/// shared by `validate_placements` (placement.name -> `{name}.stl` in
+/// base_cut.py's unique_out_path) and generator::start_landscape_generation
+/// (preset_id -> `{slug}-{seed}.stl`). Both values cross the Tauri IPC
+/// boundary from an untrusted frontend and land in an `os.path.join`/
+/// `PathBuf::join` call, where an absolute path or `..` component escapes
+/// the intended output directory rather than staying inside it — this is
+/// the actual trust boundary, the frontend's own char-blocklist
+/// (src/utils/placementName.ts) is not enough on its own.
+///
+/// Rejects: empty (after trim), any path separator (`/` or `\` — both, not
+/// just the host OS's, since the userbase is mostly Windows regardless of
+/// where the app happens to run), `.`/`..` or a `..` component, a
+/// `Component::Prefix` (drive letter / UNC prefix), any of the Windows
+/// forbidden characters `< > : " | ? *`, control characters, or a Windows
+/// reserved device name (CON, NUL, COM1, ...).
+pub(crate) fn is_safe_filename_segment(segment: &str) -> bool {
+    let trimmed = segment.trim();
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return false;
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return false;
+    }
+    const FORBIDDEN_CHARS: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
+    if trimmed.chars().any(|c| FORBIDDEN_CHARS.contains(&c) || c.is_control()) {
+        return false;
+    }
+    // Belt-and-braces: Path::components() catches anything the manual
+    // checks above missed (e.g. a `Component::Prefix` a raw char scan
+    // wouldn't recognize as one on a non-Windows build host).
+    let component_count = Path::new(trimmed).components().count();
+    if component_count != 1 || !matches!(Path::new(trimmed).components().next(), Some(std::path::Component::Normal(_)))
+    {
+        return false;
+    }
+    let base = trimmed.split('.').next().unwrap_or(trimmed);
+    if WINDOWS_RESERVED_NAMES
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(base))
+    {
+        return false;
+    }
+    true
+}
+
 /// Rust-side sanity bound on `BaseCutJob.topper_mm` — deliberately looser
 /// than base_cut.py's [1.0, 3.0] clamp (docs/BASECUTTER.md "Pinned
 /// interfaces": "the script clamps 1..3 anyway — Rust just guards
@@ -86,7 +141,14 @@ fn validate_topper_mm(topper_mm: Option<f64>) -> Result<(), AppError> {
 ///   be degenerate;
 /// - two placements sharing a (non-empty) name are rejected — base_cut.py
 ///   names each output STL after the placement, so a collision means one
-///   cut silently overwrites the other's file.
+///   cut silently overwrites the other's file;
+/// - a placement.name that isn't a safe single filename segment is
+///   rejected — it flows unsanitized into base_cut.py's `unique_out_path`
+///   as `os.path.join(out_dir, f"{name}.stl")`, and this IPC command is the
+///   real trust boundary (the frontend's char-blocklist in
+///   src/utils/placementName.ts is not enough on its own): a caller of the
+///   Tauri bridge can send any string, and a `..`/absolute/drive-prefixed
+///   name would write the STL outside out_dir entirely.
 pub fn validate_placements(placements: &[Placement], plinth: &PlinthParams) -> Result<(), AppError> {
     let mut seen_names: HashSet<&str> = HashSet::new();
     for (index, placement) in placements.iter().enumerate() {
@@ -101,6 +163,12 @@ pub fn validate_placements(placements: &[Placement], plinth: &PlinthParams) -> R
             )));
         }
         if let Some(name) = &placement.name {
+            if !is_safe_filename_segment(name) {
+                return Err(AppError::InvalidInput(format!(
+                    "{}: name '{name}' is not a valid output filename — it must not contain a path separator, '..', a drive/UNC prefix, or the characters < > : \" | ? *",
+                    placement_label(placement, index)
+                )));
+            }
             if !seen_names.insert(name.as_str()) {
                 return Err(AppError::InvalidInput(format!(
                     "Duplicate placement name '{name}' — two placements with the same name would overwrite each other's output STL"
@@ -744,6 +812,29 @@ mod tests {
         assert!(err.to_string().contains("finite"), "{err}");
         let err = validate_topper_mm(Some(f64::INFINITY)).expect_err("must reject infinity");
         assert!(err.to_string().contains("finite"), "{err}");
+    }
+
+    // ---- placement.name path-traversal guard (IPC is the trust boundary:
+    // a caller of the Tauri bridge can send any string, regardless of what
+    // the frontend's char-blocklist would allow through a UI) ----
+
+    #[test]
+    fn rejects_placement_names_that_escape_out_dir() {
+        for bad in ["../evil", "a/b", "a\\b", "C:evil", "/etc/passwd", "..", "."] {
+            let placements = vec![placement(Some(bad), CutterKind::Circle { diameter_mm: 32.0 })];
+            let err = validate_placements(&placements, &PlinthParams::default())
+                .expect_err(&format!("'{bad}' must be rejected as a placement name"));
+            assert!(
+                err.to_string().contains("not a valid output filename"),
+                "error should explain why '{bad}' was rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_an_ordinary_placement_name() {
+        let placements = vec![placement(Some("round32"), CutterKind::Circle { diameter_mm: 32.0 })];
+        assert!(validate_placements(&placements, &PlinthParams::default()).is_ok());
     }
 
     #[test]
