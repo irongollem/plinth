@@ -1,0 +1,36 @@
+#!/bin/sh
+# Auto-format staged files with oxfmt so CI's `oxfmt --check` never trips.
+#
+# This is the same formatter and config CI runs (`bun run format:check`), so a
+# commit that passes here passes there. It formats only the files you staged,
+# then re-stages them — nothing else in your working tree is touched.
+#
+# Wired automatically by the `prepare` npm script on `bun install`
+# (`git config core.hooksPath .githooks`). No manual setup needed.
+#
+# It never blocks a commit: if oxfmt isn't installed yet, or a file can't be
+# formatted, the commit proceeds and CI stays the backstop.
+
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+fmt="$root/node_modules/.bin/oxfmt"
+
+# Dependencies not installed yet — let the commit through; CI still checks.
+[ -x "$fmt" ] || exit 0
+
+# Staged (added/copied/modified) files oxfmt understands, minus the generated
+# bindings file, which .oxfmtrc.json also ignores.
+files=$(git diff --cached --name-only --diff-filter=ACM \
+  | grep -Ei '\.(js|jsx|ts|tsx|mjs|cjs|vue|json|jsonc|md)$' \
+  | grep -v '^src/bindings\.ts$' || true)
+
+[ -n "$files" ] || exit 0
+
+# Format each staged file and re-stage it. `IFS= read -r` keeps paths with
+# spaces intact.
+printf '%s\n' "$files" | while IFS= read -r f; do
+  [ -f "$f" ] || continue
+  "$fmt" "$f" >/dev/null 2>&1 || true
+  git add -- "$f"
+done
