@@ -89,13 +89,13 @@ banner + one-click `sync-cookie` (the WIP's intent, minus string matching).
 
 1. **CLI `--json`** (minihoard repo, v0.4.0): serialize existing Progress
    events + entry/status/error shapes above; tests pin every payload.
-   *Done when*: `list --json | head` parses, `get --json` streams events,
+   _Done when_: `list --json | head` parses, `get --json` streams events,
    human output unchanged without the flag.
 2. **Typed backend**: minihoard.rs commands + events + version gate,
-   riding the existing spawn/line-reader plumbing. *Done when*: a
+   riding the existing spawn/line-reader plumbing. _Done when_: a
    harness-started download emits the full event sequence and cancel
    kills the child.
-3. **Clickable library**: the Vue rewrite above. *Done when*: browse →
+3. **Clickable library**: the Vue rewrite above. _Done when_: browse →
    filter → select → download → progress → done, no console needed.
 4. **Hand-off + polish**: after a download run finishes, offer "scan into
    catalog" (add/reuse the library dir as a catalog root + start scan —

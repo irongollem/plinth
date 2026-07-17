@@ -131,9 +131,7 @@ export function useMinihoardDownload() {
   );
 
   const failedError = computed<MinihoardError | null>(() =>
-    status.value && "Failed" in status.value
-      ? status.value.Failed.error
-      : null,
+    status.value && "Failed" in status.value ? status.value.Failed.error : null,
   );
 
   const cancelled = computed(

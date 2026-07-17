@@ -290,8 +290,7 @@ const filteredEntries = computed(() => {
   const q = search.value.trim().toLowerCase();
   return entries.value.filter((e) => {
     if (notDownloadedOnly.value && e.downloaded) return false;
-    if (creatorFilter.value && e.creator !== creatorFilter.value)
-      return false;
+    if (creatorFilter.value && e.creator !== creatorFilter.value) return false;
     if (sourceFilter.value && e.source !== sourceFilter.value) return false;
     if (monthFilter.value === "undated") {
       if (entryMonth(e)) return false;
@@ -475,7 +474,10 @@ watch(
   </div>
 
   <!-- old binary: nothing to browse, --json doesn't exist yet -->
-  <div v-else-if="!info.supports_json" class="flex flex-col h-full min-h-0 p-6 gap-4">
+  <div
+    v-else-if="!info.supports_json"
+    class="flex flex-col h-full min-h-0 p-6 gap-4"
+  >
     <div class="flex items-baseline gap-3">
       <h1 class="font-display text-[17px] tracking-wider">MINIHOARD</h1>
       <span class="font-mono text-[11px] text-base-content/40"
@@ -483,9 +485,9 @@ watch(
       >
     </div>
     <div class="alert alert-warning text-xs">
-      Update minihoard to v0.4+ to use the library browser — this build
-      (v{{ info.version }}) only speaks plain text, so Plinth falls back to
-      the raw console below.
+      Update minihoard to v0.4+ to use the library browser — this build (v{{
+        info.version
+      }}) only speaks plain text, so Plinth falls back to the raw console below.
     </div>
 
     <div class="flex flex-wrap items-center gap-2">
@@ -537,11 +539,7 @@ watch(
         from a browser you're logged in to — or run
         <code>minihoard set-cookie</code> in a terminal to paste one manually.
       </span>
-      <button
-        type="button"
-        class="btn btn-sm btn-primary"
-        @click="syncCookie"
-      >
+      <button type="button" class="btn btn-sm btn-primary" @click="syncCookie">
         Sync cookie from browser
       </button>
     </div>
@@ -612,8 +610,7 @@ watch(
           listError.kind === "cookie_missing"
             ? "has no stored cookie"
             : "has expired"
-        }}. Plinth can pull a fresh cookie from a browser you're logged in
-        to.
+        }}. Plinth can pull a fresh cookie from a browser you're logged in to.
       </span>
       <button
         type="button"
@@ -708,7 +705,10 @@ watch(
       <div
         class="flex items-center justify-between text-[11px] text-base-content/50 mb-1"
       >
-        <span>Download queue — {{ queueDoneCount }} / {{ download.total.value }}</span>
+        <span
+          >Download queue — {{ queueDoneCount }} /
+          {{ download.total.value }}</span
+        >
         <div class="flex items-center gap-2">
           <span v-if="download.finishedSummary.value">
             {{ download.finishedSummary.value.ok }} done,
@@ -803,7 +803,9 @@ watch(
               <td class="text-base-content/60">{{ e.creator ?? "—" }}</td>
               <td
                 class="font-mono text-[10.5px]"
-                :class="e.yearmonth ? 'text-base-content/60' : 'text-base-content/40'"
+                :class="
+                  e.yearmonth ? 'text-base-content/60' : 'text-base-content/40'
+                "
                 :title="monthTitle(e)"
               >
                 {{ entryMonth(e) ? formatMonth(entryMonth(e)!) : "—" }}
@@ -881,10 +883,7 @@ watch(
           </template>
         </tbody>
       </table>
-      <div
-        v-else
-        class="p-6 text-center text-base-content/40 text-[12px]"
-      >
+      <div v-else class="p-6 text-center text-base-content/40 text-[12px]">
         {{
           listLoading
             ? "Loading your library…"
@@ -895,10 +894,10 @@ watch(
       </div>
     </div>
 
-    <div class="flex items-center justify-between text-[11px] text-base-content/50 shrink-0">
-      <span
-        >{{ filteredEntries.length }} of {{ entries.length }} objects</span
-      >
+    <div
+      class="flex items-center justify-between text-[11px] text-base-content/50 shrink-0"
+    >
+      <span>{{ filteredEntries.length }} of {{ entries.length }} objects</span>
       <button
         v-if="visibleEntries.length < filteredEntries.length"
         type="button"
@@ -906,7 +905,9 @@ watch(
         @click="showMore"
       >
         Show
-        {{ Math.min(PAGE_SIZE, filteredEntries.length - visibleEntries.length) }}
+        {{
+          Math.min(PAGE_SIZE, filteredEntries.length - visibleEntries.length)
+        }}
         more
       </button>
     </div>

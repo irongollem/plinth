@@ -12,7 +12,10 @@
         "source_variant": "Low resolution 3D mesh, obj, scale in m (150k tris)"
       },
       "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
-      "canonical": { "footprint_mm": { "x": 7.0, "y": 2.776 }, "height_mm": 2.704 },
+      "canonical": {
+        "footprint_mm": { "x": 7.0, "y": 2.776 },
+        "height_mm": 2.704
+      },
       "size_reasoning": "Small predator canid skull; picked 7mm (mid-low end of the 5-9mm skull band) to read as a modest beast skull beside 28mm scale.",
       "tris": 15000,
       "tris_before_decimate": 150000,
@@ -31,7 +34,10 @@
         "source_variant": "Low resolution 3D mesh, obj, scale in m (150k tris)"
       },
       "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
-      "canonical": { "footprint_mm": { "x": 6.0, "y": 3.131 }, "height_mm": 2.284 },
+      "canonical": {
+        "footprint_mm": { "x": 6.0, "y": 3.131 },
+        "height_mm": 2.284
+      },
       "size_reasoning": "Smallest of the real-scan skulls (raw specimen 87mm vs Hesperocyon's 96mm); picked 6mm, the low end of the 5-9mm band.",
       "tris": 15000,
       "tris_before_decimate": 150000,
@@ -50,7 +56,10 @@
         "source_variant": "Low resolution 3D mesh, obj, scale in m (150k tris)"
       },
       "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
-      "canonical": { "footprint_mm": { "x": 8.0, "y": 6.535 }, "height_mm": 4.411 },
+      "canonical": {
+        "footprint_mm": { "x": 8.0, "y": 6.535 },
+        "height_mm": 4.411
+      },
       "size_reasoning": "Largest raw skull length in the set after the deer (171mm) and a heavier-boned predator silhouette; picked 8mm, upper-mid of the 5-9mm band.",
       "tris": 15000,
       "tris_before_decimate": 150000,
@@ -69,7 +78,10 @@
         "source_variant": "Medium resolution 3D mesh, obj, scale in m (100k tris)"
       },
       "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
-      "canonical": { "footprint_mm": { "x": 4.61, "y": 9.0 }, "height_mm": 3.846 },
+      "canonical": {
+        "footprint_mm": { "x": 4.61, "y": 9.0 },
+        "height_mm": 3.846
+      },
       "size_reasoning": "Longest raw skull in the set (266mm) and the only herbivore/game-animal read; picked 9mm, the top of the 5-9mm band, so it reads as the largest 'ordinary' skull short of the boomerang-head exception.",
       "tris": 15000,
       "tris_before_decimate": 100000,
@@ -88,7 +100,10 @@
         "source_variant": "Low resolution 3D mesh, obj, scale in m (150k tris)"
       },
       "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
-      "canonical": { "footprint_mm": { "x": 11.0, "y": 7.638 }, "height_mm": 1.362 },
+      "canonical": {
+        "footprint_mm": { "x": 11.0, "y": 7.638 },
+        "height_mm": 1.362
+      },
       "size_reasoning": "Doc-flagged exception: the exotic flat 'boomerang' horn silhouette is unrecognizable at normal skull scale, so it earns the ~10-12mm allowance; picked 11mm.",
       "tris": 15000,
       "tris_before_decimate": 150000,
@@ -107,7 +122,10 @@
         "source_variant": "Medium resolution 3D mesh, obj, scale in m (100k tris)"
       },
       "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
-      "canonical": { "footprint_mm": { "x": 3.5, "y": 9.0 }, "height_mm": 4.82 },
+      "canonical": {
+        "footprint_mm": { "x": 3.5, "y": 9.0 },
+        "height_mm": 4.82
+      },
       "size_reasoning": "Mid-large loose bone; picked 9mm (mid-high end of the 6-12mm bone band) to read clearly as a full jaw with both rami and tooth rows.",
       "tris": 15000,
       "tris_before_decimate": 99996,
@@ -126,7 +144,10 @@
         "source_variant": "Medium resolution 3D mesh, obj, scale in m (100k tris)"
       },
       "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
-      "canonical": { "footprint_mm": { "x": 3.052, "y": 12.0 }, "height_mm": 1.284 },
+      "canonical": {
+        "footprint_mm": { "x": 3.052, "y": 12.0 },
+        "height_mm": 1.284
+      },
       "size_reasoning": "Longest real specimen in the whole set (676mm raw); picked 12mm, the top of the 6-12mm bone band, to preserve its elongated long-bone read.",
       "tris": 15000,
       "tris_before_decimate": 99992,
@@ -145,7 +166,10 @@
         "source_variant": "Medium resolution 3D mesh, obj, scale in m (100k tris)"
       },
       "license": "CC0 1.0 (Smithsonian Open Access, machine-tagged \"metadata_usage.access\": \"CC0\")",
-      "canonical": { "footprint_mm": { "x": 11.815, "y": 16.0 }, "height_mm": 4.699 },
+      "canonical": {
+        "footprint_mm": { "x": 11.815, "y": 16.0 },
+        "height_mm": 4.699
+      },
       "size_reasoning": "Deliberate statement piece per the doc's whale-mandible anchor (~15-18mm); picked 16mm, well above the ordinary bone band.",
       "tris": 15000,
       "tris_before_decimate": 100000,
@@ -164,7 +188,10 @@
         "source_variant": "Mushroom.blend, sculpted low-poly asset"
       },
       "license": "CC0 (as recorded in opengameart-mushroom/LICENSE.txt)",
-      "canonical": { "footprint_mm": { "x": 6.369, "y": 6.369 }, "height_mm": 6.0 },
+      "canonical": {
+        "footprint_mm": { "x": 6.369, "y": 6.369 },
+        "height_mm": 6.0
+      },
       "size_reasoning": "Doc anchor is 5-7mm tall; picked 6mm, the midpoint.",
       "tris": 3100,
       "tris_before_decimate": 3584,
@@ -183,7 +210,10 @@
         "source_variant": "organic leaves set, maple"
       },
       "license": "CC BY-SA 4.0 (Printables)",
-      "canonical": { "footprint_mm": { "x": 4.9663, "y": 4.8912 }, "height_mm": 1.6860 },
+      "canonical": {
+        "footprint_mm": { "x": 4.9663, "y": 4.8912 },
+        "height_mm": 1.686
+      },
       "size_reasoning": "Leaf litter reads ~5mm at 28-32mm scale; XY normalized to 5mm, thickness set to 1.2mm (a real leaf is ~0.2mm but that prints as foil and vanishes into the 0.4mm stitch-sink), curl baked in.",
       "tris": 1500,
       "tris_before_decimate": 115010,
@@ -202,7 +232,10 @@
         "source_variant": "organic leaves set, apple"
       },
       "license": "CC BY-SA 4.0 (Printables)",
-      "canonical": { "footprint_mm": { "x": 3.3100, "y": 4.9696 }, "height_mm": 1.4742 },
+      "canonical": {
+        "footprint_mm": { "x": 3.31, "y": 4.9696 },
+        "height_mm": 1.4742
+      },
       "size_reasoning": "Leaf litter reads ~5mm at 28-32mm scale; XY normalized to 5mm, thickness set to 1.2mm for printability, curl baked in.",
       "tris": 1500,
       "tris_before_decimate": 199208,
@@ -221,7 +254,10 @@
         "source_variant": "organic leaves set, cherry"
       },
       "license": "CC BY-SA 4.0 (Printables)",
-      "canonical": { "footprint_mm": { "x": 2.4313, "y": 4.9996 }, "height_mm": 1.4852 },
+      "canonical": {
+        "footprint_mm": { "x": 2.4313, "y": 4.9996 },
+        "height_mm": 1.4852
+      },
       "size_reasoning": "Leaf litter reads ~5mm at 28-32mm scale; XY normalized to 5mm, thickness set to 1.2mm for printability, curl baked in.",
       "tris": 1500,
       "tris_before_decimate": 149956,
@@ -240,7 +276,10 @@
         "source_variant": "organic leaves set, oak (largest shell kept)"
       },
       "license": "CC BY-SA 4.0 (Printables)",
-      "canonical": { "footprint_mm": { "x": 2.6273, "y": 4.9992 }, "height_mm": 1.5903 },
+      "canonical": {
+        "footprint_mm": { "x": 2.6273, "y": 4.9992 },
+        "height_mm": 1.5903
+      },
       "size_reasoning": "Leaf litter reads ~5mm at 28-32mm scale; XY normalized to 5mm, thickness set to 1.2mm for printability, curl baked in.",
       "tris": 1500,
       "tris_before_decimate": 216050,
@@ -259,7 +298,10 @@
         "source_variant": "organic leaves set, hazel"
       },
       "license": "CC BY-SA 4.0 (Printables)",
-      "canonical": { "footprint_mm": { "x": 2.9681, "y": 4.9889 }, "height_mm": 1.5061 },
+      "canonical": {
+        "footprint_mm": { "x": 2.9681, "y": 4.9889 },
+        "height_mm": 1.5061
+      },
       "size_reasoning": "Leaf litter reads ~5mm at 28-32mm scale; XY normalized to 5mm, thickness set to 1.2mm for printability, curl baked in.",
       "tris": 1500,
       "tris_before_decimate": 164200,
@@ -278,10 +320,15 @@
         "source_variant": "dead_quiver_branch_01_1k.blend, texture-free scan geometry"
       },
       "license": "CC0 (Poly Haven)",
-      "canonical": { "footprint_mm": { "x": 6.152, "y": 10.92 }, "height_mm": 5.483 },
+      "canonical": {
+        "footprint_mm": { "x": 6.152, "y": 10.92 },
+        "height_mm": 5.483
+      },
       "size_reasoning": "An 11mm broken branch fragment sized for visible bark and knot geometry at 28-32mm scale.",
-      "tris": 15000, "byte_size": 750084,
-      "manifold": true, "voxel_remesh_used": true
+      "tris": 15000,
+      "byte_size": 750084,
+      "manifold": true,
+      "voxel_remesh_used": true
     },
     {
       "id": "forest-log-scan",
@@ -294,10 +341,15 @@
         "source_variant": "dead_tree_trunk_1k.blend, texture-free scan geometry"
       },
       "license": "CC0 (Poly Haven)",
-      "canonical": { "footprint_mm": { "x": 15.89, "y": 1.419 }, "height_mm": 1.454 },
+      "canonical": {
+        "footprint_mm": { "x": 15.89, "y": 1.419 },
+        "height_mm": 1.454
+      },
       "size_reasoning": "A 16mm fallen-log statement piece with scanned cracks, broken ends, and decay in geometry.",
-      "tris": 15000, "byte_size": 750084,
-      "manifold": true, "voxel_remesh_used": true
+      "tris": 15000,
+      "byte_size": 750084,
+      "manifold": true,
+      "voxel_remesh_used": true
     }
   ]
 }
