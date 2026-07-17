@@ -13,11 +13,22 @@ Plinth is an opinionated desktop tool for cataloging, rendering, compressing, an
 
 ## Features
 
-- Compress STL files to reduce file size without losing quality.
-- Bundle multiple STL files into a single package.
-- User-friendly interface for easy operation.
-- Supports batch processing of multiple files.
-- Cross-platform support (Windows, macOS, Linux).
+- **Catalog a disk-scale library** — scan one or many root folders into a
+  searchable catalog with full-text search, tags, designers, and releases,
+  plus duplicate detection across the whole library.
+- **Curate once, keep forever** — names, poses, variants, scale, support
+  status, base sizes, and previews are metadata that travels with the
+  files (via `model.json` sidecars) rather than living in folder names.
+- **Render preview images** — turntable-style renders through a managed
+  Blender install, in batches, with a locked studio look and optional
+  branding overlay.
+- **Prepare models for the plate** — cut model bases to fit your plinths,
+  generate landscape bases, and scatter forest-floor terrain.
+- **Save space** — lossless compression and "packed at rest" storage that
+  unpacks on demand, so a terabyte library costs less on disk.
+- **Distribute and move models** — pack releases in the verified `.3pk`
+  format with selective, checksum-verified import and delta updates.
+- **Cross-platform** — Windows, macOS, and Linux.
 
 ## Installation
 
@@ -53,11 +64,16 @@ instructions, updating, and troubleshooting.
 
 ## Usage
 
-1. Open Plinth.
-2. Add STL files you want to compress or bundle.
-3. Choose your desired compression settings.
-4. Click the "Compress" or "Bundle" button.
-5. Save the optimized files to your desired location.
+1. Point Plinth at the folder(s) where your STL library lives and let it
+   scan — models, releases, designers, and poses are inferred as it goes.
+2. Browse, search, and tag your catalog; edit names, poses, scale, and
+   support status where the inference needs a hand.
+3. From a model, render preview images, cut a base to fit your plinth, or
+   generate terrain — and compress folders you're not actively printing.
+4. Select models, **+ Add to release**, and pack a checksum-verified
+   `.3pk` to distribute your work or move your collection between systems.
+5. Import a `.3pk` from another creator to add their models — with their
+   curation intact — to your catalog, taking only the components you want.
 
 ## Our Philosophy
 
