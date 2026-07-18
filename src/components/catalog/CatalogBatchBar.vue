@@ -42,6 +42,14 @@
       </button>
       <button
         type="button"
+        class="btn btn-xs btn-error btn-outline"
+        title="Delete the selected models — you confirm first"
+        @click="openDeleteModal(checkedGroups)"
+      >
+        Delete…
+      </button>
+      <button
+        type="button"
         class="btn btn-xs btn-ghost"
         @click="clearSelection"
       >
@@ -85,6 +93,7 @@ const {
   startCombine,
   bulkPack,
   openBatchRender,
+  openDeleteModal,
   clearSelection,
   combineChecked,
 } = store;

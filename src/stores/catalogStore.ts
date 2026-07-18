@@ -8,6 +8,7 @@ import {
   type CatalogGroup,
   type CatalogRootSummary,
   type CatalogStats,
+  type DeleteSummary,
   type DesignerCount,
   type DuplicateGroup,
   type GroupOrigin,
@@ -1753,6 +1754,82 @@ export const useCatalogStore = defineStore("catalog", () => {
     }
   };
 
+  /* ---- deletion: catalog and/or disk, always through the modal ---- */
+
+  const showDeleteModal = ref(false);
+  const deleteBusy = ref(false);
+  // Disk deletion defaults ON: the whole point of deleting a model is that
+  // it stops taking space. It's a trash move (recoverable), not an unlink.
+  const deleteAlsoFromDisk = ref(true);
+  const deleteTargetNames = ref<string[]>([]);
+  const deleteTargetDirs = ref<string[]>([]);
+  const deleteSummary = ref<DeleteSummary | null>(null);
+
+  const openDeleteModal = async (names: string[]) => {
+    if (!names.length) return;
+    // a model card means ALL of its variant folders, same as moving it
+    const memberResults = await Promise.all(
+      names.map((name) => commands.getCatalogGroupMembers(name)),
+    );
+    const dirs = [
+      ...new Set(
+        memberResults.flatMap((result) =>
+          result.status === "ok" ? result.data.map((m) => m.dir_path) : [],
+        ),
+      ),
+    ];
+    if (!dirs.length) {
+      toastStore.addToast("Nothing to delete for that selection", "warning");
+      return;
+    }
+    deleteTargetNames.value = names;
+    deleteTargetDirs.value = dirs;
+    deleteAlsoFromDisk.value = true;
+    deleteSummary.value = null;
+    showDeleteModal.value = true;
+    // Counted by the backend with the same scoping the delete will use,
+    // so the dialog can't promise less than what actually goes
+    const summary = await commands.summarizeModelDirs(dirs);
+    if (summary.status === "ok") deleteSummary.value = summary.data;
+  };
+
+  const confirmDelete = async () => {
+    if (deleteBusy.value || !deleteTargetDirs.value.length) return;
+    deleteBusy.value = true;
+    try {
+      const result = await commands.deleteModels(
+        deleteTargetDirs.value,
+        deleteAlsoFromDisk.value,
+      );
+      if (result.status !== "ok") {
+        toastStore.reportError("Failed to delete models", result.error);
+        return;
+      }
+      const { succeeded, errors } = result.data;
+      if (succeeded) {
+        toastStore.addToast(
+          deleteAlsoFromDisk.value
+            ? `Deleted ${succeeded} folder${succeeded === 1 ? "" : "s"} — recoverable from the system trash`
+            : `Removed ${succeeded} folder${succeeded === 1 ? "" : "s"} from the catalog (files kept on disk)`,
+          "success",
+        );
+      }
+      for (const error of errors) toastStore.addToast(error, "error");
+      showDeleteModal.value = false;
+      checkedGroups.value = checkedGroups.value.filter(
+        (name) => !deleteTargetNames.value.includes(name),
+      );
+      // the open drawer may be showing what was just deleted
+      selectedGroup.value = null;
+      selected.value = null;
+      members.value = [];
+      files.value = [];
+      await Promise.all([runSearch(), refreshMeta()]);
+    } finally {
+      deleteBusy.value = false;
+    }
+  };
+
   watch(selected, (entry) => {
     metaDraft.value = {
       // NAME is the card/sort name — i.e. the GROUP name — not the per-variant
@@ -2349,6 +2426,15 @@ export const useCatalogStore = defineStore("catalog", () => {
     startCombine,
     combineChecked,
     moveChecked,
+    // deletion
+    showDeleteModal,
+    deleteBusy,
+    deleteAlsoFromDisk,
+    deleteTargetNames,
+    deleteTargetDirs,
+    deleteSummary,
+    openDeleteModal,
+    confirmDelete,
     // duplicates
     dupGroups,
     showDups,

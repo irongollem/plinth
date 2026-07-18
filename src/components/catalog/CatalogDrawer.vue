@@ -549,6 +549,15 @@
           {{ isFlattening ? "resetting…" : "⇋ dump into one box" }}
         </button>
 
+        <button
+          type="button"
+          class="font-semibold text-[11px] tracking-[0.03em] text-center border border-dashed border-base-content/15 text-base-content/40 hover:border-error/40 hover:text-error rounded-md py-2 cursor-pointer"
+          title="Delete this model — from the catalog, and by default its folders go to the system trash. You confirm first."
+          @click="openDeleteModal([selectedGroup?.group_name ?? selected.name])"
+        >
+          🗑 delete model…
+        </button>
+
         <div>
           <div
             class="flex items-center gap-2 font-mono font-semibold text-[9.5px] tracking-[0.12em] text-base-content/40 mb-1.5"
@@ -738,6 +747,7 @@ const {
   openNormalize,
   addToDraftRelease,
   flattenGroup,
+  openDeleteModal,
   selectMatchingFiles,
   assignChecked,
   clearChecked,

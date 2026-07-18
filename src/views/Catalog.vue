@@ -15,6 +15,7 @@
     <CatalogDuplicatesPanel />
 
     <CatalogViewerModals />
+    <CatalogDeleteModal />
     <CatalogPrintModal />
     <CatalogBatchRenderModal />
     <CatalogNormalizeModal />
@@ -26,6 +27,7 @@ import { onActivated, onMounted } from "vue";
 import CatalogBatchBar from "../components/catalog/CatalogBatchBar.vue";
 import CatalogBatchRenderModal from "../components/catalog/CatalogBatchRenderModal.vue";
 import CatalogBrowser from "../components/catalog/CatalogBrowser.vue";
+import CatalogDeleteModal from "../components/catalog/CatalogDeleteModal.vue";
 import CatalogDrawer from "../components/catalog/CatalogDrawer.vue";
 import CatalogDuplicatesPanel from "../components/catalog/CatalogDuplicatesPanel.vue";
 import CatalogFooter from "../components/catalog/CatalogFooter.vue";
