@@ -1757,6 +1757,14 @@ const topperMm = ref(1.5);
  * explicitly too rather than leaning on the Option default. */
 const scatterRim = ref<ScatterRim>("keep");
 
+/** VTT GLB export design doc "Frontend": threads `BaseCutJob.glb` — when on,
+ * base_cut.py imports the landscape's colored `.glb` twin instead of the
+ * bare STL and exports a true-size-meters `.glb` twin alongside each cut
+ * STL (see CUT_DONE's `glb_path`). Lives in step 4 next to topperMode/
+ * scatterRim for the same reason: it changes what gets built. Default off
+ * — today's byte-identical STL-only behavior. */
+const glbExport = ref(false);
+
 /** "Cut N bases" / "Cut N toppers" — the cut button's own label must say
  * which flow topperMode will actually run, not just the count. */
 const cutButtonLabel = computed(() => {
@@ -1781,6 +1789,7 @@ const startCut = async () => {
     out_dir: outDir.value,
     topper_mm: topperMode.value ? topperMm.value : null,
     scatter_rim: scatterRim.value,
+    glb: glbExport.value,
   };
   const result = await baseCut.start(job);
   if (result.status === "error") {
@@ -2163,11 +2172,24 @@ watch(baseCut.finishedSummary, (summary) => {
                 v-for="preset in landscapePresets"
                 :key="preset.id"
                 type="button"
-                class="btn btn-xs"
+                class="btn btn-xs gap-1"
                 :class="preset.id === selectedPresetId ? 'btn-primary' : ''"
                 :disabled="landscapeGen.isRunning.value"
                 @click="selectPreset(preset)"
               >
+                <span
+                  v-if="preset.params.palette"
+                  class="inline-flex -space-x-0.5 shrink-0"
+                >
+                  <span
+                    class="inline-block w-2 h-2 rounded-full border border-base-content/20"
+                    :style="{ backgroundColor: preset.params.palette.ground }"
+                  ></span>
+                  <span
+                    class="inline-block w-2 h-2 rounded-full border border-base-content/20"
+                    :style="{ backgroundColor: preset.params.palette.accent }"
+                  ></span>
+                </span>
                 {{ preset.label }}
               </button>
             </div>
@@ -3626,6 +3648,13 @@ watch(baseCut.finishedSummary, (summary) => {
           </div>
 
           <div class="flex flex-col gap-1.5">
+            <Switch v-model="glbExport" label="VTT export (GLB)" />
+            <p class="text-[10.5px] text-base-content/40 -mt-1.5 px-2">
+              also write a colored, true-size .glb next to each cut STL
+            </p>
+          </div>
+
+          <div class="flex flex-col gap-1.5">
             <span class="text-[11px] text-base-content/50 shrink-0"
               >Scatter at the rim</span
             >
@@ -3826,6 +3855,12 @@ watch(baseCut.finishedSummary, (summary) => {
                 <template v-else>
                   <span v-if="!r.manifold" class="text-warning text-[11px]"
                     >non-manifold</span
+                  >
+                  <span
+                    v-if="r.glb_path"
+                    class="badge badge-xs badge-info"
+                    :title="r.glb_path"
+                    >GLB</span
                   >
                   <span
                     v-if="r.fused === false"

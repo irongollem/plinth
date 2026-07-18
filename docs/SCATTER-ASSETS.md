@@ -9,6 +9,19 @@ the record) at the moment we actually pull a file in, since license terms,
 uploader identity, and even whether the file is still hosted can change.
 Treat every row as a _lead_, not a cleared asset.
 
+**Color (VTT GLB export):** every bundled asset that lands in
+`scatter_assets::BUNDLED_ASSETS` also carries a `color` — a muted,
+tabletop-realistic `"#rrggbb"` sRGB tone picked per asset (bone/skull
+tones, mushroom browns, leaf-litter greens, generic rock greys, wood
+tans — not derived from this document's license research, a separate
+curation pass). It's what a placed instance paints onto its "Col" vertex-
+color attribute before the scatter join; see docs/SCATTER.md "Coloring"
+for the mechanism and docs/BASECUTTER.md "VTT GLB export" for the shared
+material contract. Every user-library asset (anything scanned from a
+folder outside the bundle) gets the same neutral default, `#9a9a9a` — no
+curation pass has looked at those, so a flat grey is the honest choice
+rather than a guess.
+
 Context: see `docs/SCATTER.md` and `docs/BASECUTTER.md` ("three-source
 policy") — this file is scouting for the "bundled" source only. Bundled
 means it ships inside the installer, so the bar is: CC0/public domain

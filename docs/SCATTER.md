@@ -47,6 +47,10 @@ cancel_scatter(job_id) -> Result<()>
 
 ScatterAsset  = { id, label, source: "bundled" | "user", path,
                   footprint_mm, height_mm,          // dims measured at scan
+                  color: String,                    // "#rrggbb" sRGB this
+                                                    // asset paints onto
+                                                    // placed pieces — see
+                                                    // "Coloring" below
                   warning: Option<String> }         // additive; advisory
                                                     // only, never drops the
                                                     // piece — see "Scale
@@ -99,11 +103,29 @@ ScatterJob    = { landscape_path, out_path,
 //   "non_manifold_edges": N, "total_edges": M} measured by RE-IMPORTING
 //   the exported STL (export-time triangulation can create defects that
 //   exist only in the written file) — mild counts under base_cut.py's
-//   2% gate are warning-grade, not failure.
+//   2% gate are warning-grade, not failure. It also carries "glb": the
+//   scattered output's .glb twin path (see "Coloring" below) —
+//   unconditional, every scatter run gets one.
 // script: resources/scatter_landscape.py, TOKEN {json} stdout lines,
 //   --python-exit-code 1, job JSON after `--` — the render/base_cut/
 //   gen_landscape conventions verbatim.
 ```
+
+## Coloring
+
+Scatter paints, it doesn't just place. Each piece is stamped with its
+asset's `color` (`asset_colors: {id: hex}`, threaded into the job JSON the
+same way `asset_paths` is) into the "Col" corner attribute before the
+join — generated pebbles/rocks have a built-in muted grey, bundled assets
+carry a curated per-id tone, user-library assets default to a neutral
+`#9a9a9a`. Pieces keep their colors straight through the join (pure
+concatenation). The terrain the pieces land on is imported from the
+landscape's `.glb` twin when one exists (falling back to the bare STL —
+still gets colored pieces, just an uncolored terrain), so a scattered
+output built on a generated landscape comes out fully painted. The
+scattered STL exports exactly as before; a `.glb` twin exports alongside
+it unconditionally. See docs/BASECUTTER.md "VTT GLB export" for the full
+color/material contract shared by every stage.
 
 Placement algorithm (deterministic from seed): jittered-grid candidate
 points (poisson-flavoured, not pure random — pure random clumps ugly),

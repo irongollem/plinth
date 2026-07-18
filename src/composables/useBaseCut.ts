@@ -29,6 +29,9 @@ export type BaseCutResult = {
   /** `true` = this placement carried a magnet spec that topper mode
    * ignored. */
   magnet_ignored?: boolean | null;
+  /** The cut's `.glb` twin path (VTT GLB export design doc "Base cut"),
+   * glb-mode jobs only — `null`/absent in the default (non-glb) mode. */
+  glb_path?: string | null;
 };
 
 /**
@@ -78,6 +81,7 @@ export function useBaseCut() {
           shells: done.shells,
           topper_mm_clamped: done.topper_mm_clamped,
           magnet_ignored: done.magnet_ignored,
+          glb_path: done.glb_path,
         });
       }
       if ("CutFailed" in payload) {
