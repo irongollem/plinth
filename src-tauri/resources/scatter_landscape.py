@@ -26,6 +26,20 @@
 #                                    # placement; this script NEVER guesses a
 #                                    # path from an id itself. Omitted/empty
 #                                    # when no layer uses an Asset piece.
+#   "asset_colors": {"skull-hesperocyon": "#cfc6b0"},
+#                                    # id -> "#rrggbb" sRGB hex, for every id
+#                                    # that also appears in asset_paths above
+#                                    # (VTT GLB export design doc "Scatter") —
+#                                    # Rust builds this from the asset
+#                                    # registry (basecutter::scatter_assets)
+#                                    # the same way it builds asset_paths, and
+#                                    # injects it at job-write time. An Asset
+#                                    # id with no entry here paints as
+#                                    # DEFAULT_ASSET_COLOR; a Generated piece
+#                                    # (never has an id) resolves through
+#                                    # GENERATED_KIND_COLORS instead — grey is
+#                                    # only right for the stone kinds.
+#                                    # Omitted/empty = every id defaulting.
 #   "layers": [                     # a STACK, not a single pass
 #                                    # (docs/SCATTER.md "Layers") — each
 #                                    # entry is a full param set, applied
@@ -88,6 +102,42 @@
 # no separate CANONICAL_MM lookup for asset pieces the way there is for
 # pebble/rock.
 #
+# Colors (VTT GLB export design doc "Scatter" — the same "Col" BYTE_COLOR
+# CORNER attribute / stlpack_* material contract gen_landscape.py's own
+# docstring describes, "Global conventions" in the design doc is binding for
+# both scripts): the landscape is imported from its `.glb` twin when one
+# exists next to landscape_path (see import_landscape_colored) so the terrain
+# keeps its own baked colors through the scatter pass; a bare `.stl` (no
+# twin, or a designer sculpt that never had one) falls back exactly as
+# before this feature landed — the terrain then carries no "Col" data, but
+# every PIECE still gets painted (see below), so the output is never fully
+# uncolored. Either way, `_ensure_landscape_materials` guarantees the
+# terrain object ends up with a `stlpack_terrain` material at slot 0 (built
+# fresh for the STL-fallback case; renamed back from the GLB importer's
+# `stlpack_terrain.001`-style suffix otherwise, or rebuilt if a re-import
+# somehow dropped it) — that slot 0 is what every placed piece's
+# `material_index = 0` resolves to once join_shells has run, since a piece
+# object never carries its own material list (see join_shells' docstring:
+# object.join maps a materialless object's face indices straight onto the
+# active object's slot table).
+#
+# Each placed piece gets its own flat "Col" fill from `asset_colors` (keyed
+# by the piece's asset id; a Generated piece or an id absent from the map
+# uses DEFAULT_ASSET_COLOR) plus a small deterministic per-piece brightness
+# jitter (see _paint_piece) — done BEFORE join_shells, on the piece's own
+# mesh, the same "each shell is self-contained before it ever reaches join"
+# discipline cleanup_shell_bm already uses for geometry.
+#
+# The scattered output always gets a `.glb` twin next to `out_path` (design
+# doc convention 4), exported immediately after the STL — regardless of
+# whether the INPUT landscape had one, since placed pieces are always
+# colored even in the STL-fallback case (see above). SCATTER_DONE's "glb"
+# key is therefore always a real path from this script version; it stays
+# `Option`-shaped on the Rust side purely for the same forward/backward-
+# compat tolerance generator.rs's GENERATED-token parser already applies to
+# its own "glb" key (a hand-edited/stale job file or an older script build
+# should not hard-fail a parser that doesn't strictly need the key).
+#
 # stdout protocol (parsed by basecutter::scatter):
 #   SCATTER_START
 #   SCATTER_PROGRESS {"placed":i,"total":N}
@@ -95,9 +145,11 @@
 #     "Layers": "SCATTER progress spans all layers". total is known up
 #     front: every layer's candidates are raycast-accepted before any piece
 #     in ANY layer is placed — see scatter()'s two-pass structure.)
-#   SCATTER_DONE {"out":...,"placed":N,"manifold":bool,
+#   SCATTER_DONE {"out":...,"glb":...,"placed":N,"manifold":bool,
 #                 "non_manifold_edges":N,"total_edges":M,"shells":S,
 #                 "layers":L}
+#     ("glb" is NEW (see "Colors" above): the scattered output's GLB twin
+#     path, always present from this script version.)
 #     (manifold/edge counts are measured on the EXPORTED file via a
 #     re-import — see roundtrip_check — so they match what base_cut.py's
 #     validate will see; mild non-manifold-ness is warning-grade data here,
@@ -227,6 +279,31 @@ import bmesh
 import bpy
 from mathutils import Matrix, Vector, noise
 from mathutils.bvhtree import BVHTree
+
+# --------------------------------------------------------------- colors
+#
+# VTT GLB export design doc "Global conventions" + "Scatter" — same "Col"
+# BYTE_COLOR CORNER attribute / stlpack_* material contract gen_landscape.py
+# implements. Fallback hexes only (this script never receives a full
+# palette — see the module docstring's "Colors" section): DEFAULT_ASSET_COLOR
+# is what an un-mapped Asset piece paints as; DEFAULT_BASE_HEX is only
+# reached if a stlpack_base material has to be rebuilt from scratch (a bare
+# STL-fallback terrain, or a GLB re-import that somehow lost it), and mirrors
+# gen_landscape.py's own DEFAULT_PALETTE["base"] neutral value.
+DEFAULT_ASSET_COLOR = "#9a9a9a"
+DEFAULT_BASE_HEX = "#232227"
+
+# Generated pieces carry no asset id, so asset_colors can never name them —
+# but "neutral grey" is only right for the stone kinds. Grass painted grey
+# reads as ash, not tufts; these are the same muted-tabletop hexes the
+# bundled-asset table in scatter_assets.rs uses for the equivalent organics.
+GENERATED_KIND_COLORS = {
+    "pebble": "#8b8b8b",
+    "rock": "#8b8b8b",
+    "twig": "#6e553a",
+    "grass": "#5f7a3a",
+    "mushroom": "#99573f",
+}
 
 # ------------------------------------------------------------- constants
 
@@ -828,6 +905,156 @@ def import_landscape(path):
 
 def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
+
+
+# ------------------------------------------------------------- color helpers
+# (_srgb_to_linear/_hex_to_rgb01/_hex_to_linear_rgba/_make_terrain_material/
+#  _make_base_material are gen_landscape.py's identical helpers — same
+#  standalone-script reason cleanup_shell_bm's docstring already gives for
+#  copying rather than importing: each embedded script runs inside Blender's
+#  own Python with no shared package. VTT GLB export design doc's "Global
+#  conventions" #2/#3 are binding on both scripts, so these must stay
+#  byte-for-byte the same recipe.)
+
+
+def _srgb_to_linear(c):
+    """sRGB [0,1] -> linear [0,1] — Blender shader node `default_value`
+    inputs want linear (design doc convention 3). `.color_srgb` (used for
+    the "Col" attribute itself) converts on its own and must NOT be
+    pre-linearized."""
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _hex_to_rgb01(hex_str):
+    """"#rrggbb" -> (r, g, b) each in [0, 1], sRGB (no conversion)."""
+    h = hex_str.lstrip("#")
+    return tuple(int(h[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+
+
+def _hex_to_linear_rgba(hex_str):
+    r, g, b = _hex_to_rgb01(hex_str)
+    return (_srgb_to_linear(r), _srgb_to_linear(g), _srgb_to_linear(b), 1.0)
+
+
+def _make_terrain_material():
+    """stlpack_terrain: Base Color driven by the "Col" corner attribute via
+    a Color Attribute node (design doc convention 2) — no palette inputs
+    needed (the node reads per-vertex paint, not a uniform value), which is
+    exactly why this script — unlike gen_landscape.py, which never receives
+    a palette either but still takes ground_rgb/accent_rgb params for a
+    future reader's call-shape symmetry — can build this material with no
+    arguments at all: there is no uniform color it could plausibly take."""
+    mat = bpy.data.materials.new("stlpack_terrain")
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    bsdf.inputs["Roughness"].default_value = 0.85
+    bsdf.inputs["Metallic"].default_value = 0.0
+    col_node = mat.node_tree.nodes.new("ShaderNodeVertexColor")
+    col_node.layer_name = "Col"
+    mat.node_tree.links.new(col_node.outputs["Color"], bsdf.inputs["Base Color"])
+    return mat
+
+
+def _make_base_material(base_hex):
+    """stlpack_base: uniform "plastic" — no vertex-color node. Only ever
+    called with DEFAULT_BASE_HEX here (see that constant's comment) since
+    this script has no palette to draw a real base color from."""
+    mat = bpy.data.materials.new("stlpack_base")
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    bsdf.inputs["Base Color"].default_value = _hex_to_linear_rgba(base_hex)
+    bsdf.inputs["Roughness"].default_value = 0.45
+    bsdf.inputs["Metallic"].default_value = 0.0
+    return mat
+
+
+def import_landscape_colored(landscape_path):
+    """Import the terrain scatter places pieces onto, preferring its `.glb`
+    twin (design doc "Scatter": "prefer the landscape's .glb twin when it
+    exists") so the terrain keeps its own baked colors/materials through the
+    scatter pass. Falls back to the plain `.stl` — exactly the S1/S2 import
+    path — when no twin sits next to `landscape_path` (a designer sculpt, or
+    an old landscape baked before gen_landscape.py grew its GLB twin).
+
+    Returns (obj, had_glb_twin). Object-matrix stays identity and mesh
+    vertex data comes back in the SAME local coordinates it was exported
+    with (verified empirically against Blender 5.1.2, same as the design
+    doc's own empirical notes) — no post-import transform-apply step is
+    needed, so every downstream assumption that "mesh data is ground truth"
+    (place_piece's docstring, join_shells' docstring) holds for a
+    GLB-imported terrain exactly as it already did for an STL-imported one.
+
+    Filters imported objects to MESH type (unlike import_landscape's plain
+    STL path, which only ever produces one object of one type): the glTF
+    importer is not guaranteed to produce only a mesh for every possible
+    file, so this is defense in depth against a future non-mesh node
+    (camera, light) sneaking into `new` — never observed against this
+    script's own GLB twins, which export a single selected mesh object.
+    """
+    glb_path = os.path.splitext(landscape_path)[0] + ".glb"
+    if os.path.isfile(glb_path):
+        before = set(bpy.data.objects)
+        bpy.ops.import_scene.gltf(filepath=glb_path)
+        new = [o for o in bpy.data.objects if o not in before and o.type == "MESH"]
+        if len(new) != 1:
+            raise RuntimeError(f"expected 1 imported mesh object from {glb_path}, got {len(new)}")
+        return new[0], True
+    return import_landscape(landscape_path), False
+
+
+def _ensure_landscape_materials(obj, had_glb_twin):
+    """Guarantee `obj` ends up with a `stlpack_terrain` material at slot 0
+    (and a `stlpack_base` at slot 1) regardless of which import path
+    `import_landscape_colored` took — the contract every placed piece's
+    `material_index = 0` depends on (see join_shells' docstring: a
+    materialless piece object's face indices map straight onto the active
+    object's own slot table once joined, so slot 0 on THIS object must
+    already be the vertex-color-driven terrain material before that join
+    ever runs).
+
+      - GLB twin (had_glb_twin=True): materials/color-attribute already
+        exist, just renamed by the importer (design doc convention 7 —
+        "the color attribute may be named 'Color'"; materials come back
+        suffixed like "stlpack_terrain.001"). Normalize both names back.
+        Recreating a canonical material that's missing entirely is defense
+        in depth only — never observed against this script's own GLB
+        twins, which always carry stlpack_terrain + stlpack_base (glow is
+        conditional on the lava preset and is deliberately NOT
+        reconstructed here: this script has no palette, so it has no
+        glow color/strength to rebuild it with, and an absent glow slot on
+        a non-lava terrain is correct, not a defect).
+      - STL fallback (had_glb_twin=False): `obj` has zero material slots
+        (a bare STL import never carries any) — both are built fresh, in
+        the same slot order gen_landscape.py's _paint_landscape uses
+        (0=terrain, 1=base). The terrain then renders with no "Col" data
+        (module docstring: "the terrain simply has no colors"), which is
+        the accepted, documented consequence of scattering onto an
+        undecorated landscape.
+    """
+    mesh = obj.data
+
+    if had_glb_twin:
+        if "Col" not in mesh.color_attributes:
+            active = mesh.color_attributes.active_color
+            if active is not None:
+                active.name = "Col"
+        for mat in mesh.materials:
+            if mat is None:
+                continue
+            for canonical in ("stlpack_terrain", "stlpack_base", "stlpack_glow"):
+                if mat.name == canonical or mat.name.startswith(canonical + "."):
+                    mat.name = canonical
+                    break
+
+    col = mesh.color_attributes.get("Col")
+    if col is not None:
+        mesh.color_attributes.active_color = col
+
+    names = {m.name for m in mesh.materials if m is not None}
+    if "stlpack_terrain" not in names:
+        mesh.materials.append(_make_terrain_material())
+    if "stlpack_base" not in names:
+        mesh.materials.append(_make_base_material(DEFAULT_BASE_HEX))
 
 
 # ------------------------------------------------------- piece validation
@@ -1440,6 +1667,77 @@ def place_piece(bm, bottom_local, hit_loc, normal, align_to_surface, final_sink,
     return world_origin
 
 
+# ------------------------------------------------------------ piece coloring
+
+# Brightness jitter magnitude for a placed piece's asset color (design doc
+# "Scatter": "±6% deterministic per-piece brightness jitter") — organic
+# variety between two pieces sharing the same asset id, same idea as
+# gen_landscape.py's PEBBLE/terrain jitter but a flat 6% rather than 4% (a
+# whole piece, not one vertex, so a slightly stronger nudge still reads as
+# "same asset, different piece" rather than a visibly banded terrain).
+PIECE_COLOR_JITTER = 0.06
+
+
+def _piece_color_hash01(index, salt=0):
+    """Deterministic float in [0, 1) from a piece's own GLOBAL placement
+    `index` — same 32-bit mix-hash idiom as gen_landscape.py's `_hash01`
+    (reproduced rather than imported, see cleanup_shell_bm's docstring for
+    why), simplified to one integer input since a piece has no 2D grid
+    identity to hash, just the running index new_object's caller already
+    names each piece object with (design doc convention 8: "no random
+    module for color" — this is a position hash of the index, not a draw
+    from either rng stream, so it can never perturb the fixed-order
+    determinism proof the module docstring's own "Determinism" section
+    depends on)."""
+    h = (int(index) * 374761393) ^ (int(salt) * 2246822519)
+    h &= 0xFFFFFFFF
+    h = (h ^ (h >> 13)) * 1274126177 & 0xFFFFFFFF
+    h ^= h >> 16
+    return (h & 0xFFFFFFFF) / 4294967295.0
+
+
+def _paint_piece(piece_obj, hex_color, index):
+    """Fill every corner of a just-built piece object's mesh with
+    `hex_color` (design doc "Scatter") plus PIECE_COLOR_JITTER worth of
+    deterministic per-piece brightness variation, and set every face's
+    material_index = 0 — the shared vertex-color-driven stlpack_terrain slot
+    every piece and the terrain's own top surface both resolve to once
+    join_shells has run (see _ensure_landscape_materials' docstring). Must
+    run BEFORE join_shells: joining concatenates mesh data as-is, so a
+    piece's "Col" attribute and material_index need to already be correct
+    on its OWN mesh, the same "each shell is self-contained" discipline
+    cleanup_shell_bm already applies to geometry.
+    """
+    mesh = piece_obj.data
+    col = mesh.color_attributes.get("Col")
+    if col is None:
+        col = mesh.color_attributes.new(name="Col", type="BYTE_COLOR", domain="CORNER")
+    mesh.color_attributes.active_color = col
+
+    r0, g0, b0 = _hex_to_rgb01(hex_color)
+    jitter = 1.0 + (_piece_color_hash01(index) * 2.0 - 1.0) * PIECE_COLOR_JITTER
+    r = min(1.0, max(0.0, r0 * jitter))
+    g = min(1.0, max(0.0, g0 * jitter))
+    b = min(1.0, max(0.0, b0 * jitter))
+
+    for poly in mesh.polygons:
+        poly.material_index = 0
+        for li in poly.loop_indices:
+            col.data[li].color_srgb = (r, g, b, 1.0)
+
+
+def piece_asset_color(source, key, asset_colors):
+    """The hex color a placed piece paints with: an Asset piece looks itself
+    up in `asset_colors` (Rust's id -> hex map, built from the asset
+    registry — see the module docstring's "Colors" section), falling back to
+    DEFAULT_ASSET_COLOR for an id absent from the map; a Generated piece has
+    no asset id at all, so it resolves through GENERATED_KIND_COLORS instead
+    (grey is only right for the stone kinds — see that table's comment)."""
+    if source == "asset":
+        return asset_colors.get(key, DEFAULT_ASSET_COLOR)
+    return GENERATED_KIND_COLORS.get(key, DEFAULT_ASSET_COLOR)
+
+
 # --------------------------------------------------------------- candidates
 
 # ------------------------------------------------------------- clumping
@@ -1607,6 +1905,7 @@ def scatter(job, debug):
     landscape_path = job["landscape_path"]
     out_path = job["out_path"]
     asset_paths = job.get("asset_paths", {})
+    asset_colors = job.get("asset_colors", {})
 
     layers_json = job.get("layers")
     if not layers_json:
@@ -1631,7 +1930,8 @@ def scatter(job, debug):
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete()
 
-    landscape = import_landscape(landscape_path)
+    landscape, had_glb_twin = import_landscape_colored(landscape_path)
+    _ensure_landscape_materials(landscape, had_glb_twin)
     src_bm = bmesh.new()
     src_bm.from_mesh(landscape.data)
     min_x, min_y, min_z, max_x, max_y, max_z = bbox_minmax(src_bm.verts)
@@ -1728,6 +2028,7 @@ def scatter(job, debug):
             # discarding it.
             cleanup_shell_bm(bm)
             piece_obj = new_object(f"scatter_piece_{placed}", bm)
+            _paint_piece(piece_obj, piece_asset_color(source, key, asset_colors), placed)
             piece_objects.append(piece_obj)
 
             placed += 1
@@ -1773,6 +2074,20 @@ def scatter(job, debug):
     bpy.context.view_layer.objects.active = landscape
     bpy.ops.wm.stl_export(filepath=out_path, export_selected_objects=True)
 
+    # GLB twin, same stem, right next to out_path (design doc convention 4)
+    # — always exported, regardless of had_glb_twin: a placed piece is
+    # always colored even in the STL-fallback case (module docstring's
+    # "Colors" section), so the twin is always worth having. Selection
+    # state is untouched since the stl_export call above, per convention 6.
+    glb_path = os.path.splitext(out_path)[0] + ".glb"
+    bpy.ops.export_scene.gltf(
+        filepath=glb_path,
+        export_format="GLB",
+        use_selection=True,
+        export_vertex_color="ACTIVE",
+        export_active_vertex_color_when_no_material=True,
+    )
+
     # Validate what was actually WRITTEN (see roundtrip_check's docstring).
     # Loose shells means there is no union seam left to mint n-gons/slivers
     # (see the module docstring's "Loose shells, not unions"), so
@@ -1792,7 +2107,7 @@ def scatter(job, debug):
             f"({bad_edges} of {total_edges} edges)"
         )
 
-    return out_path, placed, bad_edges, total_edges, shells, len(layers)
+    return out_path, glb_path, placed, bad_edges, total_edges, shells, len(layers)
 
 
 def main():
@@ -1804,7 +2119,7 @@ def main():
 
     tok("SCATTER_START")
     try:
-        out, placed, bad_edges, total_edges, shells, num_layers = scatter(job, debug)
+        out, glb, placed, bad_edges, total_edges, shells, num_layers = scatter(job, debug)
     except Exception as e:  # noqa: BLE001 — reported as a token, not a crash
         traceback.print_exc()
         tok("SCATTER_FAILED", {"reason": str(e)})
@@ -1815,15 +2130,18 @@ def main():
     # scatter() already raised) rides along as a warning-grade detail, shells
     # is the loose-shells honesty field (docs/SCATTER.md "Pieces are placed
     # as LOOSE SHELLS") — terrain + one shell per placed piece across the
-    # whole stack, re-measured on the round-tripped file, not assumed — and
-    # "layers" is the new stack-size field (docs/SCATTER.md "Layers"). serde's
-    # default deserialize ignores unknown JSON fields, so basecutter::scatter's
-    # DonePayload {out, placed, manifold, shells, layers} keeps parsing this
-    # line whether or not it grows further fields later.
+    # whole stack, re-measured on the round-tripped file, not assumed —
+    # "layers" is the stack-size field (docs/SCATTER.md "Layers") — and
+    # "glb" is the GLB twin's path (module docstring's "Colors" section),
+    # always a real path from this script version. serde's default
+    # deserialize ignores unknown JSON fields, so basecutter::scatter's
+    # DonePayload {out, glb, placed, manifold, shells, layers} keeps parsing
+    # this line whether or not it grows further fields later.
     tok(
         "SCATTER_DONE",
         {
             "out": out,
+            "glb": glb,
             "placed": placed,
             "manifold": bad_edges == 0,
             "non_manifold_edges": bad_edges,

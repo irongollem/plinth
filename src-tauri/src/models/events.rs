@@ -511,6 +511,10 @@ pub struct ScatterFinishedStatus {
     pub out_path: String,
     pub placed: u32,
     pub manifold: bool,
+    /// The scattered output's GLB twin path (VTT GLB export design doc
+    /// convention 4) — see scatter_landscape.py's SCATTER_DONE token and
+    /// `basecutter::scatter::ScatterToken::Done`.
+    pub glb_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
