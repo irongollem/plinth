@@ -11,6 +11,8 @@ Plinth is an opinionated desktop tool for cataloging, rendering, compressing, an
 
 **📖 Documentation: [irongollem.github.io/plinth](https://irongollem.github.io/plinth/)** — installation, guides, and format reference.
 
+![The Plinth catalog: a scanned library browsed as preview cards, grouped by designer and release](docs/public/screenshots/catalog.png)
+
 ## Features
 
 - **Catalog a disk-scale library** — scan one or many root folders into a
@@ -29,6 +31,10 @@ Plinth is an opinionated desktop tool for cataloging, rendering, compressing, an
 - **Distribute and move models** — pack releases in the verified `.3pk`
   format with selective, checksum-verified import and delta updates.
 - **Cross-platform** — Windows, macOS, and Linux.
+
+![Render studio: orient a multi-part mini and render a studio preview through Blender](docs/public/screenshots/render-studio.png)
+
+![Base Cutter: generate a landscape base with scattered terrain and cut models to fit](docs/public/screenshots/base-cutter.png)
 
 ## Installation
 

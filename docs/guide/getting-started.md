@@ -40,6 +40,8 @@ assignments) are stored so they survive every rescan.
 
 The **Catalog** tab is home:
 
+![The Plinth catalog: preview cards grouped by designer and release, with search facets](/screenshots/catalog.png)
+
 - **Search and facets** — filter by designer, search by name or tag.
 - **Groups and poses** — variants of one model appear as one card with
   its members; open the drawer for files, metadata, tags, and a 3D
