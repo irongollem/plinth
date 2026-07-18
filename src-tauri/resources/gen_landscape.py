@@ -36,6 +36,12 @@
 #     "flow":     { "enabled": false, "channel_width_mm": 10.0,
 #                   "meander_scale": 0.3, "bank_height": 1.0, "amount": 1.0 },
 #     "camber":   { "enabled": false, "amount": 1.0 }
+#   },
+#   "palette": {                # optional; omitted -> DEFAULT_PALETTE (neutral
+#                                # grey). Hex strings are sRGB. See VTT GLB
+#                                # export design doc for the full contract.
+#     "ground": "#8a8a8a", "accent": "#a0a0a0", "base": "#232227",
+#     "glow": { "color": "#ff4d00", "strength": 4.0 }   # optional
 #   }
 # }
 #
@@ -53,10 +59,28 @@
 # instead — see _hash01). Same seed + same params always bakes the same
 # mesh, byte-for-byte modulo STL float rounding.
 #
+# Vertex colors + materials (VTT GLB export design doc — "Vertex-color
+# rules"): after the heightfield is baked and cleaned up, every vert is
+# painted into a "Col" BYTE_COLOR CORNER attribute — top-surface corners get
+# a ground/accent lerp (weighted by the stones/boulders/noise/ripples
+# layers actually enabled, nearest-grid-sampled since remove_doubles loses
+# grid-index identity) plus deterministic brightness jitter, skirt/bottom
+# corners get the flat palette "base" color. Three materials are created
+# (stlpack_terrain, stlpack_base, and stlpack_glow when the palette has a
+# "glow" entry and the stones layer is enabled, i.e. lava) and every face
+# gets a material_index. See _paint_landscape's docstring for the exact
+# per-face rules.
+#
+# GLB twin: gen_landscape.py always writes a `<stem>.glb` next to the STL
+# (same object, same units — mm, Z-up — no scale-baking here; that only
+# happens on the FINAL per-cut GLB in base_cut.py). The color attribute and
+# materials round-trip through the GLB; base_cut.py/scatter_landscape.py
+# re-import it to carry colors through the boolean pipeline.
+#
 # stdout protocol (parsed by basecutter::generator):
 #   GENERATING {"seed":...}
-#   GENERATED {"out":..., "dims_mm":[x,y,z], "verts":N, "manifold":bool,
-#              "resolution_mm":effective}
+#   GENERATED {"out":..., "glb":..., "dims_mm":[x,y,z], "verts":N,
+#              "manifold":bool, "resolution_mm":effective}
 #   GENERATION_FAILED {"reason":...}
 # Exit code: 0 on success; a caught generation error prints GENERATION_FAILED
 # then sys.exit(1); an uncaught exception (bad params JSON, missing "out",
@@ -65,6 +89,7 @@
 
 import json
 import math
+import os
 import random
 import sys
 import traceback
@@ -104,6 +129,12 @@ _SALT_FLOW = 0x3
 _SALT_BOULDERS = 0x4
 _SALT_CLUSTER = 0x5
 _SALT_EDGE = 0x6
+_SALT_COLOR_JITTER = 0x7
+
+# Neutral fallback palette (VTT GLB export design doc) — used verbatim when
+# "palette" is absent from an old params file (the script must not crash on
+# it) and per-key when a supplied palette omits an entry.
+DEFAULT_PALETTE = {"ground": "#8a8a8a", "accent": "#a0a0a0", "base": "#232227"}
 
 
 def tok(name, payload=None):
@@ -646,25 +677,29 @@ def _camber_layer(width_mm, params):
 
 
 def build_layer_fns(seed, width_mm, depth_mm, layers, resolution_mm):
-    """One f(x, y) -> contribution callable per ENABLED layer, in a fixed
-    order — the order only affects summation float rounding, never the
-    seed-derived randomness each layer draws (every layer's RNG/offset is
-    salted independently, see the module docstring). `resolution_mm` lets
-    layers with hard height transitions (stones) size their smoothing band
-    to the grid so edges never alias into staircases."""
+    """One (name, f(x, y) -> contribution) pair per ENABLED layer, in a
+    fixed order — the order only affects summation float rounding, never
+    the seed-derived randomness each layer draws (every layer's RNG/offset
+    is salted independently, see the module docstring). `resolution_mm`
+    lets layers with hard height transitions (stones) size their smoothing
+    band to the grid so edges never alias into staircases. The name is
+    surfaced so generate() can capture each layer's own contribution
+    separately (see layer_grids) — vertex-color painting needs to know
+    which layers are "the terrain relief" (stones/boulders/noise/ripples)
+    vs. structural-only (flow/camber), not just their summed height."""
     fns = []
     if layers.get("noise", {}).get("enabled"):
-        fns.append(_noise_layer(seed, layers["noise"]))
+        fns.append(("noise", _noise_layer(seed, layers["noise"])))
     if layers.get("ripples", {}).get("enabled"):
-        fns.append(_ripples_layer(seed, layers["ripples"]))
+        fns.append(("ripples", _ripples_layer(seed, layers["ripples"])))
     if layers.get("stones", {}).get("enabled"):
-        fns.append(_stones_layer(seed, layers["stones"], resolution_mm))
+        fns.append(("stones", _stones_layer(seed, layers["stones"], resolution_mm)))
     if layers.get("boulders", {}).get("enabled"):
-        fns.append(_boulders_layer(seed, width_mm, depth_mm, layers["boulders"], resolution_mm))
+        fns.append(("boulders", _boulders_layer(seed, width_mm, depth_mm, layers["boulders"], resolution_mm)))
     if layers.get("flow", {}).get("enabled"):
-        fns.append(_flow_layer(seed, layers["flow"]))
+        fns.append(("flow", _flow_layer(seed, layers["flow"])))
     if layers.get("camber", {}).get("enabled"):
-        fns.append(_camber_layer(width_mm, layers["camber"]))
+        fns.append(("camber", _camber_layer(width_mm, layers["camber"])))
     return fns
 
 
@@ -796,6 +831,189 @@ def cleanup_and_check(obj):
     return manifold, [round(d, 3) for d in dims], verts
 
 
+# --------------------------------------------------------- vertex colors
+
+def _srgb_to_linear(c):
+    """sRGB [0,1] -> linear [0,1] — Blender shader node `default_value`
+    inputs want linear, per the VTT GLB export design doc's convention 3.
+    `.color_srgb` (used for the "Col" attribute itself) converts on its
+    own and must NOT be pre-linearized."""
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _hex_to_rgb01(hex_str):
+    """"#rrggbb" -> (r, g, b) each in [0, 1], sRGB (no conversion)."""
+    h = hex_str.lstrip("#")
+    return tuple(int(h[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+
+
+def _hex_to_linear_rgba(hex_str):
+    r, g, b = _hex_to_rgb01(hex_str)
+    return (_srgb_to_linear(r), _srgb_to_linear(g), _srgb_to_linear(b), 1.0)
+
+
+def _make_terrain_material():
+    """stlpack_terrain: Base Color driven by the "Col" corner attribute via
+    a Color Attribute node (design doc convention 2) — per-vertex paint,
+    not a uniform value, is what determines the surface color, so unlike
+    the base/glow materials this one takes no color at all. Same no-arg
+    shape as scatter_landscape.py's and base_cut.py's mirrors."""
+    mat = bpy.data.materials.new("stlpack_terrain")
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    bsdf.inputs["Roughness"].default_value = 0.85
+    bsdf.inputs["Metallic"].default_value = 0.0
+    col_node = mat.node_tree.nodes.new("ShaderNodeVertexColor")
+    col_node.layer_name = "Col"
+    mat.node_tree.links.new(col_node.outputs["Color"], bsdf.inputs["Base Color"])
+    return mat
+
+
+def _make_base_material(base_hex):
+    """stlpack_base: uniform "plastic" — no vertex-color node."""
+    mat = bpy.data.materials.new("stlpack_base")
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    bsdf.inputs["Base Color"].default_value = _hex_to_linear_rgba(base_hex)
+    bsdf.inputs["Roughness"].default_value = 0.45
+    bsdf.inputs["Metallic"].default_value = 0.0
+    return mat
+
+
+def _make_glow_material(ground_hex, glow_hex, glow_strength):
+    """stlpack_glow: crust-colored base, emissive in the glow color/strength
+    — only created when the palette carries a "glow" entry."""
+    mat = bpy.data.materials.new("stlpack_glow")
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    bsdf.inputs["Base Color"].default_value = _hex_to_linear_rgba(ground_hex)
+    bsdf.inputs["Emission Color"].default_value = _hex_to_linear_rgba(glow_hex)
+    bsdf.inputs["Emission Strength"].default_value = float(glow_strength)
+    return mat
+
+
+def _normalize_grid(grid, nx, ny):
+    """Per-layer min/max normalize to [0, 1]; span < 1e-9 (a flat/disabled
+    layer) -> all zeros rather than a division blow-up (design doc's
+    "Vertex-color rules")."""
+    lo, hi = math.inf, -math.inf
+    for row in grid:
+        for v in row:
+            if v < lo:
+                lo = v
+            if v > hi:
+                hi = v
+    span = hi - lo
+    if span < 1e-9:
+        return [[0.0] * nx for _ in range(ny)]
+    return [[(v - lo) / span for v in row] for row in grid]
+
+
+def _paint_landscape(obj, xs, ys, width_mm, depth_mm, layer_grids, palette, seed):
+    """Paint the "Col" BYTE_COLOR CORNER attribute and assign material slots
+    on the cleaned-up heightfield mesh (see the module docstring's "Vertex
+    colors + materials" section and the design doc's "Vertex-color rules").
+
+    Must run on FINAL geometry (after cleanup_and_check's remove_doubles):
+    that pass drops grid-index identity, so instead of walking the original
+    (i, j) grid this samples the NEAREST grid cell from each vertex's world
+    position — robust to whatever remove_doubles/dissolve_degenerate did.
+
+    Color attributes are CORNER (per loop), not per vertex, which is the
+    trick that lets a boundary vertex shared between a top triangle and a
+    vertical skirt quad carry two different colors: one loop paints
+    terrain, the other paints flat base plastic, at the very same vertex
+    position.
+    """
+    mesh = obj.data
+    nx, ny = len(xs), len(ys)
+    step_x = width_mm / (nx - 1) if nx > 1 else 1.0
+    step_y = depth_mm / (ny - 1) if ny > 1 else 1.0
+
+    normalized = {name: _normalize_grid(grid, nx, ny) for name, grid in layer_grids.items()}
+
+    def sampled(name, i, j):
+        grid = normalized.get(name)
+        return grid[j][i] if grid is not None else 0.0
+
+    accent_w = [
+        [
+            max(
+                sampled("stones", i, j),
+                sampled("boulders", i, j),
+                0.30 * sampled("noise", i, j),
+                0.30 * sampled("ripples", i, j),
+            )
+            for i in range(nx)
+        ]
+        for j in range(ny)
+    ]
+
+    glow_spec = palette.get("glow")
+    # Glow is lava-only: it needs an actual crust field to key off of, so
+    # it's gated on the stones layer specifically being present, not just
+    # any relief (design doc: "palette.glow present AND stones layer
+    # enabled — i.e. lava").
+    glow_active = glow_spec is not None and "stones" in normalized
+    glow_w = None
+    if glow_active:
+        stones_n = normalized["stones"]
+        glow_w = [[1.0 - stones_n[j][i] for i in range(nx)] for j in range(ny)]
+
+    ground_rgb = _hex_to_rgb01(palette["ground"])
+    accent_rgb = _hex_to_rgb01(palette["accent"])
+    base_rgb = _hex_to_rgb01(palette["base"])
+
+    col = mesh.color_attributes.new(name="Col", type="BYTE_COLOR", domain="CORNER")
+    mesh.color_attributes.active_color = col
+
+    mat_terrain = _make_terrain_material()
+    mat_base = _make_base_material(palette["base"])
+    mesh.materials.append(mat_terrain)  # slot 0
+    mesh.materials.append(mat_base)  # slot 1
+    mat_glow = None
+    if glow_active:
+        mat_glow = _make_glow_material(palette["ground"], glow_spec["color"], glow_spec["strength"])
+        mesh.materials.append(mat_glow)  # slot 2
+
+    def grid_index(co):
+        i = round((co.x + width_mm / 2.0) / step_x)
+        j = round((co.y + depth_mm / 2.0) / step_y)
+        return min(nx - 1, max(0, i)), min(ny - 1, max(0, j))
+
+    # z is exactly 0.0 on the bottom ring (build_heightfield) and always >=
+    # carrier_mm > 0 on the top surface (see generate()) — a tiny epsilon
+    # tells the two apart without caring about carrier_mm's actual value.
+    z_eps = 1e-6
+
+    for poly in mesh.polygons:
+        verts_z = [mesh.vertices[vi].co.z for vi in poly.vertices]
+        is_top = all(z > z_eps for z in verts_z) and poly.normal.z > 0.2
+
+        if is_top:
+            poly.material_index = 0
+            glow_vals = []
+            for li in poly.loop_indices:
+                vi = mesh.loops[li].vertex_index
+                i, j = grid_index(mesh.vertices[vi].co)
+                w = accent_w[j][i]
+                jitter = 1.0 + (_hash01(seed, i, j, _SALT_COLOR_JITTER) * 2.0 - 1.0) * 0.04
+                r = min(1.0, max(0.0, (ground_rgb[0] + (accent_rgb[0] - ground_rgb[0]) * w) * jitter))
+                g = min(1.0, max(0.0, (ground_rgb[1] + (accent_rgb[1] - ground_rgb[1]) * w) * jitter))
+                b = min(1.0, max(0.0, (ground_rgb[2] + (accent_rgb[2] - ground_rgb[2]) * w) * jitter))
+                col.data[li].color_srgb = (r, g, b, 1.0)
+                if glow_w is not None:
+                    glow_vals.append(glow_w[j][i])
+            if mat_glow is not None and glow_vals and (sum(glow_vals) / len(glow_vals)) > 0.6:
+                poly.material_index = 2
+        else:
+            # Skirt (mixed z, vertical normal) or bottom cap (z == 0,
+            # normal pointing down) — both are flat palette "base" plastic.
+            poly.material_index = 1
+            for li in poly.loop_indices:
+                col.data[li].color_srgb = (base_rgb[0], base_rgb[1], base_rgb[2], 1.0)
+
+
 # ---------------------------------------------------------------------- job
 
 def _scaled_layers(layers, k):
@@ -851,6 +1069,11 @@ def generate(params):
     ys = [-depth_mm / 2.0 + j * (depth_mm / (ny - 1)) for j in range(ny)]
 
     layer_fns = build_layer_fns(seed, width_mm, depth_mm, layers, resolution_mm)
+    # Per-layer contribution, captured alongside the summed height at the
+    # same sample — this is what lets vertex-color painting later ask "how
+    # much of THIS vertex's relief came from stones/boulders/noise/ripples"
+    # without re-evaluating any layer function a second time.
+    layer_grids = {name: [[0.0] * nx for _ in range(ny)] for name, _ in layer_fns}
 
     raw = [[0.0] * nx for _ in range(ny)]
     h_min, h_max = math.inf, -math.inf
@@ -858,8 +1081,10 @@ def generate(params):
         row = raw[j]
         for i, x in enumerate(xs):
             h = 0.0
-            for fn in layer_fns:
-                h += fn(x, y)
+            for name, fn in layer_fns:
+                v = fn(x, y)
+                layer_grids[name][j][i] = v
+                h += v
             row[i] = h
             if h < h_min:
                 h_min = h
@@ -879,12 +1104,33 @@ def generate(params):
     obj = build_heightfield(xs, ys, heights)
     manifold, dims, vert_count = cleanup_and_check(obj)
 
+    # Palette: missing "palette" key (old params file) falls back to the
+    # neutral DEFAULT_PALETTE wholesale; a supplied palette is merged over
+    # the defaults so a caller only needs to specify what it overrides.
+    # "glow" has no default entry, so it stays absent unless the caller
+    # sends one (design doc: glow is opt-in per preset, not per-key).
+    palette = {**DEFAULT_PALETTE, **(params.get("palette") or {})}
+    _paint_landscape(obj, xs, ys, width_mm, depth_mm, layer_grids, palette, seed)
+
     bpy.ops.object.select_all(action="DESELECT")
     obj.select_set(True)
     bpy.context.view_layer.objects.active = obj
     bpy.ops.wm.stl_export(filepath=out, export_selected_objects=True)
 
-    return out, dims, vert_count, manifold, resolution_mm
+    # GLB twin, same stem, right next to the STL (design doc convention 4)
+    # — intermediate GLB stays in mm/Z-up, no scale-baking (that only
+    # happens on the final per-cut GLB in base_cut.py). Selection state is
+    # untouched since the stl_export call above, per convention 6.
+    glb_path = os.path.splitext(out)[0] + ".glb"
+    bpy.ops.export_scene.gltf(
+        filepath=glb_path,
+        export_format="GLB",
+        use_selection=True,
+        export_vertex_color="ACTIVE",
+        export_active_vertex_color_when_no_material=True,
+    )
+
+    return out, glb_path, dims, vert_count, manifold, resolution_mm
 
 
 def main():
@@ -896,7 +1142,7 @@ def main():
     seed = int(params.get("seed", 0))
     tok("GENERATING", {"seed": seed})
     try:
-        out, dims, verts, manifold, effective_res = generate(params)
+        out, glb_path, dims, verts, manifold, effective_res = generate(params)
     except Exception as e:  # noqa: BLE001 — reported as a token, not a crash
         traceback.print_exc()
         tok("GENERATION_FAILED", {"reason": str(e)})
@@ -908,6 +1154,7 @@ def main():
         "GENERATED",
         {
             "out": out,
+            "glb": glb_path,
             "dims_mm": dims,
             "verts": verts,
             "manifold": manifold,

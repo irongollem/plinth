@@ -451,6 +451,9 @@ pub struct LandscapeGenStartedStatus {
 pub struct LandscapeGenFinishedStatus {
     pub job_id: String,
     pub out_path: String,
+    /// The GLB twin's path (VTT GLB export design doc convention 4) — see
+    /// gen_landscape.py's GENERATED token and LandscapeToken::Generated.
+    pub glb_path: Option<String>,
     pub dims_mm: [f64; 3],
     pub manifold: bool,
 }
