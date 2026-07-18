@@ -383,6 +383,7 @@ fn handle_token(app_handle: &AppHandle, job_id: &str, token: &BaseCutToken) {
             shells,
             topper_mm_clamped,
             magnet_ignored,
+            glb,
         } => {
             BaseCutStatus::CutDone(BaseCutCutDoneStatus {
                 job_id: job_id.to_string(),
@@ -394,6 +395,7 @@ fn handle_token(app_handle: &AppHandle, job_id: &str, token: &BaseCutToken) {
                 shells: *shells,
                 topper_mm_clamped: *topper_mm_clamped,
                 magnet_ignored: *magnet_ignored,
+                glb_path: glb.clone(),
             })
             .emit(app_handle)
             .ok();
@@ -601,6 +603,26 @@ pub fn export_cuts(
                 e
             ))
         })?;
+        // VTT GLB export design doc "Base cut": a glb-mode cut writes a
+        // `.glb` twin right next to its STL (same stem). Copy it alongside
+        // under the SAME naming the STL just landed under — `dest_file`
+        // already carries whatever unique_path suffix it got, so the
+        // sidecar mirrors that exactly rather than re-deriving its own.
+        // Not every cut has one (glb:false jobs, or STLs that never came
+        // from base_cut.py at all), so this is silently skipped when the
+        // source doesn't carry a sidecar.
+        let source_glb = source.with_extension("glb");
+        if source_glb.is_file() {
+            let dest_glb = dest_file.with_extension("glb");
+            std::fs::copy(&source_glb, &dest_glb).map_err(|e| {
+                AppError::IoError(format!(
+                    "Failed to copy {} to {}: {}",
+                    source_glb.display(),
+                    dest_glb.display(),
+                    e
+                ))
+            })?;
+        }
         write_export_model_json(&dest_dir, &dir_stem)?;
     }
 
@@ -926,6 +948,79 @@ mod tests {
             .path()
             .join("Plinth Bases/2026-07 Test Regiment/square25/square25.stl")
             .is_file());
+    }
+
+    // ---- .glb sidecar copy (VTT GLB export design doc "Base cut":
+    // "commands.rs: export_cuts_to_catalog copies the .glb sidecar when it
+    // exists next to a cut STL") ----
+
+    /// A glb-mode cut's `.glb` twin (same stem, next to the STL — exactly
+    /// what base_cut.py writes) rides along into the catalog under the
+    /// same name the STL itself landed under.
+    #[test]
+    fn export_copies_a_glb_sidecar_when_present() {
+        let root = TempRoot::new("glb_sidecar");
+        let src = TempRoot::new("glb_sidecar_src");
+        let stl = write_stub_stl(src.path(), "round32.stl");
+        let glb_contents = b"glTF\x02\x00\x00\x00stub-binary-glb-payload";
+        std::fs::write(src.path().join("round32.glb"), glb_contents).unwrap();
+        let roots = vec![root.path().to_string_lossy().into_owned()];
+
+        export_cuts(&[stl], &root.path().to_string_lossy(), "Group", &roots, (2026, 7))
+            .expect("export should succeed");
+
+        let dest_glb = root.path().join("Plinth Bases/2026-07 Group/round32/round32.glb");
+        assert!(dest_glb.is_file(), "expected the .glb sidecar to be copied alongside the STL");
+        assert_eq!(
+            std::fs::read(&dest_glb).unwrap(),
+            glb_contents,
+            "the copied .glb must be byte-identical to the source sidecar"
+        );
+    }
+
+    /// glb:false cuts (and any STL that never had a base_cut.py sidecar at
+    /// all) must not spuriously grow a `.glb` file in the catalog.
+    #[test]
+    fn export_skips_glb_copy_when_no_sidecar_exists() {
+        let root = TempRoot::new("no_glb_sidecar");
+        let src = TempRoot::new("no_glb_sidecar_src");
+        let stl = write_stub_stl(src.path(), "round32.stl");
+        let roots = vec![root.path().to_string_lossy().into_owned()];
+
+        export_cuts(&[stl], &root.path().to_string_lossy(), "Group", &roots, (2026, 7))
+            .expect("export should succeed");
+
+        let dest_glb = root.path().join("Plinth Bases/2026-07 Group/round32/round32.glb");
+        assert!(!dest_glb.is_file(), "no sidecar existed on disk, so none should have been copied");
+    }
+
+    /// The sidecar's destination name mirrors whatever unique_path suffix
+    /// the STL itself got on a re-export — same collision handling, same
+    /// stem, so a re-exported glb-mode cut's twin lands beside the
+    /// -N-suffixed STL it belongs to, not the first export's.
+    #[test]
+    fn export_glb_sidecar_mirrors_the_stl_suffix_on_a_second_export() {
+        let root = TempRoot::new("glb_sidecar_suffix");
+        let roots = vec![root.path().to_string_lossy().into_owned()];
+
+        let src1 = TempRoot::new("glb_sidecar_suffix_src1");
+        let first = write_stub_stl(src1.path(), "round32.stl");
+        std::fs::write(src1.path().join("round32.glb"), b"first-glb").unwrap();
+        export_cuts(&[first], &root.path().to_string_lossy(), "Group", &roots, (2026, 7)).unwrap();
+
+        let src2 = TempRoot::new("glb_sidecar_suffix_src2");
+        let second = write_stub_stl(src2.path(), "round32.stl");
+        std::fs::write(src2.path().join("round32.glb"), b"second-glb").unwrap();
+        export_cuts(&[second], &root.path().to_string_lossy(), "Group", &roots, (2026, 7)).unwrap();
+
+        let model_dir = root.path().join("Plinth Bases/2026-07 Group/round32");
+        assert!(model_dir.join("round32.glb").is_file());
+        assert_eq!(std::fs::read(model_dir.join("round32.glb")).unwrap(), b"first-glb");
+        assert!(
+            model_dir.join("round32-1.glb").is_file(),
+            "the second export's sidecar must mirror its STL's -1 suffix"
+        );
+        assert_eq!(std::fs::read(model_dir.join("round32-1.glb")).unwrap(), b"second-glb");
     }
 
     /// The scanner's designer resolution is model.json designer ->

@@ -396,6 +396,10 @@ pub struct BaseCutCutDoneStatus {
     /// `Some(true)` = this placement carried a magnet spec that topper mode
     /// ignored (there's no plinth to pocket it into).
     pub magnet_ignored: Option<bool>,
+    /// VTT GLB export design doc "Base cut": the cut's `.glb` twin path,
+    /// glb-mode jobs only (`BaseCutJob.glb == true`) — `None` in the
+    /// default (non-glb) mode.
+    pub glb_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]

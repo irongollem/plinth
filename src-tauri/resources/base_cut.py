@@ -30,11 +30,18 @@
 #                     "magnet": { "diameter_mm": 5.0, "height_mm": 1.0,
 #                                 "count": 1 } } ],
 #   "topper_mm": null,
-#   "scatter_rim": "keep"
+#   "scatter_rim": "keep",
+#   "glb": false
 #
 # "cutter" is the NOMINAL (bottom-face) footprint; "cut" is Rust's already-
 # derived top-face footprint (basecutter::job::write_job_file injects it) —
 # the script must not re-derive it from taper/height itself.
+#
+# "glb" (job-level, not per placement; VTT GLB export design doc's "Base
+# cut" section is the spec, "Global conventions" is binding) — see "glb
+# mode" below. false/absent (serde(default) on the Rust side) = today's
+# behavior EXACTLY: import the bare STL, cut, export STL per cut, nothing
+# else touches color or materials.
 #
 # "scatter_rim" (job-level, not per placement): "keep" (default — an absent
 # key behaves exactly like "keep", mirroring topper_mm's own
@@ -79,6 +86,51 @@
 # kinds: circle { diameter_mm } | ellipse { major_mm, minor_mm }
 #      | rect { width_mm, depth_mm }   (sharp corners — unit blocks tile)
 #
+# glb mode ("glb": true) — colored GLB export for VTT use, alongside the
+# STL that always gets cut regardless of this flag:
+#   - The landscape is imported from its `.glb` twin (swap extension of
+#     "landscape"), NOT the bare STL — a bare STL carries no color/material
+#     data, so there is nothing to export. A missing twin is a hard error:
+#     VALIDATION_FAILED before any cutting (see main()), same shape as an
+#     ordinary failed validate() report, with a human-readable "warning".
+#     After import, the color attribute is renamed to "Col" and the three
+#     stlpack_* materials are normalized/recreated exactly like
+#     scatter_landscape.py's import_landscape_colored/_ensure_landscape_
+#     materials (see that script's docstring — this mirrors it). The
+#     import is then re-welded (see _reweld_glb_import): the glTF format
+#     is per-vertex, so a per-corner-colored mesh comes back from the
+#     round-trip with (geometrically identical, but topologically) many
+#     more vertices than gen_landscape.py originally built — every
+#     topology-dependent step downstream (validate, separate_into_shells,
+#     every boolean) needs that undone first.
+#   - Plinth mode: before the plug<->plinth union, the plinth mesh's "Col"
+#     corners are painted uniformly with the base color recovered from the
+#     imported landscape's own bottom face (see _sample_base_color; falls
+#     back to DEFAULT_BASE_HEX), and every plinth face points at the
+#     landscape's own `stlpack_base` material datablock (reused, not
+#     recreated, so the union/join never ends up with two same-named
+#     materials as separate slots).
+#   - Repair pass (glb mode only), after the final union/trim + scatter
+#     incorporation + cleanup_and_check, right before export (see
+#     repair_glb_colors): the EXACT boolean and the cut-wall/seam-ring
+#     geometry it creates come back with ZERO-filled (0,0,0,0) corner
+#     colors — not interpolated (empirically verified, see the design
+#     doc). This pass (a) averages, per vertex, every corner with alpha >
+#     0; (b) fills every zero-alpha corner from that vertex average, else
+#     the average of its own face's painted corners, else the base color;
+#     (c) forces every downward-facing (normal.z < -0.5) face to the base
+#     color and the `stlpack_base` material slot (looked up by name on the
+#     final object — never hardcoded, since a union/join's material-slot
+#     order isn't guaranteed the same across modes). Topper mode (no
+#     plinth) gets the identical pass; its cut walls just fill from
+#     whatever terrain/base neighbors happen to be there.
+#   - Export: the STL is written exactly as in non-glb mode. Immediately
+#     after, the SAME object is scale-baked to true-size meters
+#     (`obj.data.transform(Matrix.Scale(0.001, 4))` — mm -> m, done AFTER
+#     the STL export so the STL never sees it) and exported as a `.glb`
+#     twin next to the cut STL (design doc convention 6's exact export
+#     call). CUT_DONE gains `"glb": <path>` — present only in glb mode.
+#
 # stdout protocol (parsed by basecutter/job.rs):
 #   VALIDATING / VALIDATED {json} / VALIDATION_FAILED {json}
 #   CUT_START {"index":i} / CUT_DONE {"index":i,"out":...,"dims_mm":[x,y,z],
@@ -104,6 +156,8 @@
 #     requested topper_mm was outside [MIN_TOPPER_MM, MAX_TOPPER_MM].
 #   "magnet_ignored": true — topper mode only, present when the placement
 #     carried a magnet spec that this mode can't pocket.
+#   "glb": path — glb mode only (see "glb mode" above): the cut's GLB twin,
+#     same stem as "out", meters scale.
 
 import json
 import math
@@ -142,6 +196,14 @@ MAX_MAGNET_COUNT = 4
 # non-finite/absurd values); this script's clamp is the real usable range.
 MIN_TOPPER_MM = 1.0
 MAX_TOPPER_MM = 3.0
+
+# Fallback plinth/plastic color when glb mode can't recover one from the
+# imported landscape (missing "Col" data, no downward-facing face found —
+# never observed against this script's own GLB twins, defense in depth
+# only). Same value as MaterialPalette::default().base (generator.rs) and
+# scatter_landscape.py's own DEFAULT_BASE_HEX — all three are independent
+# copies of the one constant the design doc's palette table pins.
+DEFAULT_BASE_HEX = "#232227"
 
 
 def tok(name, payload=None):
@@ -717,8 +779,22 @@ def cut_one(
     topper_mm=None,
     pieces=None,
     shell_diagnostics=None,
+    glb=False,
+    base_hex=None,
+    base_mats=None,
+    base_mat_index=None,
 ):
     """Cut one placement.
+
+    `glb`/`base_hex`/`base_mats`/`base_mat_index` are glb-mode-only (see
+    the module docstring's "glb mode" section); `glb=False` (the default)
+    means none of that code runs — this function's normal-mode behavior is
+    otherwise byte-for-byte what it was before glb mode existed. `base_hex`
+    is the palette base color main() recovered once per job
+    (_sample_base_color); `base_mats`/`base_mat_index` are the imported
+    landscape's full material list and `stlpack_base`'s position within it
+    — see _paint_plinth_base's docstring for why the plinth needs the WHOLE
+    list, not just the one slot it uses, before it ever touches the union.
 
     `topper_mm` is None for the normal seat-on-plinth flow (unchanged). A
     float (already clamped to [MIN_TOPPER_MM, MAX_TOPPER_MM] by main())
@@ -752,8 +828,9 @@ def cut_one(
     produce for a placement that is demonstrably centered on the plate.
 
     Returns (out_path, dims_mm, manifold, extra) where `extra` is a dict of
-    additive CUT_DONE payload fields (magnet_ignored / fused+shells),
-    empty when there's nothing to report for this cut."""
+    additive CUT_DONE payload fields (magnet_ignored / fused+shells / glb —
+    the last only in glb mode), empty when there's nothing to report for
+    this cut."""
     pieces = pieces or []
     cutter = placement["cutter"]
     h = plinth["height_mm"]
@@ -849,6 +926,13 @@ def cut_one(
         delete_object(trim)
 
         base = build_plinth(plinth, cutter, placement["cut"], placement.get("magnet"))
+        if glb:
+            # Paint the FULLY BUILT plinth (cavity/bosses/pockets already
+            # drilled) before it ever touches the plug — see
+            # _paint_plinth_base's docstring for why it needs plug's WHOLE
+            # material table (not just the one slot it uses) to avoid a
+            # boolean-merge ambiguity that empirically drops materials.
+            _paint_plinth_base(base, base_hex, base_mats, base_mat_index)
         apply_boolean(base, plug, "UNION")
         delete_object(plug)
 
@@ -882,12 +966,36 @@ def cut_one(
                 for i in range(3)
             ]
 
+    if glb:
+        # After the final union/trim, scatter incorporation, and
+        # cleanup_and_check above (both branches), before export — see
+        # repair_glb_colors' docstring. Runs in both plinth and topper
+        # mode; topper mode's "base" is just the plug, no plinth to have
+        # pre-painted.
+        repair_glb_colors(base, base_hex)
+
     name = placement.get("name") or f"base_{index}"
     out = unique_out_path(out_dir, name)
     bpy.ops.object.select_all(action="DESELECT")
     base.select_set(True)
     bpy.context.view_layer.objects.active = base
     bpy.ops.wm.stl_export(filepath=out, export_selected_objects=True)
+
+    if glb:
+        # Scale-bake true-size meters AFTER the STL export (design doc
+        # convention 5 — the STL must never see this transform) then export
+        # the GLB twin with the same selection state the STL export just
+        # used (convention 6).
+        base.data.transform(Matrix.Scale(0.001, 4))
+        glb_out = os.path.splitext(out)[0] + ".glb"
+        bpy.ops.export_scene.gltf(
+            filepath=glb_out,
+            export_format="GLB",
+            use_selection=True,
+            export_vertex_color="ACTIVE",
+            export_active_vertex_color_when_no_material=True,
+        )
+        extra["glb"] = glb_out
     delete_object(base)
     return out, dims, manifold, extra
 
@@ -905,6 +1013,350 @@ def import_landscape(path):
     if len(new) != 1:
         raise RuntimeError(f"expected 1 imported object, got {len(new)}")
     return new[0]
+
+
+# ------------------------------------------------------------- glb mode
+# (color helpers, GLB import, plinth painting, and the post-boolean color
+# repair pass — see the module docstring's "glb mode" section. The color
+# helpers below are byte-for-byte the same recipe gen_landscape.py's and
+# scatter_landscape.py's own identically-named copies use — VTT GLB export
+# design doc's "Global conventions" #2/#3 are binding on every script that
+# touches "Col"/stlpack_* materials, and each embedded script runs inside
+# Blender's own Python with no shared package to import a common copy from
+# — see scatter_landscape.py's own docstring for the same standalone-script
+# reasoning.)
+
+
+def _srgb_to_linear(c):
+    """sRGB [0,1] -> linear [0,1] — Blender shader node `default_value`
+    inputs want linear (design doc convention 3). `.color_srgb` (used for
+    the "Col" attribute itself) converts on its own and must NOT be
+    pre-linearized."""
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _hex_to_rgb01(hex_str):
+    """"#rrggbb" -> (r, g, b) each in [0, 1], sRGB (no conversion)."""
+    h = hex_str.lstrip("#")
+    return tuple(int(h[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+
+
+def _hex_to_linear_rgba(hex_str):
+    r, g, b = _hex_to_rgb01(hex_str)
+    return (_srgb_to_linear(r), _srgb_to_linear(g), _srgb_to_linear(b), 1.0)
+
+
+def _rgb01_to_hex(r, g, b):
+    """Inverse of _hex_to_rgb01, clamped — used by _sample_base_color to
+    turn a sampled "Col" corner back into the "#rrggbb" string the rest of
+    this module's color helpers (and DEFAULT_BASE_HEX) traffic in."""
+    def byte(c):
+        return max(0, min(255, round(c * 255)))
+
+    return "#{:02x}{:02x}{:02x}".format(byte(r), byte(g), byte(b))
+
+
+def _make_terrain_material():
+    """stlpack_terrain: Base Color driven by the "Col" corner attribute via
+    a Color Attribute node (design doc convention 2). Defense in depth only
+    — see _ensure_landscape_materials' docstring — never observed missing
+    against this script's own GLB twins."""
+    mat = bpy.data.materials.new("stlpack_terrain")
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    bsdf.inputs["Roughness"].default_value = 0.85
+    bsdf.inputs["Metallic"].default_value = 0.0
+    col_node = mat.node_tree.nodes.new("ShaderNodeVertexColor")
+    col_node.layer_name = "Col"
+    mat.node_tree.links.new(col_node.outputs["Color"], bsdf.inputs["Base Color"])
+    return mat
+
+
+def _make_base_material(base_hex):
+    """stlpack_base: uniform "plastic" — no vertex-color node. Defense in
+    depth only, same as _make_terrain_material above."""
+    mat = bpy.data.materials.new("stlpack_base")
+    mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    bsdf.inputs["Base Color"].default_value = _hex_to_linear_rgba(base_hex)
+    bsdf.inputs["Roughness"].default_value = 0.45
+    bsdf.inputs["Metallic"].default_value = 0.0
+    return mat
+
+
+def _material_index(mesh, name):
+    """Slot index of the material named `name` on `mesh`, or None. Used
+    instead of a hardcoded index (e.g. "stlpack_base is always slot 1")
+    because a boolean union's/join's merged material-slot order is an
+    implementation detail this script must not assume — see the module
+    docstring's "glb mode" note on why the repair pass looks this up by
+    name on the FINAL object instead."""
+    for i, mat in enumerate(mesh.materials):
+        if mat is not None and mat.name == name:
+            return i
+    return None
+
+
+def import_landscape_glb(glb_path):
+    """Import a landscape's `.glb` twin (glb mode has no bare-STL fallback
+    — see the module docstring: a bare STL carries no color/material data,
+    so there is nothing to export, and main() turns a missing twin into a
+    VALIDATION_FAILED token before this is ever called). Mirrors scatter_
+    landscape.py's import_landscape_colored, minus the had_glb_twin return
+    (glb mode here is all-or-nothing, never a fallback path) — filters to
+    MESH type for the same defense-in-depth reason that function's
+    docstring gives (the glTF importer isn't guaranteed to produce only a
+    mesh for every possible file, even though this script's own twins
+    always do)."""
+    before = set(bpy.data.objects)
+    bpy.ops.import_scene.gltf(filepath=glb_path)
+    new = [o for o in bpy.data.objects if o not in before and o.type == "MESH"]
+    if len(new) != 1:
+        raise RuntimeError(f"expected 1 imported mesh object from {glb_path}, got {len(new)}")
+    return new[0]
+
+
+def _reweld_glb_import(obj):
+    """Re-weld vertices the glTF export/import round-trip split apart by
+    per-corner attributes, restoring the topology gen_landscape.py's own
+    mesh had before it was ever exported to GLB.
+
+    glTF is a per-VERTEX format: every attribute (position, normal, "Col")
+    must be uniform across a vertex, so Blender's exporter emits one glTF
+    vertex per unique (position, normal, color) combination, and the
+    importer reconstructs exactly that — one Blender vertex per unique
+    corner instead of one per shared position. Since every top-surface
+    vertex in this pipeline carries its own small per-vertex color jitter
+    (gen_landscape.py's _paint_landscape: "organic mottling, deterministic"
+    — see also the ±6% per-piece jitter scatter_landscape.py applies),
+    virtually every corner ends up attribute-unique, so a freshly
+    GLB-imported landscape comes back geometrically identical but almost
+    entirely vertex-split: two faces that share an edge on the original
+    heightfield now reference two DIFFERENT (though co-located) vertex
+    objects, so bmesh — and this script's own validate() — sees that edge
+    as a boundary, not a shared one. Empirically verified: a clean 120x80mm
+    lava-flow bake came back from a straight GLB round-trip reporting
+    essentially every edge as non-manifold, tripping VALIDATION_FAILED on
+    landscapes that gen_landscape.py's own STL-export path validates
+    clean.
+
+    remove_doubles at the same tolerance cleanup_and_check already uses
+    (0.001mm) merges these coincident verts back into single topological
+    vertices by POSITION — CORNER-domain "Col" data is untouched (it's
+    keyed by loop, not vertex; see the design doc's own empirical note
+    that "Col" SURVIVES remove_doubles on original geometry), so every
+    face keeps exactly the color it had. Only vertex IDENTITY is restored,
+    which is exactly what every downstream topology-dependent step
+    (validate, separate_into_shells, every boolean) needs. Mirrors
+    cleanup_and_check's own bmesh round-trip shape, minus the
+    dissolve_degenerate/recalc_normals/manifold-report parts that function
+    needs and this one doesn't — this runs on a mesh nothing has cut yet."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.001)
+    bm.to_mesh(obj.data)
+    bm.free()
+
+
+def _ensure_landscape_materials(obj):
+    """Guarantee `obj` ends up with "Col" as its active color attribute
+    name and canonical (un-suffixed) `stlpack_*` material names, mirroring
+    scatter_landscape.py's _ensure_landscape_materials — see that
+    function's docstring for the full rationale (the GLB importer comes
+    back with the color attribute possibly named "Color" and materials
+    suffixed like "stlpack_terrain.001", design doc convention 7).
+    base_cut.py's glb mode has no STL-fallback branch (unlike scatter's),
+    so this only ever runs against a real GLB import; recreating a
+    canonical material that's missing entirely is defense in depth only,
+    same as scatter's copy — never observed against this script's own GLB
+    twins, which always carry stlpack_terrain + stlpack_base (glow is
+    lava-only and NOT reconstructed here, same reasoning as scatter: this
+    script has no palette to rebuild its color/strength from)."""
+    mesh = obj.data
+
+    if "Col" not in mesh.color_attributes:
+        active = mesh.color_attributes.active_color
+        if active is not None:
+            active.name = "Col"
+    for mat in mesh.materials:
+        if mat is None:
+            continue
+        for canonical in ("stlpack_terrain", "stlpack_base", "stlpack_glow"):
+            if mat.name == canonical or mat.name.startswith(canonical + "."):
+                mat.name = canonical
+                break
+
+    col = mesh.color_attributes.get("Col")
+    if col is not None:
+        mesh.color_attributes.active_color = col
+
+    names = {m.name for m in mesh.materials if m is not None}
+    if "stlpack_terrain" not in names:
+        mesh.materials.append(_make_terrain_material())
+    if "stlpack_base" not in names:
+        mesh.materials.append(_make_base_material(DEFAULT_BASE_HEX))
+
+
+def _sample_base_color(obj):
+    """Recover the palette "base" color baked into the imported landscape's
+    skirt/bottom (gen_landscape.py's _paint_landscape colors every bottom/
+    skirt corner uniformly with palette["base"], material_index = 1 — see
+    that function's docstring). Samples one corner of a face already
+    assigned the stlpack_base MATERIAL slot and converts it back to a
+    "#rrggbb" string. Never raises — a landscape whose .glb twin somehow
+    lost its base slot or its "Col" data falls back to DEFAULT_BASE_HEX
+    rather than failing the whole cut over a cosmetic detail.
+
+    The material slot is the one identification that's SEMANTIC, not
+    geometric — both geometric candidates fail on a scattered landscape:
+    "any z-down face" finds a mushroom cap's underside first (empirically
+    painted a whole plinth mushroom-brown), and "the global-min-z face"
+    finds a grass tuft, because sunk pieces genuinely poke below the
+    z=0 bottom plane (empirically min z was -0.1mm on a scattered bake).
+    Pieces never carry the base slot — gen_landscape.py assigns it to
+    skirt/bottom faces only, and scatter paints every piece face
+    stlpack_terrain."""
+    mesh = obj.data
+    col = mesh.color_attributes.get("Col")
+    if col is None:
+        return DEFAULT_BASE_HEX
+    base_idx = _material_index(mesh, "stlpack_base")
+    if base_idx is None:
+        return DEFAULT_BASE_HEX
+    for poly in mesh.polygons:
+        if poly.material_index == base_idx:
+            r, g, b, _a = col.data[poly.loop_indices[0]].color_srgb
+            return _rgb01_to_hex(r, g, b)
+    return DEFAULT_BASE_HEX
+
+
+def _paint_plinth_base(plinth_obj, base_hex, base_mats, base_mat_index):
+    """Paint the plinth's "Col" corners uniformly with `base_hex` and point
+    every face at the `stlpack_base` slot — called on the FULLY BUILT
+    plinth (cavity + bosses + pockets already drilled by build_plinth),
+    BEFORE the plug<->plinth union (see cut_one).
+
+    `base_mats` is the imported landscape's FULL material list (main()
+    reads it once via `list(landscape.data.materials)`) and `base_mat_index`
+    is `stlpack_base`'s position within it. The plinth's OWN material list
+    is set to this exact same list, in the exact same order, rather than
+    just the one slot it actually uses — empirically verified against real
+    Blender: the boolean modifier's material-list merge does NOT reliably
+    extend the TARGET object's own slot table to cover material indices the
+    OPERAND references that the target never had (a plinth pre-seeded with
+    only `[stlpack_base]` came back from the union with the plug's terrain/
+    glow faces landing on a slot Blender's glTF exporter reported as
+    "DefaultMaterial" — i.e. no material at all — even though the datablock
+    identity was shared, per the identity-dedup reasoning below). Giving
+    the plinth the SAME table `plug` already carries (plug.data.materials
+    is the identical list, unmutated, since plug = landscape_obj.copy()) at
+    the SAME base_mat_index means both operands agree on every slot before
+    the union ever runs — no merge/extend ambiguity for the solver to get
+    wrong. This is also why identity (not just name) matters: reusing the
+    landscape's own material datablocks, not fresh lookalikes, is what lets
+    the repair pass find "the" `stlpack_base` slot afterward with the union
+    not somehow ending up with duplicate same-named slots."""
+    mesh = plinth_obj.data
+    for mat in base_mats:
+        mesh.materials.append(mat)
+    col = mesh.color_attributes.new(name="Col", type="BYTE_COLOR", domain="CORNER")
+    mesh.color_attributes.active_color = col
+    r, g, b = _hex_to_rgb01(base_hex)
+    for li in range(len(mesh.loops)):
+        col.data[li].color_srgb = (r, g, b, 1.0)
+    for poly in mesh.polygons:
+        poly.material_index = base_mat_index
+
+
+def repair_glb_colors(obj, base_hex):
+    """Fill every zero-alpha "Col" corner the EXACT boolean/dissolve left
+    behind on newly created geometry (cut walls, the top seam ring, drilled
+    magnet pockets — empirically verified: original geometry keeps its
+    colors, new geometry comes back (0,0,0,0), see the module docstring's
+    "glb mode" section and the design doc's top-of-file empirical notes).
+    Runs once, at the very end of cut_one (after the final union/trim,
+    scatter incorporation, and cleanup_and_check), on whatever `obj` is in
+    either mode — plinth mode's plug+plinth union, or topper mode's plug
+    alone (no plinth, so cut walls fill from whatever terrain/base
+    neighbors happen to be there instead).
+
+    Three passes over the mesh, in order (design doc's exact recipe):
+      1. Per-vertex average of every corner with alpha > 0, one streaming
+         pass over all loops (same reason bbox_dims avoids materializing
+         full coordinate lists — a multi-million-loop landscape shouldn't
+         cost hundreds of MB of transient Python objects for this).
+      2. Every zero-alpha corner takes its vertex's pass-1 average if one
+         exists; else the average of its OWN FACE's other painted corners
+         (computed fresh per face, from the pass-1 state — never from a
+         corner this same pass already repaired, since corner (loop)
+         indices are per-face and never shared across faces even when they
+         reference the same vertex); else `base_hex` as a last resort.
+      3. Every face whose normal points down (normal.z < -0.5) is forced to
+         `base_hex` and the `stlpack_base` material slot — looked up by
+         name on `obj` itself (see _material_index's docstring for why
+         nothing here assumes a fixed slot number)."""
+    mesh = obj.data
+    col = mesh.color_attributes.get("Col")
+    if col is None:
+        return  # defense in depth only — glb mode always paints "Col" in
+        # somewhere upstream (import or _paint_plinth_base)
+
+    r_base, g_base, b_base = _hex_to_rgb01(base_hex)
+
+    # Pass 1: per-vertex average of painted corners, one streaming pass.
+    vert_sum = {}
+    vert_n = {}
+    for li, loop in enumerate(mesh.loops):
+        c = col.data[li].color_srgb
+        if c[3] > 0.0:
+            vi = loop.vertex_index
+            s = vert_sum.get(vi)
+            if s is None:
+                vert_sum[vi] = [c[0], c[1], c[2]]
+                vert_n[vi] = 1
+            else:
+                s[0] += c[0]
+                s[1] += c[1]
+                s[2] += c[2]
+                vert_n[vi] += 1
+    vert_avg = {vi: (s[0] / vert_n[vi], s[1] / vert_n[vi], s[2] / vert_n[vi]) for vi, s in vert_sum.items()}
+
+    # Pass 2: fill zero-alpha corners (vertex average -> face-mate average
+    # -> base color).
+    for poly in mesh.polygons:
+        loop_idxs = poly.loop_indices
+        painted = [col.data[li].color_srgb for li in loop_idxs if col.data[li].color_srgb[3] > 0.0]
+        if painted:
+            n = len(painted)
+            face_avg = (
+                sum(c[0] for c in painted) / n,
+                sum(c[1] for c in painted) / n,
+                sum(c[2] for c in painted) / n,
+            )
+        else:
+            face_avg = None
+        for li in loop_idxs:
+            c = col.data[li].color_srgb
+            if c[3] > 0.0:
+                continue
+            vi = mesh.loops[li].vertex_index
+            if vi in vert_avg:
+                r, g, b = vert_avg[vi]
+            elif face_avg is not None:
+                r, g, b = face_avg
+            else:
+                r, g, b = r_base, g_base, b_base
+            col.data[li].color_srgb = (r, g, b, 1.0)
+
+    # Pass 3: bottom faces are always base color + stlpack_base, regardless
+    # of what pass 2 just interpolated for them.
+    base_idx = _material_index(mesh, "stlpack_base")
+    if base_idx is not None:
+        for poly in mesh.polygons:
+            if poly.normal.z < -0.5:
+                poly.material_index = base_idx
+                for li in poly.loop_indices:
+                    col.data[li].color_srgb = (r_base, g_base, b_base, 1.0)
 
 
 def validate(obj):
@@ -980,8 +1432,39 @@ def main():
     # two (never silently fuses pieces the caller didn't ask to fuse).
     scatter_rim = job.get("scatter_rim", "keep")
 
+    # glb mode (job-level — see the module docstring's "glb mode" section).
+    # false/absent = today's behavior exactly, byte-for-byte: import the
+    # bare STL, cut, export STL, nothing else touches color/materials.
+    glb = bool(job.get("glb", False))
+
     tok("VALIDATING")
-    landscape = import_landscape(job["landscape"])
+    if glb:
+        # A bare STL carries no color/material data — glb mode has no
+        # STL-fallback branch (unlike scatter_landscape.py's own colored
+        # import), so a missing twin is a hard, up-front failure, shaped
+        # exactly like an ordinary failed validate() report (job.rs/
+        # commands.rs read the "warning" string regardless of which path
+        # produced VALIDATION_FAILED).
+        glb_landscape_path = os.path.splitext(job["landscape"])[0] + ".glb"
+        if not os.path.isfile(glb_landscape_path):
+            tok(
+                "VALIDATION_FAILED",
+                {
+                    "non_manifold_edges": 0,
+                    "dims_mm": [0.0, 0.0, 0.0],
+                    "verts": 0,
+                    "warning": (
+                        "glb mode requires a GLB twin next to the landscape "
+                        f"— not found: {glb_landscape_path}"
+                    ),
+                },
+            )
+            return
+        landscape = import_landscape_glb(glb_landscape_path)
+        _ensure_landscape_materials(landscape)
+        _reweld_glb_import(landscape)
+    else:
+        landscape = import_landscape(job["landscape"])
     ok, report = validate(landscape)
     if not ok:
         # The gate is real (not a dead protocol arm): a catastrophically
@@ -998,6 +1481,16 @@ def main():
         tok("VALIDATION_FAILED", report)
         return
     tok("VALIDATED", report)
+
+    # Recovered once per job, not per cut: the palette "base" color baked
+    # into the landscape's own skirt/bottom, and the landscape's FULL
+    # material list + stlpack_base's index within it — every plinth this
+    # job builds gets the identical list (see _paint_plinth_base's
+    # docstring for why the plinth needs the whole table, not just the one
+    # slot it uses, before it ever touches the union).
+    base_hex = _sample_base_color(landscape) if glb else None
+    base_mats = list(landscape.data.materials) if glb else None
+    base_mat_index = _material_index(landscape.data, "stlpack_base") if glb else None
 
     # Separate the imported landscape into its loose shells (docs/
     # SCATTER.md "Pieces are placed as LOOSE SHELLS") and reassign
@@ -1042,6 +1535,10 @@ def main():
                 topper_mm,
                 pieces_for_cut,
                 shell_diagnostics,
+                glb=glb,
+                base_hex=base_hex,
+                base_mats=base_mats,
+                base_mat_index=base_mat_index,
             )
             payload = {"index": i, "out": out, "dims_mm": dims, "manifold": manifold}
             if topper_mm_clamped is not None:
