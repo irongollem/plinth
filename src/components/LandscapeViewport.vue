@@ -16,9 +16,21 @@
  * pins), per docs/BASECUTTER.md "The plinth". This component owns no
  * placement state — it raycasts drags into x/y and emits `update`, the view
  * owns the array.
+ *
+ * "Color preview" toggle: generated/scattered landscapes write a colored
+ * `<stem>.glb` twin next to their `<stem>.stl` (see docs/BASECUTTER.md's GLB
+ * twin convention). When enabled and a twin exists next to the current
+ * landscapePath, that GLB is decoded and shown INSTEAD of the plain grey/STL
+ * mesh, in the same Z-up mm frame the STL already uses — Blender's glTF
+ * exporter writes Y-up (export_yup default), so the loaded scene is rotated
+ * +90° about X to invert that conversion back to this viewport's frame.
+ * Placements/overlays are unaffected either way; only the terrain mesh
+ * swaps.
  */
-import { readFile } from "@tauri-apps/plugin-fs";
+import { exists, readFile } from "@tauri-apps/plugin-fs";
 import * as THREE from "three";
+import type { GLTF } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { CutterKind, Placement, PlinthParams } from "../bindings";
 import {
@@ -80,6 +92,14 @@ const emit = defineEmits<{
 
 const container = ref<HTMLDivElement | null>(null);
 const isLoading = ref(false);
+/** "Color preview" toggle — a plain ref, so it survives a landscape reload
+ * (same component instance) but not a full remount, per spec ("persist
+ * across landscape reloads within the session; no settings persistence"). */
+const colorPreview = ref(false);
+/** Whether the CURRENT landscapePath has a `.glb` twin next to it — drives
+ * the toggle's disabled/inert state independent of colorPreview itself, so
+ * the user can see "no color preview available" even before touching it. */
+const glbAvailable = ref(false);
 
 const CIRCLE_SEGMENTS = 96; // matches base_cut.py's CIRCLE_SEGMENTS
 const ROTATE_STEP_DEG = 5;
@@ -91,6 +111,13 @@ let camera: THREE.OrthographicCamera | null = null;
 let landscapeGroup: THREE.Group | null = null;
 let landscapeMesh: THREE.Mesh | null = null;
 let landscapeMaterial: THREE.MeshStandardMaterial | null = null;
+/** The decoded `.glb` twin's scene root, already rotated into the Z-up mm
+ * frame — sibling of landscapeMesh under landscapeGroup, visibility-toggled
+ * against it rather than swapped in/out, so flipping the switch repeatedly
+ * doesn't re-decode anything (see syncPreviewVisibility). Null whenever no
+ * twin has been (successfully) loaded for the current landscapePath. */
+let landscapeGltf: THREE.Group | null = null;
+const gltfLoader = new GLTFLoader();
 let overlayGroup: THREE.Group | null = null;
 /** Overlay groups, one per placement, index-aligned with `props.placements`
  * (see `syncOverlays`) — kept around across rebuilds so a drag only ever
@@ -270,14 +297,118 @@ const disposeLandscape = () => {
   }
 };
 
+/** Swap `<stem>.stl` for `<stem>.glb` (same directory, same stem, whatever
+ * the actual extension is) — the GLB twin convention every generator/
+ * scatter/cut stage follows (docs/BASECUTTER.md). */
+const glbPathFor = (stlPath: string): string =>
+  stlPath.replace(/\.[^./\\]+$/, ".glb");
+
+const disposeGltfMaterial = (material: THREE.Material) => {
+  // The bundled materials (stlpack_terrain/base/glow) are untextured —
+  // vertex-colored / uniform — but dispose any maps defensively so this
+  // stays correct if a future twin ever carries one.
+  const withMaps = material as unknown as Record<string, unknown>;
+  for (const key of [
+    "map",
+    "emissiveMap",
+    "normalMap",
+    "roughnessMap",
+    "metalnessMap",
+    "aoMap",
+  ]) {
+    const tex = withMaps[key];
+    if (tex instanceof THREE.Texture) tex.dispose();
+  }
+  material.dispose();
+};
+
+/** Tear down the decoded GLB twin (geometries, materials, any textures) —
+ * mirrors disposeLandscape's discipline so toggling color preview on/off
+ * repeatedly, or reloading the landscape, never leaks. */
+const disposeGltfScene = () => {
+  if (!landscapeGroup || !landscapeGltf) return;
+  landscapeGroup.remove(landscapeGltf);
+  landscapeGltf.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return;
+    child.geometry.dispose();
+    const materials = Array.isArray(child.material)
+      ? child.material
+      : [child.material];
+    materials.forEach(disposeGltfMaterial);
+  });
+  landscapeGltf = null;
+};
+
+/** Show the GLB twin instead of the STL mesh exactly when the toggle is on
+ * AND a twin has actually been decoded for the current landscape — every
+ * other combination (toggle on but no twin yet/at all, twin decoded but
+ * toggle off) falls back to the STL mesh, never a blank viewport. */
+const syncPreviewVisibility = () => {
+  const showGlb = colorPreview.value && landscapeGltf !== null;
+  if (landscapeGltf) landscapeGltf.visible = showGlb;
+  if (landscapeMesh) landscapeMesh.visible = !showGlb;
+  requestRender();
+};
+
+/** Decode the `.glb` twin's bytes and add it to the scene, rotated into
+ * this viewport's Z-up mm frame. Only called once the twin is known to
+ * exist (checkGlbTwin) and color preview is (or becomes) on — lazy, so
+ * leaving the toggle off never pays for a fetch+decode nobody sees. */
+const loadGlbScene = async (token: number, stlPath: string) => {
+  if (!landscapeGroup) return;
+  try {
+    const bytes = await readFile(glbPathFor(stlPath));
+    if (token !== loadToken) return;
+    const buffer = toTransferableBuffer(bytes);
+    const gltf: GLTF = await gltfLoader.parseAsync(buffer, "");
+    if (token !== loadToken || !landscapeGroup) return;
+    disposeGltfScene();
+    const root = gltf.scene;
+    // Blender's glTF exporter writes Y-up (export_yup, its default); this
+    // viewport keeps the STL's native Z-up mm frame untouched everywhere
+    // else (camera, placements, overlays — see the component doc comment),
+    // so invert that single conversion here instead of anywhere shared.
+    root.rotation.x = Math.PI / 2;
+    landscapeGltf = root;
+    landscapeGroup.add(root);
+    syncPreviewVisibility();
+  } catch (error) {
+    if (token !== loadToken) return;
+    glbAvailable.value = false;
+    emit("error", `Failed to load color preview: ${error}`);
+  }
+};
+
+/** Cheap existence check for the current landscape's `.glb` twin,
+ * independent of the toggle — drives glbAvailable so the control can show
+ * its disabled/inert state even before the user tries it. Only actually
+ * fetches + decodes the GLB when color preview is already on. */
+const checkGlbTwin = async (token: number, stlPath: string) => {
+  let available = false;
+  try {
+    available = await exists(glbPathFor(stlPath));
+  } catch {
+    available = false;
+  }
+  if (token !== loadToken) return;
+  glbAvailable.value = available;
+  if (available && colorPreview.value) await loadGlbScene(token, stlPath);
+};
+
 const loadLandscape = async () => {
   const token = ++loadToken;
   disposeLandscape();
+  disposeGltfScene();
+  glbAvailable.value = false;
   if (!props.landscapePath) {
     requestRender();
     return;
   }
   isLoading.value = true;
+  // Runs concurrently with the STL decode below — independent of it, and
+  // slower on a cold read since it's a second file, so it shouldn't block
+  // the (already-working) STL preview from appearing.
+  void checkGlbTwin(token, props.landscapePath);
   try {
     const bytes = await readFile(props.landscapePath);
     if (token !== loadToken) return;
@@ -321,6 +452,10 @@ const loadLandscape = async () => {
     landscapeMaterial.needsUpdate = true;
     landscapeMesh = new THREE.Mesh(geometry, landscapeMaterial);
     landscapeGroup.add(landscapeMesh);
+    // A fresh mesh defaults to visible; if color preview is already on from
+    // a prior landscape, checkGlbTwin (already in flight) will flip this
+    // once its own twin decodes — until then the STL is the honest fallback.
+    syncPreviewVisibility();
 
     const box = geometry.boundingBox as THREE.Box3;
     landscapeMaxZ = box.max.z;
@@ -345,6 +480,19 @@ const loadLandscape = async () => {
 };
 
 watch(() => [props.landscapePath, props.reloadToken], loadLandscape);
+
+/** The toggle itself: flipping ON with a known-available twin that hasn't
+ * been decoded yet (e.g. the user never turned it on for this landscape)
+ * fetches it now; every other transition is just a visibility flip on
+ * already-resident geometry (see syncPreviewVisibility) — no re-fetch, no
+ * re-decode. */
+watch(colorPreview, (on) => {
+  if (on && glbAvailable.value && !landscapeGltf && props.landscapePath) {
+    void loadGlbScene(loadToken, props.landscapePath);
+  } else {
+    syncPreviewVisibility();
+  }
+});
 
 // The [ ] / Delete keys are scoped to this container's focus (so they never
 // steal keys from the sidebar's inputs). Clicking a placement in the
@@ -940,6 +1088,7 @@ onBeforeUnmount(() => {
   stlDecode.dispose();
   resizeObserver?.disconnect();
   disposeLandscape();
+  disposeGltfScene();
   disposeOverlays();
   landscapeMaterial?.dispose();
   renderer?.dispose();
@@ -977,6 +1126,31 @@ onBeforeUnmount(() => {
          overlaid on it uses fixed light colours (text-white/*) rather than
          theme-driven base-content, which would render dark-on-dark in light
          mode. -->
+    <div
+      v-if="landscapePath"
+      class="absolute top-2 right-2 flex items-center gap-1.5 text-xs bg-black/40 rounded-box px-2 py-1"
+      :title="
+        glbAvailable ? undefined : 'No colored GLB twin for this landscape'
+      "
+    >
+      <input
+        id="landscape-color-preview"
+        v-model="colorPreview"
+        type="checkbox"
+        class="toggle toggle-xs"
+        :disabled="!glbAvailable"
+      />
+      <label
+        for="landscape-color-preview"
+        class="select-none"
+        :class="
+          glbAvailable
+            ? 'text-white/80 cursor-pointer'
+            : 'text-white/35 cursor-not-allowed'
+        "
+        >Color preview</label
+      >
+    </div>
     <div
       v-if="!landscapePath"
       class="absolute inset-0 flex items-center justify-center text-white/40 pointer-events-none"
