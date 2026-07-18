@@ -64,16 +64,17 @@
           Also delete the files from disk
           <span class="block text-base-content/50">
             Folders are moved to the {{ trashName }} — recoverable until you
-            empty it.
+            empty it. On drives without a trash (most NAS shares), they are
+            deleted permanently.
           </span>
         </span>
       </label>
       <p
         v-if="!deleteAlsoFromDisk"
-        class="text-[11px] text-warning border border-warning/30 bg-warning/5 rounded-md px-2 py-1.5"
+        class="text-[11px] text-base-content/60 border border-base-content/15 rounded-md px-2 py-1.5"
       >
-        The files stay on disk, so these models will come back the next time
-        their folder is scanned.
+        The files stay on disk and these folders go on the catalog's ignore
+        list, so scans won't bring them back. Unhide them from Settings.
       </p>
 
       <div class="flex items-center gap-2">

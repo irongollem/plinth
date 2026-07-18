@@ -37,6 +37,40 @@
         >
       </div>
 
+      <div v-if="ignoredFolders.length" class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          >HIDDEN FROM THE CATALOG</span
+        >
+        <div
+          class="flex flex-col gap-1 bg-base-200 border border-base-content/10 rounded-lg px-2.5 py-1.5"
+        >
+          <div
+            v-for="folder in ignoredFolders"
+            :key="folder.dir_path"
+            class="flex items-center gap-2"
+          >
+            <span
+              class="font-mono text-[12px] text-base-content/60 flex-1 truncate"
+              :title="folder.dir_path"
+              >{{ folder.dir_path }}</span
+            >
+            <button
+              type="button"
+              class="btn btn-xs btn-ghost"
+              title="Let scans see this folder again — it reappears after the next scan of its catalog folder"
+              @click="unignoreFolder(folder.dir_path)"
+            >
+              unhide
+            </button>
+          </div>
+        </div>
+        <span class="text-[10.5px] text-base-content/40"
+          >Removed from the catalog but still on disk. Scans skip these folders;
+          unhide one and rescan to bring it back.</span
+        >
+      </div>
+
       <div class="flex flex-col gap-1.5">
         <FileSelect
           id="scratch_dir"
@@ -509,8 +543,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
-import { type Settings, commands } from "../bindings.ts";
+import { computed, onActivated, onMounted, ref, watch } from "vue";
+import { type IgnoredFolder, type Settings, commands } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
 import { useBlenderProvision } from "../composables/useBlenderProvision";
 import { useFileSelect } from "../composables/useFileSelect";
@@ -741,7 +775,33 @@ watch(
   { deep: true },
 );
 
+/* Soft-removed models ("remove from catalog, keep the files"): scans skip
+   them until unhidden here. Unhiding only drops the marker — the models
+   reappear once their catalog folder is rescanned. */
+const ignoredFolders = ref<IgnoredFolder[]>([]);
+const loadIgnoredFolders = async () => {
+  const result = await commands.listIgnoredFolders();
+  if (result.status === "ok") ignoredFolders.value = result.data;
+};
+const unignoreFolder = async (dirPath: string) => {
+  const result = await commands.unignoreFolder(dirPath);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to unhide folder", result.error);
+    return;
+  }
+  toastStore.addToast(
+    "Folder unhidden — rescan its catalog folder to bring the models back",
+    "success",
+  );
+  await loadIgnoredFolders();
+};
+
+// The tab is kept alive (KeepAlive in App.vue): onMounted fires once, but
+// folders get hidden from the Catalog tab — refresh the list on every return
+onActivated(loadIgnoredFolders);
+
 onMounted(async () => {
+  loadIgnoredFolders();
   try {
     const savedSettings = await commands.getSettings();
     if (savedSettings.status === "ok") {

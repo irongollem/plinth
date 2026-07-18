@@ -1786,30 +1786,46 @@ pub async fn summarize_model_dirs(
     .map_err(|e| AppError::ConfigError(format!("Summary task failed: {}", e)))?
 }
 
+/// How a model deletion went. BatchOutcome plus one distinction the UI must
+/// surface: hard_deleted counts folders that skipped the trash. The confirm
+/// dialog promises recoverability, so when a volume couldn't deliver it the
+/// user hears that it didn't — after the fact, but truthfully.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, specta::Type)]
+pub struct DeleteOutcome {
+    pub succeeded: u32,
+    pub hard_deleted: u32,
+    pub errors: Vec<String>,
+}
+
 /// Delete whole models: from the index always, from disk optionally. Disk
-/// deletion is trash, not unlink — the folders land in the OS trash /
-/// Recycle Bin so a wrong click stays reversible. The index only forgets a
-/// model whose disk delete succeeded (or that was already gone): on a
-/// volume without trash support (some NAS mounts) the error surfaces and
-/// the catalog keeps telling the truth about what's still on disk.
-/// Catalog-only removal (delete_files = false) leaves the folders alone,
-/// which also means the next scan of that root will index them again.
+/// deletion tries the OS trash / Recycle Bin first so a wrong click stays
+/// reversible, and falls back to a permanent delete where no trash exists
+/// (network shares, most NAS mounts) — the confirmation dialog is the real
+/// safeguard, and refusing to delete on trash-less volumes would strand
+/// exactly the libraries this app targets. The index only forgets a model
+/// whose disk delete succeeded (or that was already gone), so the catalog
+/// keeps telling the truth about what's still on disk. Catalog-only
+/// removal (delete_files = false) is a SOFT remove: the folders stay on
+/// disk but go on the scan-ignore list, so a rescan doesn't quietly undo
+/// the user's decision — Settings shows the list and can take them back.
 #[tauri::command]
 #[specta::specta]
 pub async fn delete_models(
     app_handle: AppHandle,
     dir_paths: Vec<String>,
     delete_files: bool,
-) -> Result<BatchOutcome, AppError> {
+) -> Result<DeleteOutcome, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let dirs = top_level_dirs(dir_paths);
         if dirs.is_empty() {
-            return Ok(BatchOutcome {
+            return Ok(DeleteOutcome {
                 succeeded: 0,
+                hard_deleted: 0,
                 errors: Vec::new(),
             });
         }
         let mut errors: Vec<String> = Vec::new();
+        let mut hard_deleted: u32 = 0;
         let removed_dirs: Vec<String> = if delete_files {
             let doomed: HashSet<String> = dirs.iter().cloned().collect();
             let units = {
@@ -1817,20 +1833,37 @@ pub async fn delete_models(
                 let roots = db::known_roots(&conn)?;
                 consolidate_trash_units(&conn, &doomed, &roots)
             };
-            let mut trashed = Vec::new();
+            let mut removed = Vec::new();
             for unit in units {
-                let covered = dirs.iter().filter(|d| path_within(d, &unit)).cloned();
+                let covered: Vec<String> = dirs
+                    .iter()
+                    .filter(|d| path_within(d, &unit))
+                    .cloned()
+                    .collect();
                 if !Path::new(&unit).exists() {
                     // Already gone from disk still means gone from the catalog
-                    trashed.extend(covered);
+                    removed.extend(covered);
                     continue;
                 }
                 match trash::delete(&unit) {
-                    Ok(()) => trashed.extend(covered),
-                    Err(e) => errors.push(format!("{}: couldn't move to trash — {}", unit, e)),
+                    Ok(()) => removed.extend(covered),
+                    // Trash refused — permission problems and no-trash volumes
+                    // land here alike. remove_dir_all sorts them out: a
+                    // permission error fails again and surfaces; a trash-less
+                    // volume deletes for real, counted so the UI can say so.
+                    Err(trash_err) => match std::fs::remove_dir_all(&unit) {
+                        Ok(()) => {
+                            hard_deleted += covered.len() as u32;
+                            removed.extend(covered);
+                        }
+                        Err(rm_err) => errors.push(format!(
+                            "{}: couldn't move to trash ({}) or delete ({})",
+                            unit, trash_err, rm_err
+                        )),
+                    },
                 }
             }
-            trashed
+            removed
         } else {
             dirs
         };
@@ -1840,16 +1873,62 @@ pub async fn delete_models(
             // live in variant_previews, which remove_models deletes
             let sweep_keys = db::preview_sweep_keys(&conn, &removed_dirs)?;
             db::remove_models(&mut conn, &removed_dirs)?;
+            if delete_files {
+                // A folder gone from disk needs no ignore marker — and a
+                // stale one would invisibly block the path if it's ever
+                // legitimately recreated
+                db::remove_scan_ignores_under(&conn, &removed_dirs)?;
+            } else {
+                db::add_scan_ignores(&conn, &removed_dirs)?;
+            }
             drop(conn);
             sweep_preview_files(&app_handle, &sweep_keys);
         }
-        Ok(BatchOutcome {
+        Ok(DeleteOutcome {
             succeeded: removed_dirs.len() as u32,
+            hard_deleted,
             errors,
         })
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Model deletion task failed: {}", e)))?
+}
+
+/// One soft-removed folder, for the Settings list.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, specta::Type)]
+pub struct IgnoredFolder {
+    pub dir_path: String,
+    pub ignored_at: i64,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_ignored_folders(app_handle: AppHandle) -> Result<Vec<IgnoredFolder>, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        Ok(db::list_scan_ignores(&conn)?
+            .into_iter()
+            .map(|(dir_path, ignored_at)| IgnoredFolder {
+                dir_path,
+                ignored_at,
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Ignore-list task failed: {}", e)))?
+}
+
+/// Take a folder off the soft-remove list. The models come back on the
+/// next scan of their root — the marker was the only thing hiding them.
+#[tauri::command]
+#[specta::specta]
+pub async fn unignore_folder(app_handle: AppHandle, dir_path: String) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::remove_scan_ignores_under(&conn, &[dir_path])
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Ignore-list task failed: {}", e)))?
 }
 
 /// Merge a duplicate group: every path in `duplicate_paths` becomes another

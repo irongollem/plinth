@@ -187,6 +187,16 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             archive_checksum   TEXT,
             packed_at          INTEGER
         );
+
+        -- Folders the user soft-removed: "take it out of the catalog, keep
+        -- the files". Scans skip anything at or under these paths — without
+        -- this a soft remove silently undoes itself on the next rescan.
+        -- Absolute paths, root-independent, prefix-scoped like everything
+        -- else keyed on dir_path.
+        CREATE TABLE IF NOT EXISTS scan_ignores (
+            dir_path   TEXT PRIMARY KEY,
+            ignored_at INTEGER NOT NULL
+        );
         "#,
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to init catalog schema: {}", e)))?;
@@ -395,6 +405,27 @@ pub fn replace_catalog(
         )
         .map_err(map_err)?;
 
+        // Soft-removed folders never re-enter: filter the scan's rows
+        // against the ignore list at the door. Tags need no filter of their
+        // own — prune_orphans below drops any tag whose model wasn't
+        // inserted, and the file_variants import selects FROM files.
+        let ignored: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT dir_path FROM scan_ignores").map_err(map_err)?;
+            let rows = stmt
+                .query_map([], |row| row.get(0))
+                .map_err(map_err)?
+                .collect::<Result<Vec<String>, _>>()
+                .map_err(map_err)?;
+            rows
+        };
+        let is_ignored = |p: &str| {
+            ignored.iter().any(|ig| {
+                p == ig.as_str()
+                    || p.strip_prefix(ig.as_str())
+                        .is_some_and(|rest| rest.starts_with(std::path::MAIN_SEPARATOR))
+            })
+        };
+
         let mut insert_file = tx
             .prepare(
                 "INSERT OR REPLACE INTO files
@@ -404,6 +435,9 @@ pub fn replace_catalog(
             )
             .map_err(map_err)?;
         for f in files {
+            if is_ignored(&f.dir_path) {
+                continue;
+            }
             insert_file
                 .execute(params![
                     f.path,
@@ -464,6 +498,9 @@ pub fn replace_catalog(
             )
             .map_err(map_err)?;
         for p in packs {
+            if is_ignored(&p.model_dir) {
+                continue;
+            }
             insert_pack
                 .execute(params![
                     p.model_dir,
@@ -488,6 +525,9 @@ pub fn replace_catalog(
             )
             .map_err(map_err)?;
         for m in models {
+            if is_ignored(&m.dir_path) {
+                continue;
+            }
             insert_model
                 .execute(params![
                     m.dir_path,
@@ -637,6 +677,14 @@ pub fn purge_root(conn: &mut Connection, root: &str) -> Result<(), AppError> {
         tx.execute(
             "DELETE FROM meta WHERE key = 'last_scan:' || ?1",
             params![root],
+        )
+        .map_err(map_err)?;
+        // Soft-remove markers under this root go with it: they exist to
+        // shape scans of the root, and the root is no longer scanned
+        tx.execute(
+            "DELETE FROM scan_ignores WHERE dir_path = ?1
+               OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
+            params![root, sep],
         )
         .map_err(map_err)?;
     }
@@ -2660,6 +2708,56 @@ pub fn dirs_summary(conn: &Connection, dirs: &[String]) -> Result<(u32, i64), Ap
     Ok((files, bytes))
 }
 
+/// Mark folders as soft-removed: future scans skip them (see the filter in
+/// replace_catalog). INSERT OR REPLACE so re-removing refreshes the stamp.
+pub fn add_scan_ignores(conn: &Connection, dirs: &[String]) -> Result<(), AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Ignore-list write failed: {}", e));
+    let mut stmt = conn
+        .prepare(
+            "INSERT OR REPLACE INTO scan_ignores (dir_path, ignored_at)
+             VALUES (?1, strftime('%s','now'))",
+        )
+        .map_err(map_err)?;
+    for dir in dirs {
+        stmt.execute([dir]).map_err(map_err)?;
+    }
+    Ok(())
+}
+
+/// Drop soft-remove markers at or under the given dirs. Used when the
+/// folders are truly deleted from disk (nothing left to ignore) and by the
+/// Settings "unignore" action (dir passed exactly).
+pub fn remove_scan_ignores_under(conn: &Connection, dirs: &[String]) -> Result<(), AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Ignore-list prune failed: {}", e));
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let mut stmt = conn
+        .prepare(
+            "DELETE FROM scan_ignores WHERE dir_path = ?1
+               OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
+        )
+        .map_err(map_err)?;
+    for dir in dirs {
+        stmt.execute(params![dir, sep]).map_err(map_err)?;
+    }
+    Ok(())
+}
+
+/// The soft-remove list, newest first, as (dir_path, ignored_at) pairs.
+pub fn list_scan_ignores(conn: &Connection) -> Result<Vec<(String, i64)>, AppError> {
+    let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Catalog read failed: {}", e));
+    let mut stmt = conn
+        .prepare("SELECT dir_path, ignored_at FROM scan_ignores ORDER BY ignored_at DESC, dir_path")
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(map_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
 /// Every distinct root the index knows about. Disk-side deletion uses these
 /// as hard ceilings: folder consolidation may climb toward a root but never
 /// reach it, so "delete the last model in a catalog" can never trash the
@@ -3102,6 +3200,33 @@ mod tests {
 
         let (file_count, bytes) = dirs_summary(&conn, &["/lib/bugbear".to_string()]).unwrap();
         assert_eq!((file_count, bytes), (1, 4096));
+    }
+
+    #[test]
+    fn soft_removed_folders_stay_gone_across_rescans() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+
+        // Soft remove the newt: rows go, marker stays
+        add_scan_ignores(&conn, &["/lib/newt".to_string()]).unwrap();
+        remove_models(&mut conn, &["/lib/newt".to_string()]).unwrap();
+        assert_eq!(search(&conn, "", &[], 10, 0).unwrap().total, 1);
+
+        // The rescan walks the SAME disk state (newt still exists on disk) —
+        // the whole point: it must not resurrect what the user removed
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+        assert_eq!(search(&conn, "newt", &[], 10, 0).unwrap().total, 0);
+        assert_eq!(search(&conn, "bugbear", &[], 10, 0).unwrap().total, 1);
+        let file_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(file_count, 1, "ignored dir's files filtered at the door");
+
+        // Unignore + rescan brings it back
+        remove_scan_ignores_under(&conn, &["/lib/newt".to_string()]).unwrap();
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+        assert_eq!(search(&conn, "newt", &[], 10, 0).unwrap().total, 1);
     }
 
     #[test]

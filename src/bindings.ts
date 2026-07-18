@@ -460,15 +460,18 @@ async deleteDuplicateFiles(filePaths: string[]) : Promise<Result<BatchOutcome, A
 },
 /**
  * Delete whole models: from the index always, from disk optionally. Disk
- * deletion is trash, not unlink — the folders land in the OS trash /
- * Recycle Bin so a wrong click stays reversible. The index only forgets a
- * model whose disk delete succeeded (or that was already gone): on a
- * volume without trash support (some NAS mounts) the error surfaces and
- * the catalog keeps telling the truth about what's still on disk.
- * Catalog-only removal (delete_files = false) leaves the folders alone,
- * which also means the next scan of that root will index them again.
+ * deletion tries the OS trash / Recycle Bin first so a wrong click stays
+ * reversible, and falls back to a permanent delete where no trash exists
+ * (network shares, most NAS mounts) — the confirmation dialog is the real
+ * safeguard, and refusing to delete on trash-less volumes would strand
+ * exactly the libraries this app targets. The index only forgets a model
+ * whose disk delete succeeded (or that was already gone), so the catalog
+ * keeps telling the truth about what's still on disk. Catalog-only
+ * removal (delete_files = false) is a SOFT remove: the folders stay on
+ * disk but go on the scan-ignore list, so a rescan doesn't quietly undo
+ * the user's decision — Settings shows the list and can take them back.
  */
-async deleteModels(dirPaths: string[], deleteFiles: boolean) : Promise<Result<BatchOutcome, AppError>> {
+async deleteModels(dirPaths: string[], deleteFiles: boolean) : Promise<Result<DeleteOutcome, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_models", { dirPaths, deleteFiles }) };
 } catch (e) {
@@ -479,6 +482,26 @@ async deleteModels(dirPaths: string[], deleteFiles: boolean) : Promise<Result<Ba
 async summarizeModelDirs(dirPaths: string[]) : Promise<Result<DeleteSummary, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("summarize_model_dirs", { dirPaths }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listIgnoredFolders() : Promise<Result<IgnoredFolder[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_ignored_folders") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Take a folder off the soft-remove list. The models come back on the
+ * next scan of their root — the marker was the only thing hiding them.
+ */
+async unignoreFolder(dirPath: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("unignore_folder", { dirPath }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1396,6 +1419,13 @@ export type Cutter = { id: string; label: string; kind: CutterKind }
  */
 export type CutterKind = { kind: "circle"; diameter_mm: number } | { kind: "ellipse"; major_mm: number; minor_mm: number } | { kind: "rect"; width_mm: number; depth_mm: number }
 /**
+ * How a model deletion went. BatchOutcome plus one distinction the UI must
+ * surface: hard_deleted counts folders that skipped the trash. The confirm
+ * dialog promises recoverability, so when a volume couldn't deliver it the
+ * user hears that it didn't — after the fact, but truthfully.
+ */
+export type DeleteOutcome = { succeeded: number; hard_deleted: number; errors: string[] }
+/**
  * What a pending model deletion covers, for the confirmation dialog:
  * counted from the index with the same prefix scoping the deletion uses,
  * so the dialog describes exactly what delete_models will take.
@@ -1493,6 +1523,10 @@ color: string; strength: number }
  * the user is looking at.
  */
 export type GroupOrigin = { designer: string | null; release_name: string | null; model_count: number }
+/**
+ * One soft-removed folder, for the Settings list.
+ */
+export type IgnoredFolder = { dir_path: string; ignored_at: number }
 export type ImportOutcome = { release_name: string; designer: string; 
 /**
  * The directory the release landed in.

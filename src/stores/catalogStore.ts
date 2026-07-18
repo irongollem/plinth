@@ -1805,13 +1805,21 @@ export const useCatalogStore = defineStore("catalog", () => {
         toastStore.reportError("Failed to delete models", result.error);
         return;
       }
-      const { succeeded, errors } = result.data;
+      const { succeeded, hard_deleted, errors } = result.data;
       if (succeeded) {
         toastStore.addToast(
           deleteAlsoFromDisk.value
             ? `Deleted ${succeeded} folder${succeeded === 1 ? "" : "s"} — recoverable from the system trash`
-            : `Removed ${succeeded} folder${succeeded === 1 ? "" : "s"} from the catalog (files kept on disk)`,
+            : `Removed ${succeeded} folder${succeeded === 1 ? "" : "s"} from the catalog — files kept, future scans skip them`,
           "success",
+        );
+      }
+      // The dialog promised the trash; where a volume couldn't deliver
+      // (no trash on most NAS shares) the user hears what happened instead
+      if (hard_deleted) {
+        toastStore.addToast(
+          `${hard_deleted} folder${hard_deleted === 1 ? "" : "s"} had no trash available and ${hard_deleted === 1 ? "was" : "were"} deleted permanently`,
+          "warning",
         );
       }
       for (const error of errors) toastStore.addToast(error, "error");
