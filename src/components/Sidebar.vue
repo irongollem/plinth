@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { getVersion } from "@tauri-apps/api/app";
 import { computed, onMounted, ref } from "vue";
 import { commands } from "../bindings";
 import { useMinihoard } from "../composables/useMinihoard";
@@ -29,8 +30,16 @@ const rootsLine = computed(() =>
     : `${catalogRoots.value.length} catalog folders`,
 );
 
+// The real version from tauri.conf.json (single source of truth the
+// release flow already bumps) — a hardcoded "v0.1" survived two release
+// lines unnoticed because nothing tied this label to the config.
+const appVersion = ref("");
+
 onMounted(async () => {
   detectMinihoard();
+  getVersion().then((v) => {
+    appVersion.value = `v${v}`;
+  });
   const [settings, stats] = await Promise.all([
     commands.getSettings(),
     commands.getCatalogStats(),
@@ -78,7 +87,9 @@ const stepState = (step: ReleaseStep) => {
       <span class="font-display text-[15px] tracking-[0.06em]">PLINTH</span>
       <span class="w-1.5 h-1.5 bg-primary"></span>
       <span class="flex-1"></span>
-      <span class="font-mono text-[10px] text-base-content/40">v0.1</span>
+      <span class="font-mono text-[10px] text-base-content/40">{{
+        appVersion
+      }}</span>
     </div>
 
     <button
