@@ -20,7 +20,7 @@ use basecutter::scatter_assets::{get_scatter_credits, scan_scatter_library};
 use catalog::commands::{
     add_catalog_root, add_catalog_tag, add_group_tag, apply_normalize, assign_files_to_pose,
     batch_move_models, cancel_catalog_job, cleanup_ephemeral_files, clear_file_pose,
-    combine_catalog_groups, delete_duplicate_files, detach_catalog_group_source,
+    combine_catalog_groups, delete_duplicate_files, delete_models, detach_catalog_group_source,
     ensure_model_files, finalize_normalize, flatten_catalog_group, get_catalog_designers,
     get_catalog_group_members, get_catalog_group_sources, get_catalog_model_files,
     get_catalog_releases, get_catalog_stats,
@@ -29,7 +29,8 @@ use catalog::commands::{
     pack_models, plan_normalize, remove_catalog_root, remove_catalog_tag, remove_group_tag,
     rename_catalog_group, search_catalog, search_catalog_groups, set_group_cover,
     set_model_preview, set_model_rotation, set_primary_catalog_root, start_catalog_scan,
-    start_duplicate_scan, supports_file_links, unpack_models, update_model_metadata,
+    start_duplicate_scan, summarize_model_dirs, supports_file_links, unpack_models,
+    update_model_metadata,
 };
 use file::commands::{
     add_models, cancel_compression, create_release, finalize_release, import_release,
@@ -120,6 +121,8 @@ fn create_specta_builder() -> Builder {
             update_model_metadata,
             set_model_preview,
             delete_duplicate_files,
+            delete_models,
+            summarize_model_dirs,
             merge_duplicate_files,
             supports_file_links,
             batch_move_models,

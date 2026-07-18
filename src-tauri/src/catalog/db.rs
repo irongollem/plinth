@@ -2535,6 +2535,148 @@ pub fn remove_files(conn: &mut Connection, paths: &[String]) -> Result<(), AppEr
     Ok(())
 }
 
+/// Remove whole models from the index — the user-facing "delete model"
+/// path. Scoped by dir_path prefix (like purge_root, not like remove_files):
+/// the caller may have trashed a folder recursively, so any row filed under
+/// a subdirectory of a doomed dir must go with it or it lingers as a ghost
+/// pointing at trashed bytes. Sweeps the tables prune_orphans skips
+/// (variant_previews, group_covers, packs) explicitly — they're keyed by
+/// dir_path/model_dir, not existence-joined. Returns how many model rows
+/// actually left the index.
+pub fn remove_models(conn: &mut Connection, dirs: &[String]) -> Result<u32, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Catalog model removal failed: {}", e));
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let tx = conn.transaction().map_err(map_err)?;
+    let mut removed: u32 = 0;
+    {
+        for dir in dirs {
+            removed += tx
+                .execute(
+                    "DELETE FROM models WHERE dir_path = ?1
+                       OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
+                    params![dir, sep],
+                )
+                .map_err(map_err)? as u32;
+            tx.execute(
+                "DELETE FROM files WHERE dir_path = ?1
+                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
+                params![dir, sep],
+            )
+            .map_err(map_err)?;
+            tx.execute(
+                "DELETE FROM packs WHERE model_dir = ?1
+                   OR substr(model_dir, 1, length(?1) + length(?2)) = ?1 || ?2",
+                params![dir, sep],
+            )
+            .map_err(map_err)?;
+            tx.execute(
+                "DELETE FROM variant_previews WHERE dir_path = ?1
+                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
+                params![dir, sep],
+            )
+            .map_err(map_err)?;
+            tx.execute(
+                "DELETE FROM group_covers WHERE dir_path = ?1
+                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
+                params![dir, sep],
+            )
+            .map_err(map_err)?;
+        }
+        prune_orphans(&tx).map_err(map_err)?;
+        rebuild_fts(&tx).map_err(map_err)?;
+    }
+    tx.commit().map_err(map_err)?;
+    Ok(removed)
+}
+
+/// Every indexed model dir at or under `dir` — the consolidation check for
+/// disk deletion asks "does this parent shelter any model NOT being
+/// deleted?" before daring to trash the whole parent.
+pub fn model_dirs_under(conn: &Connection, dir: &str) -> Result<Vec<String>, AppError> {
+    let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Catalog read failed: {}", e));
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let mut stmt = conn
+        .prepare(
+            "SELECT dir_path FROM models WHERE dir_path = ?1
+               OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
+        )
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map(params![dir, sep], |row| row.get(0))
+        .map_err(map_err)?
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
+/// The hash inputs for a model's app-data preview files: the dir_path itself
+/// plus every variant_key filed under it. persist_preview names its copies
+/// DefaultHasher(variant_key ?? dir_path) + timestamp, so deleting a model
+/// must sweep by the same keys or the copies leak in app_data/previews
+/// forever — nothing else ever prunes that folder.
+pub fn preview_sweep_keys(conn: &Connection, dirs: &[String]) -> Result<Vec<String>, AppError> {
+    let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Catalog read failed: {}", e));
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let mut keys: Vec<String> = dirs.to_vec();
+    let mut stmt = conn
+        .prepare(
+            "SELECT variant_key FROM variant_previews WHERE dir_path = ?1
+               OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
+        )
+        .map_err(map_err)?;
+    for dir in dirs {
+        let variant_keys = stmt
+            .query_map(params![dir, sep], |row| row.get::<_, String>(0))
+            .map_err(map_err)?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(map_err)?;
+        keys.extend(variant_keys);
+    }
+    Ok(keys)
+}
+
+/// Indexed footprint of a set of model dirs (file_count, total_bytes),
+/// prefix-scoped like the deletion it previews so the confirmation dialog
+/// describes exactly what remove_models will take.
+pub fn dirs_summary(conn: &Connection, dirs: &[String]) -> Result<(u32, i64), AppError> {
+    let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Catalog read failed: {}", e));
+    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let mut files: u32 = 0;
+    let mut bytes: i64 = 0;
+    let mut stmt = conn
+        .prepare(
+            "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM files WHERE dir_path = ?1
+               OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
+        )
+        .map_err(map_err)?;
+    for dir in dirs {
+        let (f, b): (u32, i64) = stmt
+            .query_row(params![dir, sep], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(map_err)?;
+        files += f;
+        bytes += b;
+    }
+    Ok((files, bytes))
+}
+
+/// Every distinct root the index knows about. Disk-side deletion uses these
+/// as hard ceilings: folder consolidation may climb toward a root but never
+/// reach it, so "delete the last model in a catalog" can never trash the
+/// catalog folder itself.
+pub fn known_roots(conn: &Connection) -> Result<Vec<String>, AppError> {
+    let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Catalog read failed: {}", e));
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT root FROM models WHERE root IS NOT NULL")
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(map_err)?
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
 /// Repoint every indexed path after a model directory moves on disk.
 /// model_tags is keyed by dir_path, and replace_catalog deletes tags whose
 /// dir_path no longer matches a model — so skipping this doesn't just leave
@@ -2899,6 +3041,67 @@ mod tests {
         // no match
         let page = search(&conn, "dragon", &[], 10, 0).unwrap();
         assert_eq!(page.total, 0);
+    }
+
+    #[test]
+    fn remove_models_takes_nested_rows_and_side_tables() {
+        let mut conn = test_conn();
+        let (mut files, mut models, tags) = sample_rows();
+        // A file filed under a SUBFOLDER of the doomed dir: deletion is
+        // prefix-scoped because the disk delete is recursive — an exact-match
+        // delete would leave this row pointing at trashed bytes.
+        files.push(file_row("/lib/newt/supported/GiantNewt_sup.stl", "/lib/newt/supported", 1024));
+        models.push(ModelRow {
+            dir_path: "/lib/newt/supported".into(),
+            name: "Giant Newt".into(),
+            source: "heuristic".into(),
+            file_count: 1,
+            total_size_bytes: 1024,
+            group_name: Some("Giant Newt".into()),
+            ..Default::default()
+        });
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+        // The side tables prune_orphans does NOT sweep — remove_models must
+        // take these explicitly or curation ghosts survive the delete
+        conn.execute(
+            "INSERT INTO variant_previews (variant_key, dir_path, preview_path)
+             VALUES ('/lib/newt\u{241F}sword\u{241F}brave', '/lib/newt', '/previews/abc.png')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO group_covers (group_name, dir_path, variant_key)
+             VALUES ('Giant Newt', '/lib/newt', NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO packs (model_dir, archive_path, archive_size_bytes)
+             VALUES ('/lib/newt', '/lib/newt/model.plinthpack', 512)",
+            [],
+        )
+        .unwrap();
+
+        let sweep_keys = preview_sweep_keys(&conn, &["/lib/newt".to_string()]).unwrap();
+        assert!(sweep_keys.contains(&"/lib/newt".to_string()));
+        assert!(sweep_keys.contains(&"/lib/newt\u{241F}sword\u{241F}brave".to_string()));
+
+        let removed = remove_models(&mut conn, &["/lib/newt".to_string()]).unwrap();
+        assert_eq!(removed, 2, "the nested supported/ model row goes too");
+
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM models"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM files"), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM model_tags"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM variant_previews"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM group_covers"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM packs"), 0);
+        // FTS forgot the deleted model but still finds the survivor
+        assert_eq!(search(&conn, "newt", &[], 10, 0).unwrap().total, 0);
+        assert_eq!(search(&conn, "bugbear", &[], 10, 0).unwrap().total, 1);
+
+        let (file_count, bytes) = dirs_summary(&conn, &["/lib/bugbear".to_string()]).unwrap();
+        assert_eq!((file_count, bytes), (1, 4096));
     }
 
     #[test]

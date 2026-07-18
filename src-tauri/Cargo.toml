@@ -46,6 +46,10 @@ tauri-plugin-fs = "2"
 tauri-plugin-dialog = "=2.7.1" # JS 2.7.1; older crate answers confirm() as bool, JS expects button label
 tauri-plugin-os = "2"
 tauri-specta = { version = "2.0.0-rc.21", features = ["typescript", "derive"] }
+# Model deletion goes to the OS trash/recycle bin (Windows Recycle Bin,
+# macOS Trash, freedesktop trash), never a hard unlink — deletes stay
+# recoverable from inside the file manager the user is trying to escape.
+trash = "5"
 tokio = { version = "1.44.2", features = [
   "process",
   "io-util",

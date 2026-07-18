@@ -8,7 +8,7 @@ use crate::models::events::{
 };
 use once_cell::sync::Lazy;
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1628,6 +1628,230 @@ pub async fn delete_duplicate_files(
     .map_err(|e| AppError::ConfigError(format!("File deletion task failed: {}", e)))?
 }
 
+/// True when `child` is `parent` itself or filed anywhere under it.
+/// Byte-prefix plus a separator check instead of Path::starts_with: the
+/// index stores paths as the strings the scanner produced, and this must
+/// match the DB's substr() scoping exactly — Path's component-wise rules
+/// (case folding never, but verbatim prefixes and trailing separators yes)
+/// would disagree with SQL at the edges.
+fn path_within(child: &str, parent: &str) -> bool {
+    child == parent
+        || child
+            .strip_prefix(parent)
+            .is_some_and(|rest| rest.starts_with(std::path::MAIN_SEPARATOR))
+}
+
+/// Dedupe a dir list and drop entries nested under another entry — every
+/// consumer is prefix-scoped, so a nested dir is already covered by its
+/// ancestor and processing it separately would double-count or double-trash.
+fn top_level_dirs(mut dirs: Vec<String>) -> Vec<String> {
+    dirs.sort();
+    dirs.dedup();
+    dirs.iter()
+        .filter(|d| {
+            !dirs
+                .iter()
+                .any(|p| p.as_str() != d.as_str() && path_within(d, p))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Grow the doomed dirs into the largest folders that are safe to trash
+/// wholesale. A card's members are leaf dirs (raw/, supported/), but they
+/// live inside a shell folder holding the model.json and cover images the
+/// index never rows — trashing only the leaves would leave husks the user
+/// has to go clean up by hand, exactly the filesystem chore the catalog
+/// exists to end. A parent is promoted only when (a) it sits strictly
+/// inside a catalog root, (b) every model the INDEX knows under it is
+/// being deleted anyway, (c) every subdirectory ON DISK is already part of
+/// the delete — an unindexed stranger folder vetoes the whole promotion —
+/// and (d) it isn't a release folder (release.json marks organizational
+/// levels that outlive their members). Loose files in a promoted parent
+/// (sidecars, covers) ride along into the trash, where they're still
+/// recoverable.
+fn consolidate_trash_units(
+    conn: &Connection,
+    doomed: &HashSet<String>,
+    roots: &[String],
+) -> Vec<String> {
+    let mut units: HashSet<String> = doomed.clone();
+    loop {
+        let parents: HashSet<String> = units
+            .iter()
+            .filter_map(|d| Path::new(d).parent())
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let mut promoted = false;
+        for parent in parents {
+            if !roots
+                .iter()
+                .any(|r| parent.as_str() != r.as_str() && path_within(&parent, r))
+            {
+                continue;
+            }
+            let Ok(indexed) = db::model_dirs_under(conn, &parent) else {
+                continue;
+            };
+            if indexed
+                .iter()
+                .any(|d| !doomed.iter().any(|x| path_within(d, x)))
+            {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(&parent) else {
+                continue;
+            };
+            let mut safe = true;
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if entry_path.is_dir() {
+                    if !units.contains(&entry_path.to_string_lossy().into_owned()) {
+                        safe = false;
+                        break;
+                    }
+                } else if entry.file_name().to_string_lossy().eq_ignore_ascii_case("release.json") {
+                    safe = false;
+                    break;
+                }
+            }
+            if !safe {
+                continue;
+            }
+            units.retain(|u| !path_within(u, &parent));
+            units.insert(parent);
+            promoted = true;
+        }
+        if !promoted {
+            break;
+        }
+    }
+    units.into_iter().collect()
+}
+
+/// Delete the app-data preview copies persist_preview made for these hash
+/// keys (dir_paths and variant_keys). Best-effort by design: a missed sweep
+/// leaks one thumbnail file, never breaks catalog state.
+fn sweep_preview_files(app_handle: &AppHandle, keys: &[String]) {
+    let Ok(app_data) = app_handle.path().app_data_dir() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(app_data.join("previews")) else {
+        return;
+    };
+    use std::hash::{Hash, Hasher};
+    let prefixes: HashSet<String> = keys
+        .iter()
+        .map(|key| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut hasher);
+            format!("{:016x}", hasher.finish())
+        })
+        .collect();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if prefixes.iter().any(|p| name.starts_with(p.as_str())) {
+            std::fs::remove_file(entry.path()).ok();
+        }
+    }
+}
+
+/// What a pending model deletion covers, for the confirmation dialog:
+/// counted from the index with the same prefix scoping the deletion uses,
+/// so the dialog describes exactly what delete_models will take.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, specta::Type)]
+pub struct DeleteSummary {
+    pub dir_count: u32,
+    pub file_count: u32,
+    pub total_bytes: i64,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn summarize_model_dirs(
+    app_handle: AppHandle,
+    dir_paths: Vec<String>,
+) -> Result<DeleteSummary, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dirs = top_level_dirs(dir_paths);
+        let conn = open_db(&app_handle)?;
+        let (file_count, total_bytes) = db::dirs_summary(&conn, &dirs)?;
+        Ok(DeleteSummary {
+            dir_count: dirs.len() as u32,
+            file_count,
+            total_bytes,
+        })
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Summary task failed: {}", e)))?
+}
+
+/// Delete whole models: from the index always, from disk optionally. Disk
+/// deletion is trash, not unlink — the folders land in the OS trash /
+/// Recycle Bin so a wrong click stays reversible. The index only forgets a
+/// model whose disk delete succeeded (or that was already gone): on a
+/// volume without trash support (some NAS mounts) the error surfaces and
+/// the catalog keeps telling the truth about what's still on disk.
+/// Catalog-only removal (delete_files = false) leaves the folders alone,
+/// which also means the next scan of that root will index them again.
+#[tauri::command]
+#[specta::specta]
+pub async fn delete_models(
+    app_handle: AppHandle,
+    dir_paths: Vec<String>,
+    delete_files: bool,
+) -> Result<BatchOutcome, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let dirs = top_level_dirs(dir_paths);
+        if dirs.is_empty() {
+            return Ok(BatchOutcome {
+                succeeded: 0,
+                errors: Vec::new(),
+            });
+        }
+        let mut errors: Vec<String> = Vec::new();
+        let removed_dirs: Vec<String> = if delete_files {
+            let doomed: HashSet<String> = dirs.iter().cloned().collect();
+            let units = {
+                let conn = open_db(&app_handle)?;
+                let roots = db::known_roots(&conn)?;
+                consolidate_trash_units(&conn, &doomed, &roots)
+            };
+            let mut trashed = Vec::new();
+            for unit in units {
+                let covered = dirs.iter().filter(|d| path_within(d, &unit)).cloned();
+                if !Path::new(&unit).exists() {
+                    // Already gone from disk still means gone from the catalog
+                    trashed.extend(covered);
+                    continue;
+                }
+                match trash::delete(&unit) {
+                    Ok(()) => trashed.extend(covered),
+                    Err(e) => errors.push(format!("{}: couldn't move to trash — {}", unit, e)),
+                }
+            }
+            trashed
+        } else {
+            dirs
+        };
+        if !removed_dirs.is_empty() {
+            let mut conn = open_db(&app_handle)?;
+            // Sweep keys must be read BEFORE remove_models: the variant_keys
+            // live in variant_previews, which remove_models deletes
+            let sweep_keys = db::preview_sweep_keys(&conn, &removed_dirs)?;
+            db::remove_models(&mut conn, &removed_dirs)?;
+            drop(conn);
+            sweep_preview_files(&app_handle, &sweep_keys);
+        }
+        Ok(BatchOutcome {
+            succeeded: removed_dirs.len() as u32,
+            errors,
+        })
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Model deletion task failed: {}", e)))?
+}
+
 /// Merge a duplicate group: every path in `duplicate_paths` becomes another
 /// name for `keep_path`'s bytes (a hardlink), freeing the copies while every
 /// variant keeps a working file. The catalog's identities are updated in
@@ -1834,4 +2058,90 @@ pub async fn batch_move_models(
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Batch move task failed: {}", e)))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{consolidate_trash_units, db, path_within, top_level_dirs, Connection, HashSet};
+
+    #[test]
+    fn path_within_respects_component_boundaries() {
+        assert!(path_within("/lib/newt", "/lib/newt"));
+        assert!(path_within("/lib/newt/supported", "/lib/newt"));
+        // A sibling sharing a name prefix is NOT inside: this is what keeps
+        // deleting "newt" from also forgetting "newton"
+        assert!(!path_within("/lib/newton", "/lib/newt"));
+        assert!(!path_within("/lib", "/lib/newt"));
+    }
+
+    #[test]
+    fn top_level_dirs_drops_covered_children() {
+        let dirs = vec![
+            "/lib/newt/supported".to_string(),
+            "/lib/newt".to_string(),
+            "/lib/newt".to_string(),
+            "/lib/newton".to_string(),
+        ];
+        let top = top_level_dirs(dirs);
+        assert_eq!(top, vec!["/lib/newt".to_string(), "/lib/newton".to_string()]);
+    }
+
+    #[test]
+    fn consolidation_climbs_shells_but_stops_at_strangers_and_roots() {
+        let base = std::env::temp_dir().join(format!("plinth_del_{}", std::process::id()));
+        let root = base.join("library");
+        let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
+
+        // designer1/newt/{raw,supported} + shell sidecars: the whole model
+        // folder — and then the emptied designer folder — should be one unit
+        let newt = root.join("designer1").join("newt");
+        // designer2/troll/{raw, wip-sculpts}: an unindexed stranger dir
+        // vetoes climbing, so only the doomed leaf is trashed
+        let troll = root.join("designer2").join("troll");
+        for d in [newt.join("raw"), newt.join("supported"), troll.join("raw"), troll.join("wip-sculpts")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(newt.join("model.json"), "{}").unwrap();
+        std::fs::write(newt.join("cover.jpg"), "x").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        db::test_init(&conn);
+        let root_s = s(&root);
+        for dir in [newt.join("raw"), newt.join("supported"), troll.join("raw")] {
+            conn.execute(
+                "INSERT INTO models (dir_path, name, root, indexed_at) VALUES (?1, 'x', ?2, 0)",
+                rusqlite::params![s(&dir), root_s],
+            )
+            .unwrap();
+        }
+
+        let doomed: HashSet<String> =
+            [s(&newt.join("raw")), s(&newt.join("supported")), s(&troll.join("raw"))]
+                .into_iter()
+                .collect();
+        let mut units = consolidate_trash_units(&conn, &doomed, &[root_s.clone()]);
+        units.sort();
+        assert_eq!(
+            units,
+            vec![s(&root.join("designer1")), s(&troll.join("raw"))],
+            "newt's shell and emptied designer folder fold into one unit; \
+             troll's stranger subfolder pins deletion to the doomed leaf"
+        );
+
+        // Deleting the LAST model of a catalog: the climb eats every emptied
+        // shell but the root itself is the hard ceiling
+        let root2 = base.join("solo-library");
+        let raw2 = root2.join("designer3").join("wisp").join("raw");
+        std::fs::create_dir_all(&raw2).unwrap();
+        conn.execute(
+            "INSERT INTO models (dir_path, name, root, indexed_at) VALUES (?1, 'x', ?2, 0)",
+            rusqlite::params![s(&raw2), s(&root2)],
+        )
+        .unwrap();
+        let doomed2: HashSet<String> = [s(&raw2)].into_iter().collect();
+        let units = consolidate_trash_units(&conn, &doomed2, &[s(&root2)]);
+        assert_eq!(units, vec![s(&root2.join("designer3"))]);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
 }

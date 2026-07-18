@@ -459,6 +459,32 @@ async deleteDuplicateFiles(filePaths: string[]) : Promise<Result<BatchOutcome, A
 }
 },
 /**
+ * Delete whole models: from the index always, from disk optionally. Disk
+ * deletion is trash, not unlink — the folders land in the OS trash /
+ * Recycle Bin so a wrong click stays reversible. The index only forgets a
+ * model whose disk delete succeeded (or that was already gone): on a
+ * volume without trash support (some NAS mounts) the error surfaces and
+ * the catalog keeps telling the truth about what's still on disk.
+ * Catalog-only removal (delete_files = false) leaves the folders alone,
+ * which also means the next scan of that root will index them again.
+ */
+async deleteModels(dirPaths: string[], deleteFiles: boolean) : Promise<Result<BatchOutcome, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_models", { dirPaths, deleteFiles }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async summarizeModelDirs(dirPaths: string[]) : Promise<Result<DeleteSummary, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("summarize_model_dirs", { dirPaths }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Merge a duplicate group: every path in `duplicate_paths` becomes another
  * name for `keep_path`'s bytes (a hardlink), freeing the copies while every
  * variant keeps a working file. The catalog's identities are updated in
@@ -1369,6 +1395,12 @@ export type Cutter = { id: string; label: string; kind: CutterKind }
  * user-traced outline is a later variant, not a rewrite of this type.
  */
 export type CutterKind = { kind: "circle"; diameter_mm: number } | { kind: "ellipse"; major_mm: number; minor_mm: number } | { kind: "rect"; width_mm: number; depth_mm: number }
+/**
+ * What a pending model deletion covers, for the confirmation dialog:
+ * counted from the index with the same prefix scoping the deletion uses,
+ * so the dialog describes exactly what delete_models will take.
+ */
+export type DeleteSummary = { dir_count: number; file_count: number; total_bytes: number }
 /**
  * One designer and how many logical models (groups) carry that name —
  * feeds the catalog's designer filter dropdown.
