@@ -1257,6 +1257,15 @@ def _paint_plinth_base(plinth_obj, base_hex, base_mats, base_mat_index):
     the repair pass find "the" `stlpack_base` slot afterward with the union
     not somehow ending up with duplicate same-named slots."""
     mesh = plinth_obj.data
+    # build_plinth's own boolean passes (cavity/bosses/pockets against
+    # material-less cutters) leave an empty None slot behind — appending
+    # after it would shift every index by one, silently landing the walls
+    # on stlpack_terrain (found empirically: plinth walls exported into the
+    # white-factor terrain primitive, invisible in COLOR_0-aware viewers
+    # because their corner colors are black anyway). Clear first so this
+    # table matches base_mats index-for-index; every face's index is
+    # reassigned below, so dropping the stale slots loses nothing.
+    mesh.materials.clear()
     for mat in base_mats:
         mesh.materials.append(mat)
     col = mesh.color_attributes.new(name="Col", type="BYTE_COLOR", domain="CORNER")
