@@ -84,6 +84,16 @@ pub struct BaseCutJob {
     /// "keep")` read) can't drift silently against each other.
     #[serde(default)]
     pub scatter_rim: ScatterRim,
+    /// VTT GLB export design doc "Base cut": when true, base_cut.py imports
+    /// the landscape's `.glb` twin (swap extension of `landscape_path`)
+    /// instead of the bare STL, paints/repairs colors through every cut,
+    /// and exports a `.glb` twin alongside each cut STL (`CutDone.glb`
+    /// below). `false` (the default) is today's behavior EXACTLY — see
+    /// base_cut.py's own docstring "glb mode" section for the full
+    /// contract. `#[serde(default)]` so old job files/frontends without
+    /// the key keep working.
+    #[serde(default)]
+    pub glb: bool,
 }
 
 /// One parsed line of base_cut.py's stdout protocol (see its docstring and
@@ -118,6 +128,9 @@ pub enum BaseCutToken {
         /// `Some(true)` = this placement carried a magnet spec that topper
         /// mode ignored (nothing to pocket without a plinth).
         magnet_ignored: Option<bool>,
+        /// The cut's GLB twin path (glb mode only — see base_cut.py's "glb
+        /// mode" section) — `None` in the default (non-glb) mode.
+        glb: Option<String>,
     },
     CutFailed {
         index: u32,
@@ -152,6 +165,8 @@ pub fn parse_token(line: &str) -> Option<BaseCutToken> {
         topper_mm_clamped: Option<f64>,
         #[serde(default)]
         magnet_ignored: Option<bool>,
+        #[serde(default)]
+        glb: Option<String>,
     }
     #[derive(Deserialize)]
     struct CutFailedPayload {
@@ -191,6 +206,7 @@ pub fn parse_token(line: &str) -> Option<BaseCutToken> {
             shells: p.shells,
             topper_mm_clamped: p.topper_mm_clamped,
             magnet_ignored: p.magnet_ignored,
+            glb: p.glb,
         });
     }
     if let Some(json) = line.strip_prefix("CUT_FAILED ") {
@@ -415,6 +431,7 @@ mod tests {
             }],
             topper_mm: None,
             scatter_rim: ScatterRim::Keep,
+            glb: false,
         };
         let json = serde_json::to_value(&job).unwrap();
 
@@ -444,11 +461,59 @@ mod tests {
         // A plain lowercase string, not a tagged object — see ScatterRim's
         // own doc comment.
         assert_eq!(json["scatter_rim"], "keep");
+        // "glb" (VTT GLB export design doc "Base cut"): always serialized
+        // explicitly, same as scatter_rim above — no skip_serializing_if,
+        // so `false` shows up as a real key, not an absent one.
+        assert_eq!(json["glb"], false);
 
         let back: BaseCutJob = serde_json::from_value(json).unwrap();
         assert_eq!(back.landscape_path, "/path/to/landscape.stl");
         assert_eq!(back.topper_mm, None);
         assert_eq!(back.scatter_rim, ScatterRim::Keep);
+        assert_eq!(back.glb, false);
+    }
+
+    /// Pinned interface: `BaseCutJob.glb` serializes verbatim as the key
+    /// "glb" (no rename), `true` round-trips, and old job JSON that omits
+    /// the key entirely still deserializes (`#[serde(default)]` backfills
+    /// `false`) — mirrors job_with_topper_mm_serializes_the_key /
+    /// job_without_topper_mm_key_defaults_to_none's pattern for the other
+    /// additive job-level flag.
+    #[test]
+    fn job_glb_true_serializes_the_key() {
+        let job = BaseCutJob {
+            landscape_path: "/l.stl".to_string(),
+            out_dir: "/out".to_string(),
+            plinth: PlinthParams::default(),
+            placements: vec![Placement {
+                cutter: CutterKind::Circle { diameter_mm: 32.0 },
+                x_mm: 0.0,
+                y_mm: 0.0,
+                rotation_deg: 0.0,
+                magnet: None,
+                name: Some("round32".to_string()),
+            }],
+            topper_mm: None,
+            scatter_rim: ScatterRim::Keep,
+            glb: true,
+        };
+        let json = serde_json::to_value(&job).unwrap();
+        assert_eq!(json["glb"], true);
+
+        let back: BaseCutJob = serde_json::from_value(json).unwrap();
+        assert_eq!(back.glb, true);
+    }
+
+    #[test]
+    fn job_without_glb_key_defaults_to_false() {
+        let json = serde_json::json!({
+            "landscape": "/l.stl",
+            "out_dir": "/out",
+            "plinth": PlinthParams::default(),
+            "placements": [],
+        });
+        let job: BaseCutJob = serde_json::from_value(json).unwrap();
+        assert_eq!(job.glb, false);
     }
 
     // ---- ScatterRim (docs/BASECUTTER.md's BaseCutJob.scatter_rim) ----
@@ -467,6 +532,7 @@ mod tests {
             placements: vec![],
             topper_mm: None,
             scatter_rim: ScatterRim::Keep,
+            glb: false,
         };
         let json = serde_json::to_value(&base).unwrap();
         assert_eq!(json["scatter_rim"], "keep");
@@ -531,6 +597,7 @@ mod tests {
             }],
             topper_mm: Some(1.5),
             scatter_rim: ScatterRim::Keep,
+            glb: false,
         };
         let json = serde_json::to_value(&job).unwrap();
         assert_eq!(json["topper_mm"], 1.5);
@@ -579,6 +646,7 @@ mod tests {
             }],
             topper_mm: None,
             scatter_rim: ScatterRim::Keep,
+            glb: false,
         };
         let wire = job_json_with_cut_footprints(&job).unwrap();
         let cut = &wire["placements"][0]["cut"];
@@ -621,6 +689,7 @@ mod tests {
             }],
             topper_mm: None,
             scatter_rim: ScatterRim::Keep,
+            glb: false,
         };
         let json = serde_json::to_value(&job).unwrap();
         assert_eq!(json["placements"][0]["magnet"], serde_json::Value::Null);
@@ -663,6 +732,7 @@ mod tests {
                 shells: None,
                 topper_mm_clamped: None,
                 magnet_ignored: None,
+                glb: None,
             })
         );
         // The additive fields (fused/shells/topper_mm_clamped/
@@ -682,6 +752,7 @@ mod tests {
                 shells: None,
                 topper_mm_clamped: Some(3.0),
                 magnet_ignored: Some(true),
+                glb: None,
             })
         );
         assert_eq!(
@@ -697,6 +768,25 @@ mod tests {
                 shells: Some(2),
                 topper_mm_clamped: None,
                 magnet_ignored: None,
+                glb: None,
+            })
+        );
+        // "glb" (VTT GLB export design doc "Base cut"): present only in
+        // glb-mode jobs, independent of the other additive fields.
+        assert_eq!(
+            parse_token(
+                r#"CUT_DONE {"index": 3, "out": "/dir/round32.stl", "dims_mm": [32.0, 32.0, 8.5], "manifold": true, "glb": "/dir/round32.glb"}"#
+            ),
+            Some(BaseCutToken::CutDone {
+                index: 3,
+                out: "/dir/round32.stl".to_string(),
+                dims_mm: [32.0, 32.0, 8.5],
+                manifold: true,
+                fused: None,
+                shells: None,
+                topper_mm_clamped: None,
+                magnet_ignored: None,
+                glb: Some("/dir/round32.glb".to_string()),
             })
         );
         assert_eq!(
@@ -789,6 +879,7 @@ mod tests {
             }],
             topper_mm: None,
             scatter_rim: ScatterRim::Keep,
+            glb: false,
         };
         let path = write_job_file(&dir, &job, "abc123").unwrap();
         assert!(path.is_file());
@@ -847,6 +938,7 @@ mod tests {
             }],
             topper_mm: None,
             scatter_rim: ScatterRim::Keep,
+            glb: false,
         };
         let job_path = write_job_file(&dir, &job, "test-job").expect("write job file");
 
@@ -945,6 +1037,208 @@ bpy.ops.wm.stl_export(filepath=out_path, export_selected_objects=True)
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    // ------------------------------------------------- glb mode integration
+
+    /// End-to-end, glb mode (VTT GLB export design doc "Base cut"): unlike
+    /// `cuts_end_to_end_with_real_blender` above, this needs a landscape
+    /// with a REAL `.glb` twin — the inline test cube that helper builds
+    /// has none, and glb mode hard-requires one (see base_cut.py's
+    /// VALIDATION_FAILED path for a missing twin). So this bakes a real
+    /// lava-flow landscape through gen_landscape.py first (the only seed
+    /// preset with a glow material — see generator::seed_presets — so this
+    /// run doubles as coverage for the terrain+base+glow material trio glb
+    /// mode is supposed to carry through every cut), then runs THREE jobs
+    /// against it:
+    ///   1. glb:true, normal plinth mode, 2 placements (a round + a
+    ///      rotated rect) — every CUT_DONE must carry a "glb" path that
+    ///      exists on disk and starts with the glTF magic bytes.
+    ///   2. glb:true, topper mode (topper_mm set, no plinth) — same
+    ///      contract, proving the repair pass's "no plinth" branch works.
+    ///   3. glb:false on the SAME landscape — the regression guard: no
+    ///      CUT_DONE carries a "glb" key, and no `.glb` file appears next
+    ///      to that job's cut STLs.
+    ///
+    /// Run with: cargo test -- --ignored cuts_glb_mode_end_to_end_with_real_blender
+    #[tokio::test]
+    #[ignore = "requires a local Blender install and ~30s"]
+    async fn cuts_glb_mode_end_to_end_with_real_blender() {
+        use crate::basecutter::generator;
+
+        let blender = crate::render::engine::detect_blender()
+            .await
+            .expect("Blender not found — install it or set BLENDER_BIN");
+        let gen_script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/gen_landscape.py");
+        let cut_script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/base_cut.py");
+
+        let dir = std::env::temp_dir().join(format!("stlpack_basecut_glb_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let preset = generator::seed_presets()
+            .into_iter()
+            .find(|p| p.id == "lava-flow")
+            .expect("lava-flow preset must exist");
+        let landscape_target = dir.join("landscape.stl");
+        let params_path = generator::write_params_file(&dir, &preset.params, &landscape_target, "glb-test")
+            .expect("write params file");
+        let cancel_token = Notify::new();
+        let gen_result =
+            generator::spawn_and_parse(&blender, &gen_script, &params_path, &cancel_token, |_| {}).await;
+        let (landscape, landscape_glb, ..) = gen_result
+            .unwrap_or_else(|(e, tail)| panic!("landscape generation failed: {e}\nstdout tail:\n{tail}"));
+        assert!(Path::new(&landscape).is_file(), "landscape generation failed");
+        assert!(
+            landscape_glb.is_some(),
+            "lava-flow generation must produce a GLB twin — glb mode has nothing to import without one"
+        );
+
+        // ---- 1: glb:true, normal plinth mode, 2 placements ----
+        let out_dir = dir.join("out_glb_normal");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let job = BaseCutJob {
+            landscape_path: landscape.clone(),
+            out_dir: out_dir.to_string_lossy().into_owned(),
+            plinth: PlinthParams::default(),
+            placements: vec![
+                Placement {
+                    cutter: CutterKind::Circle { diameter_mm: 32.0 },
+                    x_mm: -20.0,
+                    y_mm: 0.0,
+                    rotation_deg: 0.0,
+                    magnet: None,
+                    name: Some("round32".to_string()),
+                },
+                Placement {
+                    cutter: CutterKind::Rect {
+                        width_mm: 25.0,
+                        depth_mm: 25.0,
+                    },
+                    x_mm: 20.0,
+                    y_mm: 0.0,
+                    rotation_deg: 30.0,
+                    magnet: None,
+                    name: Some("square25".to_string()),
+                },
+            ],
+            topper_mm: None,
+            scatter_rim: ScatterRim::Keep,
+            glb: true,
+        };
+        let job_path = write_job_file(&dir, &job, "glb-normal").expect("write job file");
+        let mut tokens: Vec<BaseCutToken> = Vec::new();
+        let result = spawn_and_parse(&blender, &cut_script, &job_path, &cancel_token, |token| {
+            tokens.push(token.clone());
+        })
+        .await;
+        let ok_count = match result {
+            Ok(ok) => ok,
+            Err((e, tail)) => panic!("glb-mode base-cut job failed: {e}\nstdout tail:\n{tail}"),
+        };
+        assert_eq!(ok_count, 2, "expected 2 successful cuts, tokens: {:?}", tokens);
+        assert_every_cut_done_has_a_glb_twin(&tokens);
+
+        // ---- 2: glb:true, topper mode (no plinth) ----
+        let out_dir_topper = dir.join("out_glb_topper");
+        std::fs::create_dir_all(&out_dir_topper).unwrap();
+        let topper_job = BaseCutJob {
+            landscape_path: landscape.clone(),
+            out_dir: out_dir_topper.to_string_lossy().into_owned(),
+            plinth: PlinthParams::default(),
+            placements: vec![Placement {
+                cutter: CutterKind::Circle { diameter_mm: 32.0 },
+                x_mm: 0.0,
+                y_mm: 0.0,
+                rotation_deg: 0.0,
+                magnet: None,
+                name: Some("topper32".to_string()),
+            }],
+            topper_mm: Some(1.5),
+            scatter_rim: ScatterRim::Keep,
+            glb: true,
+        };
+        let topper_job_path = write_job_file(&dir, &topper_job, "glb-topper").expect("write job file");
+        let mut topper_tokens: Vec<BaseCutToken> = Vec::new();
+        let topper_result = spawn_and_parse(&blender, &cut_script, &topper_job_path, &cancel_token, |token| {
+            topper_tokens.push(token.clone());
+        })
+        .await;
+        let topper_ok_count = match topper_result {
+            Ok(ok) => ok,
+            Err((e, tail)) => panic!("glb-mode topper base-cut job failed: {e}\nstdout tail:\n{tail}"),
+        };
+        assert_eq!(topper_ok_count, 1, "expected 1 successful topper cut, tokens: {:?}", topper_tokens);
+        assert_every_cut_done_has_a_glb_twin(&topper_tokens);
+
+        // ---- 3: glb:false regression guard, same landscape ----
+        let out_dir_plain = dir.join("out_glb_false");
+        std::fs::create_dir_all(&out_dir_plain).unwrap();
+        let plain_job = BaseCutJob {
+            landscape_path: landscape.clone(),
+            out_dir: out_dir_plain.to_string_lossy().into_owned(),
+            plinth: PlinthParams::default(),
+            placements: vec![Placement {
+                cutter: CutterKind::Circle { diameter_mm: 32.0 },
+                x_mm: 0.0,
+                y_mm: 0.0,
+                rotation_deg: 0.0,
+                magnet: None,
+                name: Some("round32".to_string()),
+            }],
+            topper_mm: None,
+            scatter_rim: ScatterRim::Keep,
+            glb: false,
+        };
+        let plain_job_path = write_job_file(&dir, &plain_job, "glb-false").expect("write job file");
+        let mut plain_tokens: Vec<BaseCutToken> = Vec::new();
+        let plain_result = spawn_and_parse(&blender, &cut_script, &plain_job_path, &cancel_token, |token| {
+            plain_tokens.push(token.clone());
+        })
+        .await;
+        let plain_ok_count = match plain_result {
+            Ok(ok) => ok,
+            Err((e, tail)) => panic!("glb:false base-cut job failed: {e}\nstdout tail:\n{tail}"),
+        };
+        assert_eq!(plain_ok_count, 1, "expected 1 successful cut, tokens: {:?}", plain_tokens);
+        for token in &plain_tokens {
+            if let BaseCutToken::CutDone { out, glb, .. } = token {
+                assert_eq!(glb, &None, "glb:false CUT_DONE must carry no glb path: {:?}", token);
+                let sidecar = Path::new(out).with_extension("glb");
+                assert!(
+                    !sidecar.is_file(),
+                    "glb:false must not write a .glb sidecar, found {:?}",
+                    sidecar
+                );
+            }
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Shared assertion for cuts_glb_mode_end_to_end_with_real_blender's
+    /// glb:true runs: every CUT_DONE token must carry a "glb" path that
+    /// exists on disk and starts with the 4-byte glTF-binary magic.
+    fn assert_every_cut_done_has_a_glb_twin(tokens: &[BaseCutToken]) {
+        let cut_dones: Vec<_> = tokens
+            .iter()
+            .filter_map(|t| match t {
+                BaseCutToken::CutDone { out, glb, .. } => Some((out.clone(), glb.clone())),
+                _ => None,
+            })
+            .collect();
+        assert!(!cut_dones.is_empty(), "expected at least one CUT_DONE token: {:?}", tokens);
+        for (out, glb_path) in &cut_dones {
+            assert!(Path::new(out).is_file(), "expected a cut STL at {:?}", out);
+            let glb_path =
+                glb_path.as_ref().unwrap_or_else(|| panic!("glb-mode CUT_DONE for {:?} had no glb path", out));
+            assert!(Path::new(glb_path).is_file(), "expected a GLB twin at {:?}", glb_path);
+            let bytes = std::fs::read(glb_path).expect("read cut glb twin");
+            assert!(
+                bytes.len() >= 4 && &bytes[0..4] == b"glTF",
+                "{:?} doesn't start with the glTF magic",
+                glb_path
+            );
+        }
     }
 
     // ---- cross-language drift tripwire (docs/BASECUTTER.md "The plinth") --

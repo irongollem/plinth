@@ -120,6 +120,15 @@ pub struct ScatterAsset {
     pub path: String,
     pub footprint_mm: f64,
     pub height_mm: f64,
+    /// The sRGB hex a placed instance of this asset paints its "Col" corner
+    /// attribute with (VTT GLB export design doc "Scatter") — a curated,
+    /// muted tabletop tone per bundled id (see `scatter_assets::BUNDLED_ASSETS`),
+    /// or `"#9a9a9a"` for every user-library asset (no curation pass has
+    /// looked at it, so a neutral grey is the honest default rather than a
+    /// guess). Threaded into a scatter job's `asset_colors` map the same
+    /// way `path` is threaded into `asset_paths` — see
+    /// `scatter_assets::resolve_asset_color`.
+    pub color: String,
     /// Additive to the pinned shape (docs/SCATTER.md "Scale anchor": "the
     /// user-library scan applies the same lens: it warns (not blocks) when
     /// a piece's footprint suggests it's a mini, not debris"). `None` for
@@ -257,6 +266,14 @@ pub enum ScatterToken {
         /// itself counted it). Same `Option`-for-forward-compat treatment as
         /// `shells`.
         layers: Option<u32>,
+        /// The scattered output's GLB twin path (VTT GLB export design doc
+        /// "Scatter" / "Global conventions" #4) — `Option` for the same
+        /// forward/backward-compat reason `generator::LandscapeToken::Generated`'s
+        /// own `glb` field already documents: the current script always
+        /// sends it (scatter_landscape.py's module docstring: "always a real
+        /// path from this script version"), but the parser shouldn't
+        /// hard-fail on a stale/hand-edited payload that omits it.
+        glb: Option<String>,
     },
     Failed { reason: String },
 }
@@ -276,6 +293,8 @@ pub fn parse_scatter_token(line: &str) -> Option<ScatterToken> {
         shells: Option<u32>,
         #[serde(default)]
         layers: Option<u32>,
+        #[serde(default)]
+        glb: Option<String>,
     }
     #[derive(Deserialize)]
     struct FailedPayload {
@@ -301,6 +320,7 @@ pub fn parse_scatter_token(line: &str) -> Option<ScatterToken> {
             manifold: p.manifold,
             shells: p.shells,
             layers: p.layers,
+            glb: p.glb,
         });
     }
     if let Some(json) = line.strip_prefix("SCATTER_FAILED ") {
@@ -370,16 +390,36 @@ pub fn resolve_asset_paths(
         .collect()
 }
 
-/// Serialize `job` and inject the resolved `asset_paths` map under an
-/// `"asset_paths"` key — same "Rust stays the single owner of derived
-/// data, the script never guesses" shape as `job::write_job_file`'s "cut"
-/// footprint injection, but at the top level (one map for the whole job)
-/// rather than per-placement, since asset identity — unlike a cut footprint
-/// — isn't a per-placement-derived value, just a lookup shared across every
-/// placement that references the same id.
-fn job_json_with_asset_paths(
+/// The `asset_colors` counterpart to `resolve_asset_paths` — same id set
+/// (every `Asset` piece referenced by ANY layer), but pure: unlike a path,
+/// a color never needs an `AppHandle` or touches disk
+/// (`scatter_assets::resolve_asset_color` is a compile-time lookup with a
+/// neutral-grey fallback, never a failure — see its own doc comment), so
+/// this can't fail the way `resolve_asset_paths` can on an unresolvable
+/// id. VTT GLB export design doc "Scatter": "pass an asset_colors: {id:
+/// hex} map into the scatter job JSON".
+pub fn resolve_asset_colors(layers: &[ScatterParams]) -> std::collections::HashMap<String, String> {
+    layer_asset_ids(layers)
+        .into_iter()
+        .map(|id| {
+            let color = crate::basecutter::scatter_assets::resolve_asset_color(&id);
+            (id, color)
+        })
+        .collect()
+}
+
+/// Serialize `job` and inject the resolved `asset_paths`/`asset_colors`
+/// maps under their own top-level keys — same "Rust stays the single owner
+/// of derived data, the script never guesses" shape as
+/// `job::write_job_file`'s "cut" footprint injection, but at the top level
+/// (one map for the whole job) rather than per-placement, since asset
+/// identity — unlike a cut footprint — isn't a per-placement-derived value,
+/// just a lookup shared across every placement that references the same
+/// id.
+fn job_json_with_asset_extras(
     job: &ScatterJob,
     asset_paths: &std::collections::HashMap<String, String>,
+    asset_colors: &std::collections::HashMap<String, String>,
 ) -> Result<serde_json::Value, AppError> {
     let mut value = serde_json::to_value(job)
         .map_err(|e| AppError::JsonError(format!("Failed to encode scatter job: {}", e)))?;
@@ -389,6 +429,11 @@ fn job_json_with_asset_paths(
             serde_json::to_value(asset_paths)
                 .map_err(|e| AppError::JsonError(format!("Failed to encode asset_paths: {}", e)))?,
         );
+        obj.insert(
+            "asset_colors".to_string(),
+            serde_json::to_value(asset_colors)
+                .map_err(|e| AppError::JsonError(format!("Failed to encode asset_colors: {}", e)))?,
+        );
     }
     Ok(value)
 }
@@ -397,15 +442,20 @@ fn job_json_with_asset_paths(
 /// production; a scratch dir in tests) so Blender can read it via `--job`.
 /// `asset_paths` is the already-resolved `id -> path` map (see
 /// `resolve_asset_paths`) — pass an empty map for a job with no `Asset`
-/// pieces, exactly what every Generated-only test below does.
+/// pieces, exactly what every Generated-only test below does. `asset_colors`
+/// is `resolve_asset_colors`' equally-derived `id -> hex` map — pass an
+/// empty map the same way; scatter_landscape.py's own `asset_colors.get(id,
+/// DEFAULT_ASSET_COLOR)` fallback makes an empty/missing map behave
+/// identically to every piece using the neutral default.
 pub fn write_job_file(
     dir: &Path,
     job: &ScatterJob,
     job_id: &str,
     asset_paths: &std::collections::HashMap<String, String>,
+    asset_colors: &std::collections::HashMap<String, String>,
 ) -> Result<PathBuf, AppError> {
     let path = dir.join(format!("scatter_job_{job_id}.json"));
-    let value = job_json_with_asset_paths(job, asset_paths)?;
+    let value = job_json_with_asset_extras(job, asset_paths, asset_colors)?;
     let json = serde_json::to_string_pretty(&value)
         .map_err(|e| AppError::JsonError(format!("Failed to encode scatter job: {}", e)))?;
     std::fs::write(&path, json)
@@ -453,12 +503,12 @@ pub async fn spawn_and_parse<F>(
     job_path: &Path,
     cancel_token: &Notify,
     mut on_token: F,
-) -> Result<(String, u32, bool), (AppError, String)>
+) -> Result<(String, u32, bool, Option<String>), (AppError, String)>
 where
     F: FnMut(&ScatterToken),
 {
     let cmd = build_scatter_command(blender, script, job_path);
-    let mut done: Option<(String, u32, bool)> = None;
+    let mut done: Option<(String, u32, bool, Option<String>)> = None;
     let mut failure_reason: Option<String> = None;
 
     let merge_tail = |out: String, err: String| {
@@ -472,8 +522,8 @@ where
     let run_result = crate::render::engine::run_blender_lines(cmd, Some(cancel_token), |line| {
         if let Some(token) = parse_scatter_token(line) {
             match &token {
-                ScatterToken::Done { out, placed, manifold, .. } => {
-                    done = Some((out.clone(), *placed, *manifold))
+                ScatterToken::Done { out, placed, manifold, glb, .. } => {
+                    done = Some((out.clone(), *placed, *manifold, glb.clone()))
                 }
                 ScatterToken::Failed { reason } => failure_reason = Some(reason.clone()),
                 ScatterToken::Started | ScatterToken::Progress { .. } => {}
@@ -770,7 +820,11 @@ async fn run_scatter_job(
         }
     };
 
-    let result = match write_job_file(&script_dir, &job, &job_id, &asset_paths) {
+    // Pure and infallible (see resolve_asset_colors' doc comment) — no
+    // pre-flight failure branch needed here the way asset_paths above has.
+    let asset_colors = resolve_asset_colors(&job.layers);
+
+    let result = match write_job_file(&script_dir, &job, &job_id, &asset_paths, &asset_colors) {
         Ok(job_path) => {
             let app_handle_ref = &app_handle;
             let job_id_ref = &job_id;
@@ -787,12 +841,13 @@ async fn run_scatter_job(
     release_active_job(&ACTIVE_SCATTER, &job_id);
 
     match result {
-        Ok((out_path, placed, manifold)) => {
+        Ok((out_path, placed, manifold, glb_path)) => {
             ScatterStatus::Finished(ScatterFinishedStatus {
                 job_id,
                 out_path,
                 placed,
                 manifold,
+                glb_path,
             })
             .emit(&app_handle)
             .ok();
@@ -1018,7 +1073,8 @@ mod tests {
             Some(ScatterToken::Progress { placed: 3, total: 10 })
         );
         assert_eq!(
-            // No "shells"/"layers" key — an older-script-shaped payload must still parse.
+            // No "shells"/"layers"/"glb" key — an older-script-shaped payload
+            // must still parse.
             parse_scatter_token(
                 r#"SCATTER_DONE {"out": "/l-scattered.stl", "placed": 10, "manifold": true}"#
             ),
@@ -1028,12 +1084,14 @@ mod tests {
                 manifold: true,
                 shells: None,
                 layers: None,
+                glb: None,
             })
         );
         assert_eq!(
             parse_scatter_token(
-                r#"SCATTER_DONE {"out": "/l.stl", "placed": 5, "manifold": true, "shells": 6,
-                   "non_manifold_edges": 0, "total_edges": 900, "layers": 2}"#
+                r#"SCATTER_DONE {"out": "/l.stl", "glb": "/l-scattered.glb", "placed": 5,
+                   "manifold": true, "shells": 6, "non_manifold_edges": 0,
+                   "total_edges": 900, "layers": 2}"#
             ),
             Some(ScatterToken::Done {
                 out: "/l.stl".to_string(),
@@ -1041,6 +1099,7 @@ mod tests {
                 manifold: true,
                 shells: Some(6),
                 layers: Some(2),
+                glb: Some("/l-scattered.glb".to_string()),
             })
         );
         assert_eq!(
@@ -1114,13 +1173,21 @@ mod tests {
             out_path: "/out/l-scattered.stl".to_string(),
             layers: vec![valid_params()],
         };
-        let path = write_job_file(&dir, &job, "abc123", &std::collections::HashMap::new()).unwrap();
+        let path = write_job_file(
+            &dir,
+            &job,
+            "abc123",
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
         assert!(path.is_file());
         let contents = std::fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
         assert_eq!(value["landscape_path"], "/l.stl");
         assert_eq!(value["out_path"], "/out/l-scattered.stl");
         assert_eq!(value["asset_paths"], serde_json::json!({}));
+        assert_eq!(value["asset_colors"], serde_json::json!({}));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1151,7 +1218,14 @@ mod tests {
             "/materialized/scatter/skull-hesperocyon.stl".to_string(),
         );
 
-        let path = write_job_file(&dir, &job, "assetpaths123", &asset_paths).unwrap();
+        let path = write_job_file(
+            &dir,
+            &job,
+            "assetpaths123",
+            &asset_paths,
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
         let contents = std::fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
         assert_eq!(
@@ -1165,6 +1239,59 @@ mod tests {
         assert!(plain.get("asset_paths").is_none());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The `asset_colors` counterpart to
+    /// `write_job_file_injects_asset_paths_at_the_top_level` — VTT GLB
+    /// export design doc "Scatter": Rust builds this map from the asset
+    /// registry (`resolve_asset_colors`) and injects it at job-write time,
+    /// the script never guesses a color from an id.
+    #[test]
+    fn write_job_file_injects_asset_colors_at_the_top_level() {
+        let dir = std::env::temp_dir().join(format!("stlpack_scatter_assetcolors_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut params = valid_params();
+        params.pieces.push(PieceChoice {
+            piece: ScatterPieceSource::Asset {
+                id: "skull-hesperocyon".to_string(),
+            },
+            weight: 0.3,
+        });
+        let job = ScatterJob {
+            landscape_path: "/l.stl".to_string(),
+            out_path: "/out/l-scattered.stl".to_string(),
+            layers: vec![params],
+        };
+        let asset_colors = resolve_asset_colors(&job.layers);
+        assert_eq!(asset_colors.get("skull-hesperocyon"), Some(&"#cfc6b0".to_string()));
+
+        let path = write_job_file(&dir, &job, "assetcolors123", &std::collections::HashMap::new(), &asset_colors)
+            .unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(value["asset_colors"]["skull-hesperocyon"], "#cfc6b0");
+        // Same non-pollution rule as asset_paths: the frontend-facing
+        // ScatterJob type never gains an "asset_colors" field of its own.
+        let plain = serde_json::to_value(&job).unwrap();
+        assert!(plain.get("asset_colors").is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An id with no curated color (a user-library asset, or any id not in
+    /// `scatter_assets::BUNDLED_ASSETS`) resolves to the neutral default —
+    /// `resolve_asset_colors` never fails the way `resolve_asset_paths` can.
+    #[test]
+    fn resolve_asset_colors_defaults_unknown_ids_to_neutral_grey() {
+        let mut params = valid_params();
+        params.pieces.push(PieceChoice {
+            piece: ScatterPieceSource::Asset {
+                id: "some-user-library-rock".to_string(),
+            },
+            weight: 0.2,
+        });
+        let colors = resolve_asset_colors(&[params]);
+        assert_eq!(colors.get("some-user-library-rock"), Some(&"#9a9a9a".to_string()));
     }
 
     #[test]
@@ -1571,6 +1698,13 @@ mod tests {
             ],
         };
 
+        // The `asset_colors` counterpart to `asset_paths` above — same
+        // pure resolution `run_scatter_job` does, computed once and reused
+        // for every job below (harmless if a given job doesn't reference
+        // every id in it — same as asset_paths already does for `dir`).
+        let asset_colors =
+            resolve_asset_colors(&[layer_pebbles_and_rocks.clone(), layer_skull_and_rocks.clone()]);
+
         // ---- 1. production path: 2-layer job through spawn_and_parse ----
         let stacked_out = dir.join("stacked.stl");
         let stacked_job = ScatterJob {
@@ -1578,8 +1712,8 @@ mod tests {
             out_path: stacked_out.to_string_lossy().into_owned(),
             layers: vec![layer_pebbles_and_rocks.clone(), layer_skull_and_rocks.clone()],
         };
-        let stacked_job_path =
-            write_job_file(&dir, &stacked_job, "stacked-job", &asset_paths).expect("write job file");
+        let stacked_job_path = write_job_file(&dir, &stacked_job, "stacked-job", &asset_paths, &asset_colors)
+            .expect("write job file");
 
         let cancel_token = Notify::new();
         let mut tokens: Vec<ScatterToken> = Vec::new();
@@ -1588,7 +1722,7 @@ mod tests {
         })
         .await;
 
-        let (out, placed, manifold) = match result {
+        let (out, placed, manifold, glb) = match result {
             Ok(v) => v,
             Err((e, tail)) => panic!("stacked scatter job failed: {e}\nstdout tail:\n{tail}"),
         };
@@ -1598,6 +1732,18 @@ mod tests {
         assert!(
             placed > 0,
             "expected at least one piece placed across both layers"
+        );
+        // VTT GLB export design doc "Scatter": the scattered output always
+        // gets a .glb twin, and it must actually exist with the right
+        // magic bytes — the same "report what downstream will actually
+        // see" discipline roundtrip_check already applies to manifoldness.
+        let glb_path = glb.expect("SCATTER_DONE must report a glb path");
+        assert!(Path::new(&glb_path).is_file(), "expected a GLB twin at {:?}", glb_path);
+        let glb_bytes = std::fs::read(&glb_path).unwrap();
+        assert!(
+            glb_bytes.len() >= 4 && &glb_bytes[0..4] == b"glTF",
+            "expected the GLB twin to start with the glTF magic, got: {:?}",
+            &glb_bytes[..glb_bytes.len().min(16)]
         );
         assert!(tokens.iter().any(|t| matches!(t, ScatterToken::Started)));
         assert!(tokens.iter().any(|t| matches!(t, ScatterToken::Progress { .. })));
@@ -1643,9 +1789,10 @@ mod tests {
             layers: vec![layer_pebbles_and_rocks.clone(), layer_skull_and_rocks.clone()],
         };
         let stacked_job_path_2 =
-            write_job_file(&dir, &stacked_job_2, "stacked-job-2", &asset_paths).expect("write job file 2");
+            write_job_file(&dir, &stacked_job_2, "stacked-job-2", &asset_paths, &asset_colors)
+                .expect("write job file 2");
         let result_2 = spawn_and_parse(&blender, &script, &stacked_job_path_2, &Notify::new(), |_| {}).await;
-        let (out_2, placed_2, _manifold_2) = match result_2 {
+        let (out_2, placed_2, _manifold_2, _glb_2) = match result_2 {
             Ok(v) => v,
             Err((e, tail)) => panic!("second stacked scatter run failed: {e}\nstdout tail:\n{tail}"),
         };
@@ -1665,7 +1812,8 @@ mod tests {
             layers: vec![layer_pebbles_and_rocks.clone()],
         };
         let single_job_path =
-            write_job_file(&dir, &single_job, "single-job", &asset_paths).expect("write single job file");
+            write_job_file(&dir, &single_job, "single-job", &asset_paths, &asset_colors)
+                .expect("write single job file");
         let single_stdout = run_scatter_debug(&blender, &script, &single_job_path).await;
         let single_pieces = scatter_piece_lines(&single_stdout);
 
@@ -1675,8 +1823,14 @@ mod tests {
             out_path: stacked_debug_out.to_string_lossy().into_owned(),
             layers: vec![layer_pebbles_and_rocks, layer_skull_and_rocks],
         };
-        let stacked_debug_job_path = write_job_file(&dir, &stacked_debug_job, "stacked-debug-job", &asset_paths)
-            .expect("write stacked debug job file");
+        let stacked_debug_job_path = write_job_file(
+            &dir,
+            &stacked_debug_job,
+            "stacked-debug-job",
+            &asset_paths,
+            &asset_colors,
+        )
+        .expect("write stacked debug job file");
         let stacked_stdout = run_scatter_debug(&blender, &script, &stacked_debug_job_path).await;
         let stacked_pieces = scatter_piece_lines(&stacked_stdout);
 

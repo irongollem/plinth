@@ -229,6 +229,50 @@ impl Default for CamberLayer {
     }
 }
 
+/// Emissive glow spec for `MaterialPalette.glow` — lava-only today (the
+/// crust needs a stones layer to key `glow_w` off of, see
+/// gen_landscape.py's `_paint_landscape`), but the shape itself doesn't
+/// assume that; any future preset can opt in the same way.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct GlowSpec {
+    /// "#rrggbb", sRGB — same hex convention as the other palette fields.
+    pub color: String,
+    pub strength: f64,
+}
+
+/// Vertex-color/material palette for the landscape's GLB twin (VTT GLB
+/// export design doc: "Palette contract"). Hex strings are sRGB; the
+/// script converts to linear only where a shader node's `default_value`
+/// needs it (the "Col" corner attribute itself takes sRGB directly via
+/// `.color_srgb`). `glow` is only set for terrains that actually want an
+/// emissive material slot (stlpack_glow) — everything else gets just
+/// stlpack_terrain + stlpack_base.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct MaterialPalette {
+    /// Dominant terrain color.
+    pub ground: String,
+    /// Stones/boulders/relief-high tint, blended in by accent_w.
+    pub accent: String,
+    /// Skirt/bottom/plinth "plastic" color — uniform, no vertex paint.
+    pub base: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glow: Option<GlowSpec>,
+}
+
+impl Default for MaterialPalette {
+    fn default() -> Self {
+        // Neutral grey — used when a preset/caller doesn't specify a
+        // palette at all (also gen_landscape.py's own DEFAULT_PALETTE
+        // fallback for params files predating this feature).
+        Self {
+            ground: "#8a8a8a".to_string(),
+            accent: "#a0a0a0".to_string(),
+            base: "#232227".to_string(),
+            glow: None,
+        }
+    }
+}
+
 /// All style layers, every one individually optional and summable. Field-
 /// level `#[serde(default)]` (each layer type's own `Default`, which sets
 /// `enabled: false`) means a preset JSON can omit whole layers outright.
@@ -271,6 +315,11 @@ pub struct LandscapeParams {
     pub relief_mm: f64,
     #[serde(default)]
     pub layers: LandscapeLayers,
+    /// Vertex-color/material palette for the GLB twin. `#[serde(default)]`
+    /// so old preset JSON / saved custom params without a "palette" key
+    /// still deserialize (neutral grey — see `MaterialPalette::default`).
+    #[serde(default)]
+    pub palette: MaterialPalette,
 }
 
 /// A named, ready-to-generate parameter set (docs/BASECUTTER.md: "Presets
@@ -378,6 +427,14 @@ pub fn seed_presets() -> Vec<GeneratorPreset> {
                     },
                     ..Default::default()
                 },
+                // Grey mortar / lighter grey stone — a plain street, not
+                // dirt or sand (design doc's palette table).
+                palette: MaterialPalette {
+                    ground: "#55504a".to_string(),
+                    accent: "#8f8a84".to_string(),
+                    base: "#232227".to_string(),
+                    glow: None,
+                },
             },
         },
         GeneratorPreset {
@@ -411,6 +468,13 @@ pub fn seed_presets() -> Vec<GeneratorPreset> {
                     },
                     ..Default::default()
                 },
+                // Sahara yellow (design doc's palette table).
+                palette: MaterialPalette {
+                    ground: "#d7b269".to_string(),
+                    accent: "#b98f4e".to_string(),
+                    base: "#232227".to_string(),
+                    glow: None,
+                },
             },
         },
         GeneratorPreset {
@@ -440,6 +504,13 @@ pub fn seed_presets() -> Vec<GeneratorPreset> {
                         amount: 1.0,
                     },
                     ..Default::default()
+                },
+                // Grey stone (design doc's palette table).
+                palette: MaterialPalette {
+                    ground: "#83868a".to_string(),
+                    accent: "#a5a8ac".to_string(),
+                    base: "#232227".to_string(),
+                    glow: None,
                 },
             },
         },
@@ -489,6 +560,19 @@ pub fn seed_presets() -> Vec<GeneratorPreset> {
                     },
                     ..Default::default()
                 },
+                // Black crust, emissive orange in the channel gaps — the
+                // only preset with a glow entry (design doc's palette
+                // table; glow is gated on the stones layer in
+                // gen_landscape.py's _paint_landscape, which lava-flow has).
+                palette: MaterialPalette {
+                    ground: "#1b191d".to_string(),
+                    accent: "#322e35".to_string(),
+                    base: "#232227".to_string(),
+                    glow: Some(GlowSpec {
+                        color: "#ff4d00".to_string(),
+                        strength: 4.0,
+                    }),
+                },
             },
         },
         GeneratorPreset {
@@ -533,6 +617,13 @@ pub fn seed_presets() -> Vec<GeneratorPreset> {
                     // exists to be scattered onto, not to be the show.
                     ..Default::default()
                 },
+                // Brown earth (design doc's palette table).
+                palette: MaterialPalette {
+                    ground: "#5d4936".to_string(),
+                    accent: "#77614a".to_string(),
+                    base: "#232227".to_string(),
+                    glow: None,
+                },
             },
         },
     ]
@@ -564,6 +655,12 @@ pub enum LandscapeToken {
     },
     Generated {
         out: String,
+        /// The GLB twin's path (design doc convention 4). `Option` so the
+        /// parser stays tolerant of a params/script mismatch across an
+        /// upgrade window — never observed from THIS script version, which
+        /// always reports it, but the wire format shouldn't hard-fail on a
+        /// missing key it doesn't strictly need to function.
+        glb: Option<String>,
         dims_mm: [f64; 3],
         verts: u32,
         manifold: bool,
@@ -581,6 +678,8 @@ pub fn parse_landscape_token(line: &str) -> Option<LandscapeToken> {
     #[derive(Deserialize)]
     struct GeneratedPayload {
         out: String,
+        #[serde(default)]
+        glb: Option<String>,
         dims_mm: [f64; 3],
         verts: u32,
         manifold: bool,
@@ -599,6 +698,7 @@ pub fn parse_landscape_token(line: &str) -> Option<LandscapeToken> {
         let p: GeneratedPayload = serde_json::from_str(json).ok()?;
         return Some(LandscapeToken::Generated {
             out: p.out,
+            glb: p.glb,
             dims_mm: p.dims_mm,
             verts: p.verts,
             manifold: p.manifold,
@@ -686,12 +786,12 @@ pub async fn spawn_and_parse<F>(
     params_path: &Path,
     cancel_token: &Notify,
     mut on_token: F,
-) -> Result<(String, [f64; 3], u32, bool), (AppError, String)>
+) -> Result<(String, Option<String>, [f64; 3], u32, bool), (AppError, String)>
 where
     F: FnMut(&LandscapeToken),
 {
     let cmd = build_gen_landscape_command(blender, script, params_path);
-    let mut generated: Option<(String, [f64; 3], u32, bool)> = None;
+    let mut generated: Option<(String, Option<String>, [f64; 3], u32, bool)> = None;
     let mut failure_reason: Option<String> = None;
 
     let merge_tail = |out: String, err: String| {
@@ -707,10 +807,11 @@ where
             match &token {
                 LandscapeToken::Generated {
                     out,
+                    glb,
                     dims_mm,
                     verts,
                     manifold,
-                } => generated = Some((out.clone(), *dims_mm, *verts, *manifold)),
+                } => generated = Some((out.clone(), glb.clone(), *dims_mm, *verts, *manifold)),
                 LandscapeToken::GenerationFailed { reason } => {
                     failure_reason = Some(reason.clone())
                 }
@@ -948,10 +1049,11 @@ async fn run_landscape_gen_job(
     }
 
     match result {
-        Ok((out, dims_mm, _verts, manifold)) => {
+        Ok((out, glb, dims_mm, _verts, manifold)) => {
             LandscapeGenStatus::Finished(LandscapeGenFinishedStatus {
                 job_id,
                 out_path: out,
+                glb_path: glb,
                 dims_mm,
                 manifold,
             })
@@ -999,6 +1101,7 @@ mod tests {
                 },
                 ..Default::default()
             },
+            palette: MaterialPalette::default(),
         };
         let json = serde_json::to_value(&params).unwrap();
         assert_eq!(json["seed"], 7);
@@ -1013,6 +1116,42 @@ mod tests {
         // No "out" on the frontend-facing type — that's injected only into
         // the wire JSON (see params_json_with_out / write_params_file).
         assert!(json.get("out").is_none());
+        // Palette serializes into the exact shape gen_landscape.py's
+        // DEFAULT_PALETTE/_paint_landscape expect.
+        assert_eq!(json["palette"]["ground"], "#8a8a8a");
+        assert_eq!(json["palette"]["accent"], "#a0a0a0");
+        assert_eq!(json["palette"]["base"], "#232227");
+        // glow is None -> the KEY is omitted entirely (skip_serializing_if),
+        // not serialized as null: gen_landscape.py's palette.get("glow")
+        // and Rust's serde(default) both treat "absent" as the no-glow
+        // case, but an explicit null would still be a present key.
+        assert!(json["palette"].get("glow").is_none());
+    }
+
+    #[test]
+    fn palette_with_glow_serializes_the_glow_key() {
+        let glow_params = LandscapeParams {
+            seed: 4,
+            width_mm: 120.0,
+            depth_mm: 80.0,
+            resolution_mm: 0.75,
+            feature_scale: 1.0,
+            carrier_mm: 2.0,
+            relief_mm: 6.0,
+            layers: LandscapeLayers::default(),
+            palette: MaterialPalette {
+                ground: "#1b191d".to_string(),
+                accent: "#322e35".to_string(),
+                base: "#232227".to_string(),
+                glow: Some(GlowSpec {
+                    color: "#ff4d00".to_string(),
+                    strength: 4.0,
+                }),
+            },
+        };
+        let json = serde_json::to_value(&glow_params).unwrap();
+        assert_eq!(json["palette"]["glow"]["color"], "#ff4d00");
+        assert_eq!(json["palette"]["glow"]["strength"], 4.0);
     }
 
     #[test]
@@ -1030,6 +1169,12 @@ mod tests {
         assert!(params.layers.noise.enabled);
         assert!(!params.layers.stones.enabled);
         assert!(!params.layers.boulders.enabled);
+        // A params JSON predating this feature (no "palette" key at all)
+        // must not fail to deserialize — falls back to the neutral default.
+        assert_eq!(params.palette.ground, "#8a8a8a");
+        assert_eq!(params.palette.accent, "#a0a0a0");
+        assert_eq!(params.palette.base, "#232227");
+        assert!(params.palette.glow.is_none());
     }
 
     #[test]
@@ -1043,6 +1188,7 @@ mod tests {
             carrier_mm: 2.0,
             relief_mm: 6.0,
             layers: LandscapeLayers::default(),
+            palette: MaterialPalette::default(),
         };
         let value = params_json_with_out(&params, Path::new("/out/landscape.stl")).unwrap();
         assert_eq!(value["out"], "/out/landscape.stl");
@@ -1061,6 +1207,43 @@ mod tests {
             assert!(preset.params.width_mm > 0.0);
             assert!(preset.params.depth_mm > 0.0);
             assert!(preset.params.relief_mm > 0.0);
+        }
+    }
+
+    /// Every seed preset must ship its own palette, not fall through to the
+    /// neutral `MaterialPalette::default()` — a preset with the default
+    /// palette would mean someone forgot to fill in the design doc's
+    /// palette table row for it. lava-flow is additionally required to
+    /// carry a glow entry (the black-crust/emissive-channel look).
+    #[test]
+    fn every_seed_preset_has_a_non_default_palette() {
+        let default_palette = MaterialPalette::default();
+        for preset in seed_presets() {
+            let palette = &preset.params.palette;
+            assert!(
+                palette.ground != default_palette.ground
+                    || palette.accent != default_palette.accent
+                    || palette.base != default_palette.base
+                    || palette.glow.is_some(),
+                "preset '{}' has the neutral default palette — needs its own row from the design doc's palette table",
+                preset.id
+            );
+        }
+        let lava = seed_presets()
+            .into_iter()
+            .find(|p| p.id == "lava-flow")
+            .unwrap();
+        let glow = lava.params.palette.glow.expect("lava-flow must have a glow entry");
+        assert_eq!(glow.color, "#ff4d00");
+        assert_eq!(glow.strength, 4.0);
+        for preset in seed_presets() {
+            if preset.id != "lava-flow" {
+                assert!(
+                    preset.params.palette.glow.is_none(),
+                    "only lava-flow should carry a glow entry, found one on '{}'",
+                    preset.id
+                );
+            }
         }
     }
 
@@ -1173,12 +1356,28 @@ mod tests {
             parse_landscape_token(r#"GENERATING {"seed": 7}"#),
             Some(LandscapeToken::Generating { seed: 7 })
         );
+        // Without a "glb" key (old script/params-file mismatch) the parser
+        // must not choke — glb comes back None.
         assert_eq!(
             parse_landscape_token(
                 r#"GENERATED {"out": "/l.stl", "dims_mm": [120.0, 80.0, 8.0], "verts": 100, "manifold": true}"#
             ),
             Some(LandscapeToken::Generated {
                 out: "/l.stl".to_string(),
+                glb: None,
+                dims_mm: [120.0, 80.0, 8.0],
+                verts: 100,
+                manifold: true,
+            })
+        );
+        // With "glb" (the current script always sends it) it's captured.
+        assert_eq!(
+            parse_landscape_token(
+                r#"GENERATED {"out": "/l.stl", "glb": "/l.glb", "dims_mm": [120.0, 80.0, 8.0], "verts": 100, "manifold": true}"#
+            ),
+            Some(LandscapeToken::Generated {
+                out: "/l.stl".to_string(),
+                glb: Some("/l.glb".to_string()),
                 dims_mm: [120.0, 80.0, 8.0],
                 verts: 100,
                 manifold: true,
@@ -1188,7 +1387,7 @@ mod tests {
         // too-fine request to fit the vertex budget); the parser must accept
         // the extra field even though nothing consumes it yet.
         assert!(parse_landscape_token(
-            r#"GENERATED {"out": "/l.stl", "dims_mm": [120.0, 80.0, 8.0], "verts": 100, "manifold": true, "resolution_mm": 0.245}"#
+            r#"GENERATED {"out": "/l.stl", "glb": "/l.glb", "dims_mm": [120.0, 80.0, 8.0], "verts": 100, "manifold": true, "resolution_mm": 0.245}"#
         )
         .is_some());
         assert_eq!(
@@ -1257,6 +1456,7 @@ mod tests {
             carrier_mm: 2.0,
             relief_mm: 6.0,
             layers: LandscapeLayers::default(),
+            palette: MaterialPalette::default(),
         };
         let out_path = dir.join("landscape.stl");
         let path = write_params_file(&dir, &params, &out_path, "abc123").unwrap();
@@ -1299,12 +1499,12 @@ mod tests {
             })
             .await;
 
-            let (out, dims_mm, verts, manifold) = match result {
+            let (out, glb, dims_mm, verts, manifold) = match result {
                 Ok(v) => v,
                 Err((e, tail)) => panic!("preset '{}' failed: {e}\nstdout tail:\n{tail}", preset.id),
             };
             println!(
-                "preset '{}': out={out} dims_mm={:?} verts={verts} manifold={manifold}",
+                "preset '{}': out={out} glb={glb:?} dims_mm={:?} verts={verts} manifold={manifold}",
                 preset.id, dims_mm
             );
             assert!(manifold, "preset '{}' produced a non-manifold mesh", preset.id);
@@ -1313,6 +1513,22 @@ mod tests {
                 tokens.iter().any(|t| matches!(t, LandscapeToken::Generating { .. })),
                 "preset '{}': expected a GENERATING token",
                 preset.id
+            );
+
+            // The GLB twin (VTT GLB export design doc convention 4): same
+            // stem, next to the STL, real glTF-binary content.
+            let glb_path = glb.unwrap_or_else(|| panic!("preset '{}': GENERATED had no glb", preset.id));
+            assert!(
+                Path::new(&glb_path).is_file(),
+                "expected a GLB twin at {:?}",
+                glb_path
+            );
+            let bytes = std::fs::read(&glb_path).expect("read glb twin");
+            assert!(
+                bytes.len() >= 4 && &bytes[0..4] == b"glTF",
+                "preset '{}': {:?} doesn't start with the glTF magic",
+                preset.id,
+                glb_path
             );
         }
 

@@ -1050,7 +1050,13 @@ topper_mm_clamped: number | null;
  * `Some(true)` = this placement carried a magnet spec that topper mode
  * ignored (there's no plinth to pocket it into).
  */
-magnet_ignored: boolean | null }
+magnet_ignored: boolean | null; 
+/**
+ * VTT GLB export design doc "Base cut": the cut's `.glb` twin path,
+ * glb-mode jobs only (`BaseCutJob.glb == true`) — `None` in the
+ * default (non-glb) mode.
+ */
+glb_path: string | null }
 export type BaseCutCutFailedStatus = { job_id: string; index: number; reason: string }
 export type BaseCutCutStartedStatus = { job_id: string; index: number }
 export type BaseCutFailedStatus = { job_id: string; message: string; 
@@ -1089,7 +1095,18 @@ topper_mm?: number | null;
  * (this one, and base_cut.py's own lenient `job.get("scatter_rim",
  * "keep")` read) can't drift silently against each other.
  */
-scatter_rim?: ScatterRim }
+scatter_rim?: ScatterRim; 
+/**
+ * VTT GLB export design doc "Base cut": when true, base_cut.py imports
+ * the landscape's `.glb` twin (swap extension of `landscape_path`)
+ * instead of the bare STL, paints/repairs colors through every cut,
+ * and exports a `.glb` twin alongside each cut STL (`CutDone.glb`
+ * below). `false` (the default) is today's behavior EXACTLY — see
+ * base_cut.py's own docstring "glb mode" section for the full
+ * contract. `#[serde(default)]` so old job files/frontends without
+ * the key keep working.
+ */
+glb?: boolean }
 export type BaseCutStartedStatus = { job_id: string; total: number }
 /**
  * Base Cutter job progress — see docs/BASECUTTER.md "Pinned interfaces".
@@ -1425,6 +1442,17 @@ export type GeneratedPieceKind = "pebble" | "rock" | "twig" | "grass" | "mushroo
  */
 export type GeneratorPreset = { id: string; label: string; params: LandscapeParams }
 /**
+ * Emissive glow spec for `MaterialPalette.glow` — lava-only today (the
+ * crust needs a stones layer to key `glow_w` off of, see
+ * gen_landscape.py's `_paint_landscape`), but the shape itself doesn't
+ * assume that; any future preset can opt in the same way.
+ */
+export type GlowSpec = { 
+/**
+ * "#rrggbb", sRGB — same hex convention as the other palette fields.
+ */
+color: string; strength: number }
+/**
  * One (designer, release_name) origin among the models a group rename would
  * touch. group_renames is keyed purely on the scanner-derived group name —
  * no root/designer scoping — so a generic name ("Spear") reused by an
@@ -1459,7 +1487,12 @@ export type LandscapeGenFailedStatus = { job_id: string; message: string;
  * script's own try/except, or an exit with no GENERATED at all).
  */
 stdout_tail: string }
-export type LandscapeGenFinishedStatus = { job_id: string; out_path: string; dims_mm: [number, number, number]; manifold: boolean }
+export type LandscapeGenFinishedStatus = { job_id: string; out_path: string; 
+/**
+ * The GLB twin's path (VTT GLB export design doc convention 4) — see
+ * gen_landscape.py's GENERATED token and LandscapeToken::Generated.
+ */
+glb_path: string | null; dims_mm: [number, number, number]; manifold: boolean }
 export type LandscapeGenStartedStatus = { job_id: string; seed: number }
 /**
  * Landscape generator job progress — see docs/BASECUTTER.md "The landscape
@@ -1491,7 +1524,13 @@ export type LandscapeParams = { seed: number; width_mm: number; depth_mm: number
  * channel width) so "same terrain, chunkier/finer" is one knob, not
  * five consistent edits.
  */
-feature_scale?: number; carrier_mm?: number; relief_mm: number; layers?: LandscapeLayers }
+feature_scale?: number; carrier_mm?: number; relief_mm: number; layers?: LandscapeLayers; 
+/**
+ * Vertex-color/material palette for the GLB twin. `#[serde(default)]`
+ * so old preset JSON / saved custom params without a "palette" key
+ * still deserialize (neutral grey — see `MaterialPalette::default`).
+ */
+palette?: MaterialPalette }
 /**
  * A magnet as it will be pocketed into a plinth's boss. Drawn from the
  * user's magnet inventory (app settings), never from a hardcoded
@@ -1500,6 +1539,28 @@ feature_scale?: number; carrier_mm?: number; relief_mm: number; layers?: Landsca
  * straight into a placement's `magnet` field for base_cut.py.
  */
 export type MagnetSpec = { diameter_mm: number; height_mm: number; count: number }
+/**
+ * Vertex-color/material palette for the landscape's GLB twin (VTT GLB
+ * export design doc: "Palette contract"). Hex strings are sRGB; the
+ * script converts to linear only where a shader node's `default_value`
+ * needs it (the "Col" corner attribute itself takes sRGB directly via
+ * `.color_srgb`). `glow` is only set for terrains that actually want an
+ * emissive material slot (stlpack_glow) — everything else gets just
+ * stlpack_terrain + stlpack_base.
+ */
+export type MaterialPalette = { 
+/**
+ * Dominant terrain color.
+ */
+ground: string; 
+/**
+ * Stones/boulders/relief-high tint, blended in by accent_w.
+ */
+accent: string; 
+/**
+ * Skirt/bottom/plinth "plastic" color — uniform, no vertex paint.
+ */
+base: string; glow?: GlowSpec | null }
 export type MdCancelled = { job_id: string }
 export type MdFailed = { job_id: string; error: MinihoardError }
 export type MdFileProgress = { job_id: string; id: number; bytes_done: number; 
@@ -1866,6 +1927,17 @@ export type ScanStartedStatus = { job_id: string; root: string }
 export type ScanStatus = { Started: ScanStartedStatus } | { Progress: ScanProgressStatus } | { Completed: ScanCompletedStatus } | { Failed: ScanFailedStatus } | { Cancelled: ScanCancelledStatus }
 export type ScatterAsset = { id: string; label: string; source: ScatterAssetSource; path: string; footprint_mm: number; height_mm: number; 
 /**
+ * The sRGB hex a placed instance of this asset paints its "Col" corner
+ * attribute with (VTT GLB export design doc "Scatter") — a curated,
+ * muted tabletop tone per bundled id (see `scatter_assets::BUNDLED_ASSETS`),
+ * or `"#9a9a9a"` for every user-library asset (no curation pass has
+ * looked at it, so a neutral grey is the honest default rather than a
+ * guess). Threaded into a scatter job's `asset_colors` map the same
+ * way `path` is threaded into `asset_paths` — see
+ * `scatter_assets::resolve_asset_color`.
+ */
+color: string; 
+/**
  * Additive to the pinned shape (docs/SCATTER.md "Scale anchor": "the
  * user-library scan applies the same lens: it warns (not blocks) when
  * a piece's footprint suggests it's a mini, not debris"). `None` for
@@ -1892,7 +1964,13 @@ export type ScatterFailedStatus = { job_id: string; message: string;
  * script's own try/except, or an exit with no SCATTER_DONE at all).
  */
 stdout_tail: string }
-export type ScatterFinishedStatus = { job_id: string; out_path: string; placed: number; manifold: boolean }
+export type ScatterFinishedStatus = { job_id: string; out_path: string; placed: number; manifold: boolean; 
+/**
+ * The scattered output's GLB twin path (VTT GLB export design doc
+ * convention 4) — see scatter_landscape.py's SCATTER_DONE token and
+ * `basecutter::scatter::ScatterToken::Done`.
+ */
+glb_path: string | null }
 /**
  * A scatter job, as sent from the frontend and forwarded to
  * scatter_landscape.py verbatim — unlike `BaseCutJob`, no field is renamed:

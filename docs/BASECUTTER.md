@@ -334,7 +334,7 @@ BaseCutJob = { landscape_path, placements: Vec<Placement>,
                // all shells are fused first and the cutter slices straight
                // through — the old look. serde(default) = keep. On a
                // single-shell landscape both modes are identical.
-               topper_mm: Option<f64> }  // Some(t) = BASE TOPPER mode: no
+               topper_mm: Option<f64>,   // Some(t) = BASE TOPPER mode: no
                // plinth at all — the plug is flat-trimmed t mm below its
                // lowest sculpted point (t clamped ~1..3, default 1.5) and
                // exported as a glue-on terrain slab for hard plastic
@@ -343,8 +343,20 @@ BaseCutJob = { landscape_path, placements: Vec<Placement>,
                // topper mode (nothing to pocket). None = the normal
                // seat-on-plinth flow. Additive + serde(default), so old
                // frontends keep working.
+               glb: bool }               // default false (serde(default)),
+               // byte-identical to pre-GLB behavior when unset. true =
+               // import the landscape's .glb twin instead of the bare
+               // STL, paint/repair colors through every cut, and export a
+               // .glb twin (true-size METERS, Y-up) alongside each cut
+               // STL — see "VTT GLB export" below.
 // On the wire, job.rs injects per placement: "cut": CutterKind — the
 // top_face_of result. The script consumes it and never re-derives.
+
+// LandscapeParams (generator, see "The landscape generator" below) gains:
+LandscapeParams += { palette: MaterialPalette }  // serde(default) = neutral
+                                                  // grey; see "VTT GLB export"
+MaterialPalette = { ground, accent, base: String /* "#rrggbb" sRGB */,
+                     glow: Option<{ color: String, strength: f64 }> }
 
 // events: BaseCutStatus = Started | Validating | Validated | CutStarted
 //   | CutDone | CutFailed | Finished | Failed | Cancelled — a user cancel
@@ -354,12 +366,65 @@ BaseCutJob = { landscape_path, placements: Vec<Placement>,
 // same shape as render_mini.py's BATCH_* tokens; base_cut.py is the
 // source of truth for the payloads)
 VALIDATING | VALIDATED {…} | VALIDATION_FAILED {…}   // FAILED kills the job pre-cutting
-CUT_START {"index":i} | CUT_DONE {"index":i,"out":…,"dims_mm":[…],"manifold":…}
+CUT_START {"index":i} | CUT_DONE {"index":i,"out":…,"dims_mm":[…],"manifold":…,"glb":…}
 CUT_FAILED {"index":i,"reason":…} | JOB_DONE {"total":N,"ok":n}
+// "glb" is the cut's .glb twin path, glb-mode jobs only — null/absent
+// otherwise. gen_landscape.py's GENERATED token gains the same "glb" key
+// unconditionally (every generated landscape gets a .glb twin, no opt-in).
 ```
 
 The script receives the job as a JSON file (path after `--` in the
 Blender CLI, same convention as `render_mini.py`), not as flags per cut.
+
+## VTT GLB export
+
+Cut bases are STL by default — printable, nothing else. For tabletop VTT
+use (Foundry, etc.) a base also wants to be a colored, true-size 3D asset,
+so every stage that produces terrain can additionally emit a `.glb` twin.
+
+- **The GLB twin convention**: any stage that writes `<stem>.stl` also
+  writes `<stem>.glb` next to it, same directory, same stem. This is
+  unconditional for `gen_landscape.py` (generation) and
+  `scatter_landscape.py` (scatter) — every bake gets a colored twin
+  whether or not anyone ever asks for a GLB base — and opt-in for
+  `base_cut.py` via `BaseCutJob.glb` (default `false`, byte-identical to
+  pre-GLB behavior when off).
+- **Coloring**: a `"Col"` corner-domain byte-color attribute carries
+  per-vertex color (terrain: ground/accent blend + jitter; skirt/bottom/
+  plinth: uniform "plastic"; scatter pieces: their asset color). Three
+  materials do the shading: `stlpack_terrain` (vertex-colored, for the
+  sculpted top surface), `stlpack_base` (uniform plastic, for
+  skirt/bottom/plinth), and `stlpack_glow` (emissive, lava-only — glowing
+  crust gaps). Material slot order is always terrain(0) / base(1) /
+  glow(2, if present).
+- **Palettes**: each generator preset carries a `MaterialPalette`
+  (`ground`, `accent`, `base`, optional `glow: {color, strength}`, all
+  `"#rrggbb"` sRGB) baked into the landscape's colors at generation time —
+  see `LandscapeParams.palette` in the pinned interfaces above and the
+  preset table in `generator.rs`. Lava is the one preset with `glow` set
+  (an emissive orange in the crust gaps); everything else has no glow
+  material.
+- **`glb: true` cut mode**: `base_cut.py` imports the landscape's `.glb`
+  twin instead of the bare STL, so the plug carries the sculpted colors
+  through every boolean. Colors + material assignment on
+  boolean-created geometry (cut walls, the seam ring) aren't
+  interpolated — Blender zero-fills them — so a **repair pass** runs
+  after the final union and before export: uncolored corners inherit
+  their vertex's average color where any corner of that vertex has one,
+  else their face-mates' average, else the base color; then every
+  downward-facing (bottom) face is forced to the base color and the
+  `stlpack_base` material regardless of what the fill produced. The
+  exported `.glb` is **true-size meters, Y-up** — a 32 mm base becomes
+  `0.032` units — baked by scaling the mesh by `0.001` immediately after
+  the (unscaled, millimeter) STL export; the STL itself never changes
+  size or orientation.
+- **Catalog export**: `export_cuts_to_catalog` copies a cut's `.glb`
+  sidecar alongside its STL automatically whenever one exists — no
+  separate opt-in on the catalog side.
+
+See also docs/SCATTER.md (scatter piece coloring) and
+docs/SCATTER-ASSETS.md (the `color` field on bundled/user-library
+assets).
 
 ## Phases (commit-sized, in order)
 

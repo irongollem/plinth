@@ -396,6 +396,10 @@ pub struct BaseCutCutDoneStatus {
     /// `Some(true)` = this placement carried a magnet spec that topper mode
     /// ignored (there's no plinth to pocket it into).
     pub magnet_ignored: Option<bool>,
+    /// VTT GLB export design doc "Base cut": the cut's `.glb` twin path,
+    /// glb-mode jobs only (`BaseCutJob.glb == true`) — `None` in the
+    /// default (non-glb) mode.
+    pub glb_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
@@ -451,6 +455,9 @@ pub struct LandscapeGenStartedStatus {
 pub struct LandscapeGenFinishedStatus {
     pub job_id: String,
     pub out_path: String,
+    /// The GLB twin's path (VTT GLB export design doc convention 4) — see
+    /// gen_landscape.py's GENERATED token and LandscapeToken::Generated.
+    pub glb_path: Option<String>,
     pub dims_mm: [f64; 3],
     pub manifold: bool,
 }
@@ -508,6 +515,10 @@ pub struct ScatterFinishedStatus {
     pub out_path: String,
     pub placed: u32,
     pub manifold: bool,
+    /// The scattered output's GLB twin path (VTT GLB export design doc
+    /// convention 4) — see scatter_landscape.py's SCATTER_DONE token and
+    /// `basecutter::scatter::ScatterToken::Done`.
+    pub glb_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]

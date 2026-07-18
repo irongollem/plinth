@@ -37,6 +37,19 @@ struct BundledAsset {
     // panel; a future per-asset license display would read this field).
     #[allow(dead_code)]
     license: &'static str,
+    // VTT GLB export design doc "Scatter": a muted, tabletop-realistic
+    // sRGB hex a placed instance of this asset paints its "Col" corner
+    // attribute with (scatter_landscape.py's `piece_asset_color`), before
+    // that per-piece ±6% brightness jitter. Picked per actual asset id
+    // (bone/skull tones for the Smithsonian skeletal scans, a cap-brown for
+    // the mushroom, greens/browns for the leaf litter, wood tones for the
+    // Poly Haven branch/log scans) rather than one flat color for the whole
+    // table — see this module's manifest-drift tests for why the table
+    // can't silently drift from what's actually shipped; color isn't in
+    // manifest.json and so isn't drift-checked the same way, but every
+    // entry IS checked non-empty and `#rrggbb`-shaped in this file's own
+    // tests.
+    color: &'static str,
     bytes: &'static [u8],
 }
 
@@ -61,6 +74,7 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 7.0,
         height_mm: 2.704,
         license: SMITHSONIAN_LICENSE,
+        color: "#cfc6b0",
         bytes: include_bytes!("../../resources/scatter/skull-hesperocyon.stl"),
     },
     BundledAsset {
@@ -70,6 +84,7 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 6.0,
         height_mm: 2.284,
         license: SMITHSONIAN_LICENSE,
+        color: "#cfc6b0",
         bytes: include_bytes!("../../resources/scatter/skull-pseudocynodictis.stl"),
     },
     BundledAsset {
@@ -79,6 +94,10 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 8.0,
         height_mm: 4.411,
         license: SMITHSONIAN_LICENSE,
+        // Marine-mammal bone weathers greyer than a land skull's warmer
+        // ivory tones — a small distinguishing nudge off the shared
+        // bone/skull base color rather than a flat reuse of it.
+        color: "#c4c2b8",
         bytes: include_bytes!("../../resources/scatter/skull-leptophoca-seal.stl"),
     },
     BundledAsset {
@@ -88,6 +107,7 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 9.0,
         height_mm: 3.846,
         license: SMITHSONIAN_LICENSE,
+        color: "#d6c9a8",
         bytes: include_bytes!("../../resources/scatter/skull-deer.stl"),
     },
     BundledAsset {
@@ -97,6 +117,7 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 11.0,
         height_mm: 1.362,
         license: SMITHSONIAN_LICENSE,
+        color: "#c9c2ab",
         bytes: include_bytes!("../../resources/scatter/skull-diplocaulus.stl"),
     },
     BundledAsset {
@@ -106,6 +127,7 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 9.0,
         height_mm: 4.82,
         license: SMITHSONIAN_LICENSE,
+        color: "#cfc6b0",
         bytes: include_bytes!("../../resources/scatter/bone-deer-mandible.stl"),
     },
     BundledAsset {
@@ -115,6 +137,7 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 12.0,
         height_mm: 1.284,
         license: SMITHSONIAN_LICENSE,
+        color: "#cfc6b0",
         bytes: include_bytes!("../../resources/scatter/bone-deer-forelimb.stl"),
     },
     BundledAsset {
@@ -124,6 +147,10 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 16.0,
         height_mm: 4.699,
         license: SMITHSONIAN_LICENSE,
+        // The "statement piece" (docs/SCATTER.md "Scale anchor") — big,
+        // weathered whale bone reads greyer/more porous than a small land
+        // mammal's skull.
+        color: "#b8b5ab",
         bytes: include_bytes!("../../resources/scatter/bone-pilot-whale-mandible.stl"),
     },
     BundledAsset {
@@ -133,6 +160,7 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 6.369,
         height_mm: 6.0,
         license: "CC0 (as recorded in opengameart-mushroom/LICENSE.txt)",
+        color: "#99573f",
         bytes: include_bytes!("../../resources/scatter/mushroom.stl"),
     },
     // Organic-leaf set — decimated to ~1500 tris and normalized to a ~5mm
@@ -147,6 +175,9 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 4.9663,
         height_mm: 1.6860,
         license: LEAF_LICENSE,
+        // Fallen maple litter skews reddish-brown rather than the flatter
+        // green-brown of the rest of the leaf set.
+        color: "#8a5a34",
         bytes: include_bytes!("../../resources/scatter/leaf-maple.stl"),
     },
     BundledAsset {
@@ -156,6 +187,7 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 4.9696,
         height_mm: 1.4742,
         license: LEAF_LICENSE,
+        color: "#6a7a3e",
         bytes: include_bytes!("../../resources/scatter/leaf-apple.stl"),
     },
     BundledAsset {
@@ -165,6 +197,7 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 4.9996,
         height_mm: 1.4852,
         license: LEAF_LICENSE,
+        color: "#7c6a35",
         bytes: include_bytes!("../../resources/scatter/leaf-cherry.stl"),
     },
     BundledAsset {
@@ -174,6 +207,7 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 4.9992,
         height_mm: 1.5903,
         license: LEAF_LICENSE,
+        color: "#6e5a35",
         bytes: include_bytes!("../../resources/scatter/leaf-oak.stl"),
     },
     BundledAsset {
@@ -183,6 +217,7 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 4.9889,
         height_mm: 1.5061,
         license: LEAF_LICENSE,
+        color: "#6a7a3e",
         bytes: include_bytes!("../../resources/scatter/leaf-hazel.stl"),
     },
     BundledAsset {
@@ -192,6 +227,7 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 10.920,
         height_mm: 5.483,
         license: "CC0 (Poly Haven)",
+        color: "#6e553a",
         bytes: include_bytes!("../../resources/scatter/forest-branch-scan.stl"),
     },
     BundledAsset {
@@ -201,6 +237,9 @@ const BUNDLED_ASSETS: &[BundledAsset] = &[
         footprint_mm: 15.890,
         height_mm: 1.454,
         license: "CC0 (Poly Haven)",
+        // A whole fallen log reads darker/more weathered than a broken
+        // branch fragment.
+        color: "#5c4632",
         bytes: include_bytes!("../../resources/scatter/forest-log-scan.stl"),
     },
 ];
@@ -261,6 +300,7 @@ pub fn get_bundled_assets(app_handle: &AppHandle) -> Result<Vec<ScatterAsset>, A
                 path: path.to_string_lossy().into_owned(),
                 footprint_mm: asset.footprint_mm,
                 height_mm: asset.height_mm,
+                color: asset.color.to_string(),
                 warning: None, // curated + normalized at curation time — never warns
             })
         })
@@ -268,6 +308,30 @@ pub fn get_bundled_assets(app_handle: &AppHandle) -> Result<Vec<ScatterAsset>, A
 }
 
 // -------------------------------------------------------- asset resolution
+
+/// Neutral fallback for every user-library asset (VTT GLB export design doc
+/// "Scatter": "User-library (non-bundled) assets default to '#9a9a9a'") —
+/// no curation pass has looked at a user's own folder, so there's no
+/// per-piece color to pick the way `BUNDLED_ASSETS` does; also
+/// `scatter_landscape.py`'s own `DEFAULT_ASSET_COLOR` fallback for a piece
+/// with no `asset_colors` entry at all, kept in sync by inspection (each
+/// side owns its own copy — see that script's module docstring's "Colors"
+/// section for why the two scripts can't share a literal import).
+const DEFAULT_USER_ASSET_COLOR: &str = "#9a9a9a";
+
+/// The color a placed instance of asset `id` should paint with — the
+/// `asset_colors` counterpart to `resolve_asset_path`'s `asset_paths`
+/// entry, but pure (no `AppHandle`, no materialization): a bundled id's
+/// color is a compile-time constant, and a user-library id has no
+/// curated color to look up at all, so both branches resolve without
+/// touching disk. Never fails — an unknown id (already caught by
+/// `resolve_asset_path` before this would ever run for it) falls back to
+/// the same neutral grey a real user-library asset gets.
+pub fn resolve_asset_color(id: &str) -> String {
+    bundled_asset_by_id(id)
+        .map(|a| a.color.to_string())
+        .unwrap_or_else(|| DEFAULT_USER_ASSET_COLOR.to_string())
+}
 
 /// Resolve one `Asset { id }` piece to an absolute file path — bundled
 /// first, then the configured user-library folder — for injection into a
@@ -417,6 +481,7 @@ fn scan_one_stl(path: &Path) -> ScatterAsset {
                 path: path_string,
                 footprint_mm: 0.0,
                 height_mm: 0.0,
+                color: DEFAULT_USER_ASSET_COLOR.to_string(),
                 warning: Some(unparseable_stl_warning(&format!("could not read file: {e}"))),
             };
         }
@@ -432,6 +497,7 @@ fn scan_one_stl(path: &Path) -> ScatterAsset {
                 path: path_string,
                 footprint_mm,
                 height_mm: bbox.height_mm(),
+                color: DEFAULT_USER_ASSET_COLOR.to_string(),
                 warning: mini_footprint_warning(footprint_mm),
             }
         }
@@ -442,6 +508,7 @@ fn scan_one_stl(path: &Path) -> ScatterAsset {
             path: path_string,
             footprint_mm: 0.0,
             height_mm: 0.0,
+            color: DEFAULT_USER_ASSET_COLOR.to_string(),
             warning: Some(unparseable_stl_warning(&reason)),
         },
     }
@@ -534,6 +601,58 @@ mod tests {
             assert!(entry["manifold"].as_bool().unwrap());
             assert!(entry["tris"].as_u64().unwrap() <= 15_000);
         }
+    }
+
+    // ----------------------------------------------------------- colors --
+
+    /// VTT GLB export design doc "Scatter": every bundled asset must carry
+    /// a real `#rrggbb` color — a missing/malformed entry would silently
+    /// paint a piece black or crash `scatter_landscape.py`'s
+    /// `_hex_to_rgb01` on a bad hex string.
+    #[test]
+    fn every_bundled_asset_has_a_well_formed_hex_color() {
+        for asset in BUNDLED_ASSETS {
+            assert_eq!(
+                asset.color.len(),
+                7,
+                "{}: color {:?} must be '#rrggbb' (7 chars)",
+                asset.id,
+                asset.color
+            );
+            assert!(
+                asset.color.starts_with('#'),
+                "{}: color {:?} must start with '#'",
+                asset.id,
+                asset.color
+            );
+            assert!(
+                asset.color[1..].chars().all(|c| c.is_ascii_hexdigit()),
+                "{}: color {:?} must be hex digits after '#'",
+                asset.id,
+                asset.color
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_asset_color_returns_the_bundled_color_and_defaults_for_unknown_ids() {
+        assert_eq!(resolve_asset_color("skull-hesperocyon"), "#cfc6b0");
+        assert_eq!(resolve_asset_color("mushroom"), "#99573f");
+        assert_eq!(resolve_asset_color("not-a-bundled-id"), DEFAULT_USER_ASSET_COLOR);
+    }
+
+    #[test]
+    fn scan_scatter_library_dir_defaults_user_assets_to_the_neutral_color() {
+        let dir = std::env::temp_dir().join(format!("stlpack_scatter_scan_color_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = build_binary_stl(&[[(0.0, 0.0, 0.0), (5.0, 0.0, 0.0), (0.0, 5.0, 3.0)]]);
+        std::fs::write(dir.join("piece.stl"), &good).unwrap();
+
+        let result = scan_scatter_library_dir(&dir).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].color, DEFAULT_USER_ASSET_COLOR);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ------------------------------------------------------- resolution --
