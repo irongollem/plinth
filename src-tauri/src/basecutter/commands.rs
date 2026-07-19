@@ -411,6 +411,7 @@ fn handle_token(app_handle: &AppHandle, job_id: &str, token: &BaseCutToken) {
             shells,
             topper_mm_clamped,
             magnet_ignored,
+            scatter_skipped,
             glb,
         } => {
             BaseCutStatus::CutDone(BaseCutCutDoneStatus {
@@ -423,6 +424,7 @@ fn handle_token(app_handle: &AppHandle, job_id: &str, token: &BaseCutToken) {
                 shells: *shells,
                 topper_mm_clamped: *topper_mm_clamped,
                 magnet_ignored: *magnet_ignored,
+                scatter_skipped: *scatter_skipped,
                 glb_path: glb.clone(),
             })
             .emit(app_handle)

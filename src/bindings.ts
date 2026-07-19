@@ -1212,6 +1212,11 @@ topper_mm_clamped: number | null;
  */
 magnet_ignored: boolean | null; 
 /**
+ * Slice-mode scatter shells omitted because they could not be clipped
+ * into a closed, rim-bounded solid.
+ */
+scatter_skipped: number | null;
+/**
  * VTT GLB export design doc "Base cut": the cut's `.glb` twin path,
  * glb-mode jobs only (`BaseCutJob.glb == true`) — `None` in the
  * default (non-glb) mode.
@@ -2239,9 +2244,9 @@ export type ScatterProgressStatus = { job_id: string; placed: number; total: num
  * shell is intersected with the cutter prism; separately, every piece
  * whose centroid lies inside that placement's derived cut footprint is
  * unioned in WHOLE and may overhang the rim like real hand-made scenic
- * basing. `Slice`: every piece is fused into the terrain once, job-wide,
- * before any cut runs — a piece straddling a rim then gets sliced
- * straight through by the cutter prism, like any other terrain detail.
+ * basing. `Slice`: nearby piece copies are clipped per cut and appended as
+ * loose slicer-friendly shells — a piece straddling a rim is sliced flush
+ * without Boolean-unioning the full scattered landscape first.
  * A landscape with nothing scattered onto it (a plain generated bake, a
  * designer sculpt) is a single shell, so both variants behave
  * identically on it — see base_cut.py's `separate_into_shells`.

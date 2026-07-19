@@ -29,6 +29,9 @@ export type BaseCutResult = {
   /** `true` = this placement carried a magnet spec that topper mode
    * ignored. */
   magnet_ignored?: boolean | null;
+  /** Slice-mode scatter shells omitted because Blender could not produce a
+   * closed, rim-bounded intersection for them. */
+  scatter_skipped?: number | null;
   /** The cut's `.glb` twin path (VTT GLB export design doc "Base cut"),
    * glb-mode jobs only — `null`/absent in the default (non-glb) mode. */
   glb_path?: string | null;
@@ -81,6 +84,7 @@ export function useBaseCut() {
           shells: done.shells,
           topper_mm_clamped: done.topper_mm_clamped,
           magnet_ignored: done.magnet_ignored,
+          scatter_skipped: done.scatter_skipped,
           glb_path: done.glb_path,
         });
       }

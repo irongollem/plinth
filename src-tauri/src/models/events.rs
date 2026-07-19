@@ -396,6 +396,9 @@ pub struct BaseCutCutDoneStatus {
     /// `Some(true)` = this placement carried a magnet spec that topper mode
     /// ignored (there's no plinth to pocket it into).
     pub magnet_ignored: Option<bool>,
+    /// Slice-mode scatter shells omitted because they could not be clipped
+    /// into a closed, rim-bounded solid.
+    pub scatter_skipped: Option<u32>,
     /// VTT GLB export design doc "Base cut": the cut's `.glb` twin path,
     /// glb-mode jobs only (`BaseCutJob.glb == true`) — `None` in the
     /// default (non-glb) mode.

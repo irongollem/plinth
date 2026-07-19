@@ -50,10 +50,11 @@
 # terrain + one closed shell per placed piece, never unioned) — a landscape
 # with nothing scattered onto it (a plain generated bake, a designer
 # sculpt) is a single shell and both values behave identically, since
-# there is nothing to separate. "slice": every piece is fused into the
-# terrain ONCE, job-wide, before any cut runs (fuse_pieces_into_terrain) —
-# a piece straddling a rim gets sliced straight through by the cutter
-# prism, like any other terrain detail. "keep": per cut, only the TERRAIN
+# there is nothing to separate. "slice": per cut, nearby piece copies are
+# intersected with the cutter prism, then appended as loose slicer-friendly
+# shells — a piece straddling a rim is cut flush without ever feeding the
+# full scattered landscape to one fragile Boolean union. "keep": per cut,
+# only the TERRAIN
 # shell is intersected
 # with the cutter prism (seat-and-trim proceeds exactly as if scatter never
 # happened); separately, every piece whose CENTROID (XY, precomputed once
@@ -647,39 +648,108 @@ def point_in_polygon(pt, poly):
     return inside
 
 
-def fuse_pieces_into_terrain(terrain_obj, piece_objs):
-    """scatter_rim="slice": weld every scattered piece into the terrain
-    ONCE, before any cut runs, removing the piece/terrain shell boundary
-    before cut_one ever sees it — a piece straddling a rim then gets
-    sliced straight through by the cutter prism, exactly like any other
-    terrain detail. This runs job-wide (not per cut), since "slice" doesn't
-    distinguish between cuts: a fused piece is just terrain, for every
-    placement in this job.
+def object_xy_bounds(obj):
+    """World-space XY AABB, cheap enough to prefilter scatter pieces before
+    Slice performs an exact prism intersection."""
+    corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    return (
+        min(v.x for v in corners),
+        max(v.x for v in corners),
+        min(v.y for v in corners),
+        max(v.y for v in corners),
+    )
 
-    The pieces are first JOINED into a single mesh (plain data
-    concatenation, no solver) and then unioned into the terrain in ONE
-    EXACT-solver pass. The obvious alternative — a union per piece in a loop
-    — is quadratic: every union rebuilds the BVH over the whole GROWING
-    terrain, so a dense carpet (hundreds of leaves/twigs) turns into
-    hundreds of ever-costlier solver calls and the cut appears to hang at
-    0%. One join + one union is a single BVH build over the full piece set
-    and yields the same welded solid (EXACT handles the joined mesh's own
-    piece-piece overlaps in the same pass). Mutates `terrain_obj` in place
-    and consumes (deletes) every piece object; the caller's `piece_objs`
-    list is empty of anything usable afterward."""
-    if not piece_objs:
-        return
+
+def slice_pieces_at_prism(pieces, prism, placed):
+    """Return per-cut copies of scatter pieces clipped by the cutter prism.
+
+    Slice used to Boolean-union every loose piece into the full landscape
+    before any cut. Dense scatter can make Blender's exact solver silently
+    preserve or fragment that whole landscape, after which a nominal 25 mm
+    cut exports the entire source plate. Instead, the clean terrain is cut
+    on its own and only pieces whose AABB overlaps this footprint are
+    intersected individually. They remain loose, slicer-friendly shells,
+    exactly like Keep mode's whole pieces."""
+    if not pieces:
+        return [], 0
+    cut_min_x = min(p.x for p in placed)
+    cut_max_x = max(p.x for p in placed)
+    cut_min_y = min(p.y for p in placed)
+    cut_max_y = max(p.y for p in placed)
+    clipped = []
+    skipped = 0
+    for j, (piece_obj, _centroid) in enumerate(pieces):
+        min_x, max_x, min_y, max_y = object_xy_bounds(piece_obj)
+        if (
+            max_x < cut_min_x
+            or min_x > cut_max_x
+            or max_y < cut_min_y
+            or min_y > cut_max_y
+        ):
+            continue
+        piece_copy = piece_obj.copy()
+        piece_copy.data = piece_obj.data.copy()
+        piece_copy.name = f"sliced_piece_{j}"
+        bpy.context.collection.objects.link(piece_copy)
+        apply_boolean(piece_copy, prism, "INTERSECT")
+        if len(piece_copy.data.vertices) == 0:
+            delete_object(piece_copy)
+        else:
+            manifold, _dims, _shells = cleanup_and_check(piece_copy)
+            try:
+                assert_cut_within_footprint(piece_copy, placed)
+            except RuntimeError:
+                manifold = False
+            if manifold:
+                clipped.append(piece_copy)
+            else:
+                skipped += 1
+                delete_object(piece_copy)
+    return clipped, skipped
+
+
+def assert_cut_within_footprint(plug, placed, tolerance_mm=0.1):
+    """Detect Blender's silent INTERSECT no-op before it can be exported."""
+    min_x, max_x, min_y, max_y = object_xy_bounds(plug)
+    cut_min_x = min(p.x for p in placed) - tolerance_mm
+    cut_max_x = max(p.x for p in placed) + tolerance_mm
+    cut_min_y = min(p.y for p in placed) - tolerance_mm
+    cut_max_y = max(p.y for p in placed) + tolerance_mm
+    if (
+        min_x < cut_min_x
+        or max_x > cut_max_x
+        or min_y < cut_min_y
+        or max_y > cut_max_y
+    ):
+        raise RuntimeError(
+            "cutter intersection failed — output exceeds the requested footprint"
+        )
+
+
+def incorporate_piece_objects(target, copies, rehome, seat_shift, trim=None):
+    """Transform already-copied piece objects and join them as loose shells."""
+    kept = []
+    for piece_copy in copies:
+        piece_copy.data.transform(rehome)
+        piece_copy.data.transform(Matrix.Translation((0.0, 0.0, seat_shift)))
+        if trim is not None:
+            apply_boolean(piece_copy, trim, "DIFFERENCE")
+        if len(piece_copy.data.vertices) == 0:
+            delete_object(piece_copy)
+        else:
+            kept.append(piece_copy)
+    if not kept:
+        return 0
     bpy.ops.object.select_all(action="DESELECT")
-    for piece_obj in piece_objs:
-        piece_obj.select_set(True)
-    bpy.context.view_layer.objects.active = piece_objs[0]
-    bpy.ops.object.join()  # all pieces collapse into piece_objs[0], no solver
-    merged = piece_objs[0]
-    apply_boolean(terrain_obj, merged, "UNION")
-    delete_object(merged)
+    target.select_set(True)
+    for piece_copy in kept:
+        piece_copy.select_set(True)
+    bpy.context.view_layer.objects.active = target
+    bpy.ops.object.join()  # loose shells concatenated into target, no solver
+    return len(kept)
 
 
-def incorporate_pieces(target, claimed, rehome, seat_shift):
+def incorporate_pieces(target, claimed, rehome, seat_shift, trim=None):
     """Add each CLAIMED scatter piece (scatter_rim="keep", see cut_one) to
     `target` as a LOOSE closed shell — a plain data JOIN, never a boolean
     union. Each piece first gets the exact same rigid transform the plug
@@ -711,22 +781,15 @@ def incorporate_pieces(target, claimed, rehome, seat_shift):
     at its original position, for the next placement's own claim test and
     its own independent copy."""
     if not claimed:
-        return
+        return 0
     copies = []
     for j, (piece_obj, _centroid) in enumerate(claimed):
         piece_copy = piece_obj.copy()
         piece_copy.data = piece_obj.data.copy()
         piece_copy.name = f"{target.name}_piece_{j}"
         bpy.context.collection.objects.link(piece_copy)
-        piece_copy.data.transform(rehome)
-        piece_copy.data.transform(Matrix.Translation((0.0, 0.0, seat_shift)))
         copies.append(piece_copy)
-    bpy.ops.object.select_all(action="DESELECT")
-    target.select_set(True)
-    for piece_copy in copies:
-        piece_copy.select_set(True)
-    bpy.context.view_layer.objects.active = target
-    bpy.ops.object.join()  # loose shells concatenated into target, no solver
+    return incorporate_piece_objects(target, copies, rehome, seat_shift, trim)
 
 
 # ------------------------------------------------------------------ the cut
@@ -778,6 +841,7 @@ def cut_one(
     index,
     topper_mm=None,
     pieces=None,
+    slice_at_rim=False,
     shell_diagnostics=None,
     glb=False,
     base_hex=None,
@@ -806,11 +870,10 @@ def cut_one(
     onto the hard plastic base in topper mode) — see the module docstring's
     "topper_mm" note.
 
-    `pieces` is scatter_rim="keep"'s claim pool: `None` (scatter_rim="slice",
-    or a landscape with no scatter shells at all — see main()) means there
-    is nothing to claim, and this function then does exactly the
-    seat+trim+plinth-union flow with nothing else touching plug/base.
-    Otherwise a list of `(piece_obj, centroid_xy)` — see
+    `pieces` is the scatter pool. Keep claims whole pieces by centroid;
+    `slice_at_rim=True` clips nearby pieces against this cut's prism before
+    they are appended as loose shells. It is a list of
+    `(piece_obj, centroid_xy)` — see
     separate_into_shells/piece_centroid_xy — precomputed ONCE per job, not
     per placement. `landscape_obj` here is ALWAYS the already-verified
     terrain shell (main() reassigns its `landscape` variable to
@@ -851,6 +914,11 @@ def cut_one(
     plug.name = f"plug_{index}"
     bpy.context.collection.objects.link(plug)
     apply_boolean(plug, prism, "INTERSECT")
+    sliced, slice_skipped = (
+        slice_pieces_at_prism(pieces, prism, placed)
+        if slice_at_rim
+        else ([], 0)
+    )
     delete_object(prism)
     if len(plug.data.vertices) == 0:
         reason = "cut is empty — placement outside the landscape?"
@@ -863,6 +931,7 @@ def cut_one(
                 f"mis-selection, not a coordinate problem)"
             )
         raise RuntimeError(reason)
+    assert_cut_within_footprint(plug, placed)
 
     # Re-home the plug: placement point to origin, rotation undone, so the
     # exported base is axis-aligned like any standalone model.
@@ -880,9 +949,15 @@ def cut_one(
     # only the inside/outside test is per placement, since it depends on
     # this placement's own footprint. A piece can be claimed by more than
     # one placement — see incorporate_pieces' docstring.
-    claimed = [(obj, centroid) for obj, centroid in pieces if point_in_polygon(centroid, placed)]
+    claimed = (
+        []
+        if slice_at_rim
+        else [(obj, centroid) for obj, centroid in pieces if point_in_polygon(centroid, placed)]
+    )
 
     extra = {}
+    if slice_skipped:
+        extra["scatter_skipped"] = slice_skipped
     if topper_mm is not None:
         # Topper mode: sink so the lowest sculpted point sits topper_mm
         # above a flat bottom at z=0, then trim everything below that plane.
@@ -890,28 +965,34 @@ def cut_one(
         # flow there's no plinth union afterwards, so no WELD_OVERLAP is
         # needed. Total height falls out of this for free: max_z -
         # (seat - topper_mm) = topper_mm + (max_z - seat) = topper_mm +
-        # relief. Claimed pieces are unioned in WHOLE here, BEFORE the flat
-        # trim (docs/BASECUTTER.md: "Topper mode composes: keep/slice apply
-        # the same way, then the flat trim") — the trim is the one rule
-        # that defines this mode's entire bottom face, so it must run LAST,
-        # after every solid (terrain plug + any claimed pieces) that could
-        # possibly dip below it is already part of the assembly. A piece
-        # that pokes below the trim plane gets trimmed exactly like terrain
-        # would — consistent, not a special case.
+        # relief. The terrain body and each claimed/clipped scatter piece
+        # are trimmed independently before the loose shells are joined, so
+        # a dense scatter set never enters one destructive Boolean.
         seat_shift = topper_mm - seat
         plug.data.transform(Matrix.Translation((0.0, 0.0, seat_shift)))
-        incorporate_pieces(plug, claimed, rehome, seat_shift)
-        if claimed:
-            extra["scatter_pieces"] = len(claimed)
         trim = big_box("trim", -1000.0, 0.0)
         apply_boolean(plug, trim, "DIFFERENCE")
-        delete_object(trim)
         base = plug
         if placement.get("magnet"):
             # There's no plinth to pocket a magnet into — surface that
             # instead of silently dropping the placement's magnet spec.
             extra["magnet_ignored"] = True
         manifold, dims, shells = cleanup_and_check(base)
+        if not manifold or shells != 1:
+            delete_object(trim)
+            for piece in sliced:
+                delete_object(piece)
+            raise RuntimeError(
+                f"cut body is invalid after trimming ({shells} shells, manifold={manifold})"
+            )
+        piece_count = (
+            incorporate_piece_objects(base, sliced, rehome, seat_shift, trim)
+            if slice_at_rim
+            else incorporate_pieces(base, claimed, rehome, seat_shift, trim)
+        )
+        delete_object(trim)
+        if piece_count:
+            extra["scatter_pieces"] = piece_count
     else:
         # Seat: lowest sculpted point onto the plinth top, trim what's
         # beneath (WELD_OVERLAP deep into the top plate, so union gets a
@@ -948,18 +1029,25 @@ def cut_one(
         # remove_doubles weld overlapping leaves into non-manifold junctions
         # (it runs here, on the body alone, not over the loose pieces).
         manifold, dims, shells = cleanup_and_check(base)
-        if shells > 1:
-            extra["fused"] = False
-            extra["shells"] = shells
+        if not manifold or shells != 1:
+            for piece in sliced:
+                delete_object(piece)
+            raise RuntimeError(
+                f"plug did not fuse cleanly to the plinth ({shells} shells, manifold={manifold})"
+            )
 
         # Claimed pieces join in as LOOSE shells AFTER the body is fused and
         # checked (see incorporate_pieces for why loose, not unioned). They
         # overhang the rim like scenic basing and the slicer welds them at
         # print time. `dims` is re-measured over the whole assembly so the
         # reported footprint includes an overhanging piece.
-        if claimed:
-            incorporate_pieces(base, claimed, rehome, seat_shift)
-            extra["scatter_pieces"] = len(claimed)
+        piece_count = (
+            incorporate_piece_objects(base, sliced, rehome, seat_shift)
+            if slice_at_rim
+            else incorporate_pieces(base, claimed, rehome, seat_shift)
+        )
+        if piece_count:
+            extra["scatter_pieces"] = piece_count
             verts = base.data.vertices
             dims = [
                 round(max(v.co[i] for v in verts) - min(v.co[i] for v in verts), 3)
@@ -1517,19 +1605,11 @@ def main():
         bbox_dims(landscape.data.vertices),
     )
 
-    pieces_for_cut = None
-    if scatter_rim == "slice":
-        # Fuse every piece into the terrain ONCE, job-wide, before any cut
-        # runs (see fuse_pieces_into_terrain's docstring). After this,
-        # `landscape` is a single-shell mesh and cut_one needs no
-        # awareness of scatter at all: pieces_for_cut stays None.
-        fuse_pieces_into_terrain(landscape, piece_objs)
-    elif piece_objs:
-        # scatter_rim="keep": precompute every piece's centroid ONCE
-        # (docs/BASECUTTER.md — "compute each piece's centroid + bbox
-        # once"); the per-placement inside/outside test happens inside
-        # cut_one, since it depends on that placement's own cut footprint.
-        pieces_for_cut = [(obj, piece_centroid_xy(obj)) for obj in piece_objs]
+    # Precompute every piece's centroid once. Keep uses it to claim whole
+    # pieces; Slice uses the same pool but clips only AABB-nearby pieces per
+    # cut. Crucially, neither mode Boolean-unions dense scatter into the
+    # full landscape before cutting.
+    pieces_for_cut = [(obj, piece_centroid_xy(obj)) for obj in piece_objs]
 
     done = 0
     for i, placement in enumerate(job["placements"]):
@@ -1543,6 +1623,7 @@ def main():
                 i,
                 topper_mm,
                 pieces_for_cut,
+                scatter_rim == "slice",
                 shell_diagnostics,
                 glb=glb,
                 base_hex=base_hex,

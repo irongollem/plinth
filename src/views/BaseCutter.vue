@@ -3925,6 +3925,12 @@ watch(baseCut.finishedSummary, (summary) => {
                     class="text-[10px] text-base-content/40"
                     >clamped to {{ r.topper_mm_clamped }} mm</span
                   >
+                  <span
+                    v-if="r.scatter_skipped"
+                    class="badge badge-xs badge-warning"
+                    :title="`${r.scatter_skipped} scatter shell${r.scatter_skipped === 1 ? '' : 's'} could not be sliced into a closed solid and were omitted`"
+                    >{{ r.scatter_skipped }} scatter skipped</span
+                  >
                   <button
                     type="button"
                     class="btn btn-ghost btn-xs h-6 min-h-0 px-2"

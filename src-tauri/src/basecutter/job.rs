@@ -38,9 +38,9 @@ pub fn materialize_base_cut_script(app_handle: &AppHandle) -> Result<PathBuf, Ap
 /// shell is intersected with the cutter prism; separately, every piece
 /// whose centroid lies inside that placement's derived cut footprint is
 /// unioned in WHOLE and may overhang the rim like real hand-made scenic
-/// basing. `Slice`: every piece is fused into the terrain once, job-wide,
-/// before any cut runs — a piece straddling a rim then gets sliced
-/// straight through by the cutter prism, like any other terrain detail.
+/// basing. `Slice`: nearby piece copies are clipped per cut and appended as
+/// loose slicer-friendly shells — a piece straddling a rim is sliced flush
+/// without Boolean-unioning the full scattered landscape first.
 /// A landscape with nothing scattered onto it (a plain generated bake, a
 /// designer sculpt) is a single shell, so both variants behave
 /// identically on it — see base_cut.py's `separate_into_shells`.
@@ -128,6 +128,9 @@ pub enum BaseCutToken {
         /// `Some(true)` = this placement carried a magnet spec that topper
         /// mode ignored (nothing to pocket without a plinth).
         magnet_ignored: Option<bool>,
+        /// Scatter shells omitted because Blender could not clip them into
+        /// a closed, rim-bounded solid in Slice mode.
+        scatter_skipped: Option<u32>,
         /// The cut's GLB twin path (glb mode only — see base_cut.py's "glb
         /// mode" section) — `None` in the default (non-glb) mode.
         glb: Option<String>,
@@ -165,6 +168,8 @@ pub fn parse_token(line: &str) -> Option<BaseCutToken> {
         topper_mm_clamped: Option<f64>,
         #[serde(default)]
         magnet_ignored: Option<bool>,
+        #[serde(default)]
+        scatter_skipped: Option<u32>,
         #[serde(default)]
         glb: Option<String>,
     }
@@ -206,6 +211,7 @@ pub fn parse_token(line: &str) -> Option<BaseCutToken> {
             shells: p.shells,
             topper_mm_clamped: p.topper_mm_clamped,
             magnet_ignored: p.magnet_ignored,
+            scatter_skipped: p.scatter_skipped,
             glb: p.glb,
         });
     }
@@ -732,16 +738,17 @@ mod tests {
                 shells: None,
                 topper_mm_clamped: None,
                 magnet_ignored: None,
+                scatter_skipped: None,
                 glb: None,
             })
         );
         // The additive fields (fused/shells/topper_mm_clamped/
-        // magnet_ignored) all parse when present, independent of one
+        // magnet_ignored/scatter_skipped) all parse when present, independent of one
         // another — a topper-mode cut with an ignored magnet, and a
         // normal-mode cut whose union didn't fully fuse.
         assert_eq!(
             parse_token(
-                r#"CUT_DONE {"index": 1, "out": "/dir/topper.stl", "dims_mm": [32.0, 32.0, 3.0], "manifold": true, "topper_mm_clamped": 3.0, "magnet_ignored": true}"#
+                r#"CUT_DONE {"index": 1, "out": "/dir/topper.stl", "dims_mm": [32.0, 32.0, 3.0], "manifold": true, "topper_mm_clamped": 3.0, "magnet_ignored": true, "scatter_skipped": 4}"#
             ),
             Some(BaseCutToken::CutDone {
                 index: 1,
@@ -752,6 +759,7 @@ mod tests {
                 shells: None,
                 topper_mm_clamped: Some(3.0),
                 magnet_ignored: Some(true),
+                scatter_skipped: Some(4),
                 glb: None,
             })
         );
@@ -768,6 +776,7 @@ mod tests {
                 shells: Some(2),
                 topper_mm_clamped: None,
                 magnet_ignored: None,
+                scatter_skipped: None,
                 glb: None,
             })
         );
@@ -786,6 +795,7 @@ mod tests {
                 shells: None,
                 topper_mm_clamped: None,
                 magnet_ignored: None,
+                scatter_skipped: None,
                 glb: Some("/dir/round32.glb".to_string()),
             })
         );

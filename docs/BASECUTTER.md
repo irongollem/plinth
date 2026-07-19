@@ -329,10 +329,13 @@ BaseCutJob = { landscape_path, placements: Vec<Placement>,
                // (a loose shell in the landscape — see docs/SCATTER.md)
                // that straddles a cutter's rim. "keep" (the default):
                // pieces whose CENTER falls inside the cut footprint are
-               // unioned in WHOLE and may overhang the rim like hand-made
+               // kept WHOLE as loose manifold shells and may overhang the rim like hand-made
                // scenic basing; center outside = left behind. "slice":
-               // all shells are fused first and the cutter slices straight
-               // through — the old look. serde(default) = keep. On a
+               // nearby shell copies are clipped per cut, then appended as
+               // loose shells; the full scattered landscape is never fed
+               // through one fragile Boolean. Shells Blender cannot clip
+               // into a closed, rim-bounded solid are omitted and reported.
+               // serde(default) = keep. On a
                // single-shell landscape both modes are identical.
                topper_mm: Option<f64>,   // Some(t) = BASE TOPPER mode: no
                // plinth at all — the plug is flat-trimmed t mm below its
