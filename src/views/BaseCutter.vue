@@ -9,6 +9,7 @@
 import {
   type ComponentPublicInstance,
   computed,
+  defineAsyncComponent,
   nextTick,
   onMounted,
   reactive,
@@ -41,6 +42,7 @@ import type {
 } from "../bindings";
 import { commands } from "../bindings";
 import LandscapeViewport from "../components/LandscapeViewport.vue";
+import ModalView from "../components/ModalView.vue";
 import NumberInput from "../components/NumberInput.vue";
 import ProgressBar from "../components/ProgressBar.vue";
 import Switch from "../components/Switch.vue";
@@ -84,6 +86,11 @@ const { selectFiles } = useFileSelect();
 const baseCut = useBaseCut();
 const landscapeGen = useLandscapeGen();
 const debrisScatter = useScatter();
+// Loading the result viewer pulls in three.js, so keep it out of the Base
+// Cutter's initial chunk until somebody actually asks to inspect a cut.
+const StlViewport = defineAsyncComponent(
+  () => import("../components/StlViewport.vue"),
+);
 // The cut path hard-requires Blender >= 4.2 (wm.stl_import/export), same as
 // Render.vue's gate — reuse that composable/verdict rather than inventing a
 // second Blender-detection mechanism.
@@ -1795,6 +1802,7 @@ const jobArtifactSnapshots = ref<CutArtifactSnapshot[]>([]);
 
 const startCut = async () => {
   if (!canCut.value) return;
+  closeResultPreview();
   jobPlacementNames.value = placements.value.map((p) => p.name);
   const mode: CutCatalogMode = topperMode.value ? "topper" : "base";
   jobArtifactSnapshots.value = placements.value.map((placement) => ({
@@ -1957,6 +1965,18 @@ const resultDisplayName = (r: BaseCutResult) => {
     return base.replace(/\.stl$/i, "");
   }
   return resultName(r.index);
+};
+
+const previewResult = ref<BaseCutResult | null>(null);
+const previewParts = computed(() =>
+  previewResult.value?.out_path ? [previewResult.value.out_path] : [],
+);
+const openResultPreview = (result: BaseCutResult) => {
+  if (!result.ok || !result.out_path) return;
+  previewResult.value = result;
+};
+const closeResultPreview = () => {
+  previewResult.value = null;
 };
 
 /* ---- export into the catalog (docs/BASECUTTER.md phase 5) ----
@@ -3905,6 +3925,14 @@ watch(baseCut.finishedSummary, (summary) => {
                     class="text-[10px] text-base-content/40"
                     >clamped to {{ r.topper_mm_clamped }} mm</span
                   >
+                  <button
+                    type="button"
+                    class="btn btn-ghost btn-xs h-6 min-h-0 px-2"
+                    title="Inspect this cut in 3D"
+                    @click="openResultPreview(r)"
+                  >
+                    Preview 3D
+                  </button>
                 </template>
               </li>
             </ul>
@@ -3987,6 +4015,48 @@ watch(baseCut.finishedSummary, (summary) => {
         @undo="undo"
       />
     </aside>
+
+    <ModalView :is-open="previewResult != null" @close="closeResultPreview">
+      <section
+        v-if="previewResult"
+        class="w-[min(78vw,70rem)] h-[min(78vh,52rem)] min-w-80 min-h-96 bg-base-200 rounded-box shadow-2xl overflow-hidden flex flex-col"
+      >
+        <header
+          class="flex items-center gap-3 px-4 py-3 border-b border-base-content/10"
+        >
+          <div class="min-w-0 flex-1">
+            <p
+              class="font-mono text-[10px] tracking-widest text-base-content/40"
+            >
+              CUT PREVIEW
+            </p>
+            <h2 class="font-semibold truncate" :title="previewResult.out_path">
+              {{ resultDisplayName(previewResult) }}
+            </h2>
+          </div>
+          <span
+            v-if="!previewResult.manifold"
+            class="badge badge-warning badge-sm"
+            >Non-manifold</span
+          >
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm btn-square"
+            aria-label="Close 3D preview"
+            @click="closeResultPreview"
+          >
+            ✕
+          </button>
+        </header>
+        <div class="min-h-0 flex-1 bg-black">
+          <StlViewport
+            v-if="previewParts.length"
+            :parts="previewParts"
+            @error="toastStore.addToast(`Preview failed: ${$event}`, 'error')"
+          />
+        </div>
+      </section>
+    </ModalView>
 
     <!-- Milk-glass: without a usable Blender the cut path can't run at all
          (wm.stl_import/export need >= 4.2), so the whole tab frosts over
