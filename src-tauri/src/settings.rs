@@ -349,7 +349,6 @@ pub async fn set_settings(app_handle: AppHandle, settings: Settings) -> Result<(
         "scatter_library_dir",
         settings.scatter_library_dir.as_deref().map(|v| json!(v)),
     );
-
     store.save().map_err(|e| e.to_string())?;
 
     // Update the cache only after the store persisted, so memory and disk

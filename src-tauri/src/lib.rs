@@ -1,5 +1,6 @@
 mod basecutter;
 mod catalog;
+mod content_filter;
 mod error;
 mod file;
 mod image;
@@ -26,12 +27,17 @@ use catalog::commands::{
     get_catalog_releases, get_catalog_stats,
     get_catalog_tags, get_duplicate_groups, get_file_variants, get_group_rename_origins,
     get_pack_candidates, get_render_candidates, list_catalog_roots, list_ignored_folders,
-    merge_duplicate_files, pack_models, plan_normalize, remove_catalog_root, remove_catalog_tag,
-    remove_group_tag,
-    rename_catalog_group, search_catalog, search_catalog_groups, set_group_cover,
-    set_model_preview, set_model_rotation, set_primary_catalog_root, start_catalog_scan,
-    start_duplicate_scan, summarize_model_dirs, supports_file_links, unignore_folder,
-    unpack_models, update_model_metadata,
+    list_nsfw_designers, merge_duplicate_files, pack_models, plan_normalize, remove_catalog_root,
+    remove_catalog_tag, remove_group_tag,
+    rename_catalog_designer, rename_catalog_group, rename_catalog_release, search_catalog,
+    search_catalog_groups, set_designer_nsfw,
+    set_group_cover, set_group_nsfw, set_model_preview, set_model_rotation,
+    set_primary_catalog_root, start_catalog_scan, start_duplicate_scan, summarize_model_dirs,
+    supports_file_links, unignore_folder, unpack_models, update_model_metadata,
+};
+use content_filter::{
+    change_nsfw_pin, configure_nsfw_pin, get_nsfw_access_state, lock_nsfw,
+    recover_nsfw_pin, remove_nsfw_pin, unlock_nsfw,
 };
 use file::commands::{
     add_models, cancel_compression, create_release, finalize_release, import_release,
@@ -90,6 +96,13 @@ fn create_specta_builder() -> Builder {
             load_release_draft,
             settings::get_settings,
             settings::set_settings,
+            get_nsfw_access_state,
+            unlock_nsfw,
+            lock_nsfw,
+            configure_nsfw_pin,
+            change_nsfw_pin,
+            recover_nsfw_pin,
+            remove_nsfw_pin,
             detect_blender,
             check_blender,
             download_blender,
@@ -119,6 +132,8 @@ fn create_specta_builder() -> Builder {
             get_duplicate_groups,
             get_catalog_releases,
             get_catalog_designers,
+            rename_catalog_designer,
+            rename_catalog_release,
             update_model_metadata,
             set_model_preview,
             delete_duplicate_files,
@@ -126,6 +141,9 @@ fn create_specta_builder() -> Builder {
             summarize_model_dirs,
             list_ignored_folders,
             unignore_folder,
+            set_group_nsfw,
+            list_nsfw_designers,
+            set_designer_nsfw,
             merge_duplicate_files,
             supports_file_links,
             batch_move_models,

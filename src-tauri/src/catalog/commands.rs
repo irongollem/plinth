@@ -950,7 +950,8 @@ pub async fn search_catalog(
 ) -> Result<CatalogSearchResult, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
-        let page = db::search(&conn, &query, &tags, limit.min(200), offset)?;
+        let include_nsfw = crate::content_filter::is_unlocked();
+        let page = db::search(&conn, &query, &tags, limit.min(200), offset, include_nsfw)?;
         Ok(CatalogSearchResult {
             entries: page.entries,
             total: page.total,
@@ -960,6 +961,7 @@ pub async fn search_catalog(
     .map_err(|e| AppError::ConfigError(format!("Search task failed: {}", e)))?
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 #[specta::specta]
 pub async fn search_catalog_groups(
@@ -973,6 +975,7 @@ pub async fn search_catalog_groups(
 ) -> Result<CatalogGroupResult, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
+        let include_nsfw = crate::content_filter::is_unlocked();
         let page = db::search_groups(
             &conn,
             &query,
@@ -981,6 +984,7 @@ pub async fn search_catalog_groups(
             sort.as_deref().unwrap_or("name"),
             limit.min(200),
             offset,
+            include_nsfw,
         )?;
         Ok(CatalogGroupResult {
             groups: page.groups,
@@ -999,7 +1003,8 @@ pub async fn get_catalog_group_members(
 ) -> Result<Vec<CatalogEntry>, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
-        db::group_members(&conn, &group_name)
+        let include_nsfw = crate::content_filter::is_unlocked();
+        db::group_members(&conn, &group_name, include_nsfw)
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Group member task failed: {}", e)))?
@@ -1127,7 +1132,10 @@ pub async fn combine_catalog_groups(
 pub async fn get_catalog_tags(app_handle: AppHandle) -> Result<Vec<TagCount>, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
-        Ok(db::list_tags(&conn)?
+        Ok(db::list_tags_for_browse(
+            &conn,
+            crate::content_filter::is_unlocked(),
+        )?
             .into_iter()
             .map(|(tag, count)| TagCount { tag, count })
             .collect())
@@ -1195,6 +1203,9 @@ pub async fn get_catalog_stats(app_handle: AppHandle) -> Result<CatalogStats, Ap
 #[tauri::command]
 #[specta::specta]
 pub async fn get_duplicate_groups(app_handle: AppHandle) -> Result<Vec<DuplicateGroup>, AppError> {
+    if !crate::content_filter::is_unlocked() {
+        return Ok(Vec::new());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
         db::duplicate_groups(&conn)
@@ -1208,7 +1219,7 @@ pub async fn get_duplicate_groups(app_handle: AppHandle) -> Result<Vec<Duplicate
 pub async fn get_catalog_releases(app_handle: AppHandle) -> Result<Vec<ReleaseSummary>, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
-        db::list_releases(&conn)
+        db::list_releases_for_browse(&conn, crate::content_filter::is_unlocked())
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Release listing task failed: {}", e)))?
@@ -1221,10 +1232,56 @@ pub async fn get_catalog_designers(
 ) -> Result<Vec<DesignerCount>, AppError> {
     tauri::async_runtime::spawn_blocking(move || {
         let conn = open_db(&app_handle)?;
-        db::designers(&conn)
+        db::designers_for_browse(&conn, crate::content_filter::is_unlocked())
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Designer listing task failed: {}", e)))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn rename_catalog_designer(
+    app_handle: AppHandle,
+    old_name: String,
+    new_name: String,
+) -> Result<u32, AppError> {
+    let old_name = old_name.trim().to_string();
+    let new_name = new_name.trim().to_string();
+    if old_name.is_empty() || new_name.is_empty() {
+        return Err(AppError::InvalidInput(
+            "Designer names cannot be empty".into(),
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = open_db(&app_handle)?;
+        db::rename_designer(&mut conn, &old_name, &new_name)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Designer rename task failed: {e}")))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn rename_catalog_release(
+    app_handle: AppHandle,
+    designer: String,
+    old_name: String,
+    new_name: String,
+) -> Result<u32, AppError> {
+    let designer = designer.trim().to_string();
+    let old_name = old_name.trim().to_string();
+    let new_name = new_name.trim().to_string();
+    if designer.is_empty() || old_name.is_empty() || new_name.is_empty() {
+        return Err(AppError::InvalidInput(
+            "Designer and release names cannot be empty".into(),
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = open_db(&app_handle)?;
+        db::rename_release(&mut conn, &designer, &old_name, &new_name)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Release rename task failed: {e}")))?
 }
 
 /// Update one member's metadata, then propagate the shared facets (variant,
@@ -1555,7 +1612,9 @@ pub async fn get_render_candidates(
         let group_names = db::render_scope_groups(&conn, designer.as_deref(), &groups)?;
         let mut candidates = Vec::new();
         for group_name in group_names {
-            for member in db::group_members(&conn, &group_name)? {
+            // Data op, not a browse surface: pack/render scope must never
+            // silently skip a hidden model.
+            for member in db::group_members(&conn, &group_name, true)? {
                 let files =
                     db::model_files(&conn, &member.dir_path, member.variant_key.as_deref())?;
                 let parts: Vec<String> = files
@@ -1929,6 +1988,77 @@ pub async fn unignore_folder(app_handle: AppHandle, dir_path: String) -> Result<
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Ignore-list task failed: {}", e)))?
+}
+
+/// Flag or unflag every model behind one or more card names — the drawer's
+/// "mark 18+" button and the batch bar's equivalent both land here. Resolves
+/// through group_members with include_nsfw=true so an ALREADY-hidden member
+/// still gets updated (unmarking a mixed group must reach every variant, not
+/// just the ones currently visible).
+#[tauri::command]
+#[specta::specta]
+pub async fn set_group_nsfw(
+    app_handle: AppHandle,
+    group_names: Vec<String>,
+    nsfw: bool,
+) -> Result<(), AppError> {
+    if !nsfw && !crate::content_filter::is_unlocked() {
+        return Err(AppError::InvalidInput(
+            "Unlock mature content before removing an 18+ mark".into(),
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        let mut dirs: HashSet<String> = HashSet::new();
+        for group_name in &group_names {
+            for member in db::group_members(&conn, group_name, true)? {
+                dirs.insert(member.dir_path);
+            }
+        }
+        db::set_models_nsfw(
+            &conn,
+            &dirs.into_iter().collect::<Vec<_>>(),
+            Some(nsfw),
+        )
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("18+ flag task failed: {}", e)))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn list_nsfw_designers(app_handle: AppHandle) -> Result<Vec<String>, AppError> {
+    if !crate::content_filter::is_unlocked() {
+        return Err(AppError::InvalidInput(
+            "Unlock mature content to manage its designer list".into(),
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::list_nsfw_designers(&conn)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("18+ designer task failed: {}", e)))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_designer_nsfw(
+    app_handle: AppHandle,
+    designer: String,
+    nsfw: bool,
+) -> Result<(), AppError> {
+    if !nsfw && !crate::content_filter::is_unlocked() {
+        return Err(AppError::InvalidInput(
+            "Unlock mature content before removing a designer rule".into(),
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_db(&app_handle)?;
+        db::set_designer_nsfw(&conn, &designer, nsfw)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("18+ designer task failed: {}", e)))?
 }
 
 /// Merge a duplicate group: every path in `duplicate_paths` becomes another

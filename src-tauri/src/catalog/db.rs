@@ -197,6 +197,16 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
             dir_path   TEXT PRIMARY KEY,
             ignored_at INTEGER NOT NULL
         );
+
+        -- Designers whose entire output counts as 18+ unless a model
+        -- explicitly opts out (model_user_meta.nsfw = 0 overrides this in
+        -- the effective-flag COALESCE chain — see NSFW_EFFECTIVE_SQL).
+        -- COLLATE NOCASE so a designer typed with different casing than the
+        -- release metadata still matches, same as every other designer
+        -- comparison in this file.
+        CREATE TABLE IF NOT EXISTS nsfw_designers (
+            designer TEXT PRIMARY KEY COLLATE NOCASE
+        );
         "#,
     )
     .map_err(|e| AppError::ConfigError(format!("Failed to init catalog schema: {}", e)))?;
@@ -271,6 +281,31 @@ fn init_schema(conn: &Connection) -> Result<(), AppError> {
     // Set when the file's bytes live inside a pack archive; the row's path
     // is where the file would land when extracted.
     add_text_columns("files", &["archive_path"])?;
+    // The 18+ override: NULL = unset (falls through to the designer rule),
+    // 1 = flagged, 0 = explicit "not 18+" beating a designer-wide rule. Not
+    // add_text_columns (TEXT-only by design — see its doc comment above):
+    // TEXT affinity would store '1' as the *string* "1", and the
+    // effective-flag SQL's `nsfw = 1` comparison would then silently never
+    // match. Same idempotent shape-check, just a different ALTER type.
+    if !conn
+        .prepare("PRAGMA table_info(model_user_meta)")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .and_then(|rows| rows.collect::<Result<Vec<String>, _>>())
+        })
+        .map_err(|e| AppError::ConfigError(format!("Failed to inspect model_user_meta: {}", e)))?
+        .iter()
+        .any(|c| c == "nsfw")
+    {
+        if let Err(e) = conn.execute("ALTER TABLE model_user_meta ADD COLUMN nsfw INTEGER", []) {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(AppError::ConfigError(format!(
+                    "Failed to migrate model_user_meta (add nsfw): {}",
+                    e
+                )));
+            }
+        }
+    }
     // Outside the base batch: on a pre-existing db the column only exists
     // after the migration above, and indexing a missing column is an error
     // even under IF NOT EXISTS.
@@ -817,10 +852,14 @@ pub struct SearchPage {
 }
 
 /// FTS + tag filters shared by the flat and grouped searches; both operate
-/// on `models m` so the clauses are interchangeable.
+/// on `models m` so the clauses are interchangeable. `include_nsfw = false`
+/// adds the browse-surface filter (see NSFW_EFFECTIVE_SQL) — callers that
+/// need every row regardless of the flag (data ops: pack, render, move,
+/// delete) pass true.
 fn build_search_filter(
     query: &str,
     tags: &[String],
+    include_nsfw: bool,
 ) -> (String, Vec<Box<dyn rusqlite::types::ToSql>>) {
     let mut where_clauses: Vec<String> = Vec::new();
     let mut bound: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -844,6 +883,9 @@ fn build_search_filter(
                 .to_string(),
         );
         bound.push(Box::new(tag.clone()));
+    }
+    if !include_nsfw {
+        where_clauses.push(format!("{} = 0", NSFW_EFFECTIVE_SQL));
     }
     let where_sql = if where_clauses.is_empty() {
         String::new()
@@ -877,11 +919,13 @@ fn entry_select_sql(where_sql: &str, tail_sql: &str) -> String {
                 NULLIF(COALESCE(u.base_square, m.base_square), ''),
                 {packed},
                 NULLIF(COALESCE(u.rotation, m.rotation), ''),
-                m.dims_mm, m.part_count
+                m.dims_mm, m.part_count,
+                {nsfw}
          FROM models m LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path {} {}",
         where_sql,
         tail_sql,
         packed = MODEL_PACKED_SQL,
+        nsfw = NSFW_EFFECTIVE_SQL,
     )
 }
 
@@ -891,6 +935,18 @@ const MODEL_PACKED_SQL: &str = "(EXISTS (SELECT 1 FROM files f WHERE f.dir_path 
         AND f.archive_path IS NOT NULL)
     AND NOT EXISTS (SELECT 1 FROM files f WHERE f.dir_path = m.dir_path
         AND f.archive_path IS NULL))";
+
+/// Whether a model row counts as 18+ right now (0 or 1): an explicit
+/// per-model flag beats a whole-designer rule (nsfw_designers), which beats
+/// "nobody said so" (0, the COALESCE fallback). Some(false) on the model —
+/// stored by set_models_nsfw as an explicit 0, not NULL — is what lets one
+/// model opt OUT of an otherwise-flagged designer, since it's read before
+/// the designer subquery ever runs. Valid wherever `m` is a models row LEFT
+/// JOINed to `u` (model_user_meta) — every browse query already carries
+/// that join for the other user overrides. nsfw_designers' PK is COLLATE
+/// NOCASE, so the designer match is already case-insensitive.
+const NSFW_EFFECTIVE_SQL: &str = "COALESCE(u.nsfw, \
+    (SELECT 1 FROM nsfw_designers nd WHERE nd.designer = COALESCE(u.designer, m.designer)), 0)";
 
 fn map_entry_row(row: &rusqlite::Row) -> rusqlite::Result<CatalogEntry> {
     let tags_joined: String = row.get(8)?;
@@ -922,6 +978,7 @@ fn map_entry_row(row: &rusqlite::Row) -> rusqlite::Result<CatalogEntry> {
         rotation: row.get(20)?,
         dims_mm: row.get(21)?,
         part_count: row.get(22)?,
+        nsfw: row.get(23)?,
         // Whole-folder member; expand_file_variants stamps a key on any
         // synthetic pose members it derives from this row.
         variant_key: None,
@@ -1089,15 +1146,23 @@ pub fn search(
     tags: &[String],
     limit: u32,
     offset: u32,
+    include_nsfw: bool,
 ) -> Result<SearchPage, AppError> {
     let map_err =
         |e: rusqlite::Error| AppError::ConfigError(format!("Catalog search failed: {}", e));
-    let (where_sql, bound) = build_search_filter(query, tags);
+    let (where_sql, bound) = build_search_filter(query, tags, include_nsfw);
     let params_ref: Vec<&dyn rusqlite::types::ToSql> = bound.iter().map(|b| b.as_ref()).collect();
 
+    // LEFT JOIN model_user_meta u: the nsfw filter (like the tag/FTS ones)
+    // may reference `u` — entry_select_sql below always carries this same
+    // join, so the count and the page agree on what "total" counts.
     let total: u32 = conn
         .query_row(
-            &format!("SELECT COUNT(*) FROM models m {}", where_sql),
+            &format!(
+                "SELECT COUNT(*) FROM models m \
+                 LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path {}",
+                where_sql
+            ),
             params_ref.as_slice(),
             |row| row.get(0),
         )
@@ -1129,6 +1194,7 @@ pub struct GroupPage {
 /// unsupported builds, poses A/B/C) collapse into a single group with
 /// aggregate counts. Rows scanned before v4 have no group_name and fall
 /// back to their own name — a group of one, i.e. the old behavior.
+#[allow(clippy::too_many_arguments)]
 pub fn search_groups(
     conn: &Connection,
     query: &str,
@@ -1137,10 +1203,11 @@ pub fn search_groups(
     sort: &str,
     limit: u32,
     offset: u32,
+    include_nsfw: bool,
 ) -> Result<GroupPage, AppError> {
     let map_err =
         |e: rusqlite::Error| AppError::ConfigError(format!("Catalog group search failed: {}", e));
-    let (mut where_sql, mut bound) = build_search_filter(query, tags);
+    let (mut where_sql, mut bound) = build_search_filter(query, tags, include_nsfw);
     // The designer facet narrows to one designer exactly (the dropdown
     // offers only names that exist), unlike the fuzzy FTS query
     if let Some(name) = designer.map(str::trim).filter(|d| !d.is_empty()) {
@@ -1217,7 +1284,8 @@ pub fn search_groups(
                 SUM(m.file_count),
                 SUM(m.total_size_bytes),
                 MAX(COALESCE(u.preview_path, m.preview_path)),
-                MIN({packed})
+                MIN({packed}),
+                MAX({nsfw})
          FROM models m
          LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
          LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name) {}
@@ -1229,6 +1297,7 @@ pub fn search_groups(
         limit,
         offset,
         packed = MODEL_PACKED_SQL,
+        nsfw = NSFW_EFFECTIVE_SQL,
     );
     let mut stmt = conn.prepare(&sql).map_err(map_err)?;
     let mut groups = stmt
@@ -1248,6 +1317,11 @@ pub fn search_groups(
                 total_size_bytes: row.get::<_, i64>(8)? as f64,
                 preview_path: row.get(9)?,
                 packed: row.get::<_, i64>(10)? != 0,
+                // Any member effectively flagged makes the whole card 18+ —
+                // matches the filter's row-level scope: a mixed group hidden
+                // by one flagged variant should still read as flagged, not
+                // as clean-with-a-gap.
+                nsfw: row.get::<_, i64>(11)? != 0,
             })
         })
         .map_err(map_err)?
@@ -1266,13 +1340,31 @@ pub fn search_groups(
 
 /// All variants of one logical model, ordered for the drawer: support
 /// status first (alphabetical puts supported before unsupported, unknowns
-/// last), then pose.
-pub fn group_members(conn: &Connection, group_name: &str) -> Result<Vec<CatalogEntry>, AppError> {
+/// last), then pose. `include_nsfw = false` drops any member individually
+/// flagged 18+ (see NSFW_EFFECTIVE_SQL) — data ops (pack/render/move/delete
+/// scope resolution) must pass true so a hidden member is never silently
+/// skipped by an action the user actually asked for.
+pub fn group_members(
+    conn: &Connection,
+    group_name: &str,
+    include_nsfw: bool,
+) -> Result<Vec<CatalogEntry>, AppError> {
     let map_err =
         |e: rusqlite::Error| AppError::ConfigError(format!("Group member query failed: {}", e));
-    let sql = entry_select_sql(
+    let where_sql = if include_nsfw {
         "LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)
-         WHERE lower(COALESCE(r.display_name, m.group_name, m.name)) = lower(?)",
+         WHERE lower(COALESCE(r.display_name, m.group_name, m.name)) = lower(?)"
+            .to_string()
+    } else {
+        format!(
+            "LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)
+             WHERE lower(COALESCE(r.display_name, m.group_name, m.name)) = lower(?)
+               AND {} = 0",
+            NSFW_EFFECTIVE_SQL
+        )
+    };
+    let sql = entry_select_sql(
+        &where_sql,
         "ORDER BY NULLIF(COALESCE(u.support_status, m.support_status), '') IS NULL,
                   NULLIF(COALESCE(u.support_status, m.support_status), ''),
                   NULLIF(COALESCE(u.pose, m.pose), '') IS NULL,
@@ -1508,6 +1600,33 @@ pub fn list_tags(conn: &Connection) -> Result<Vec<(String, u32)>, AppError> {
         .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
         .map_err(|e| AppError::ConfigError(format!("Tag listing failed: {}", e)))?;
     Ok(rows)
+}
+
+/// Tag facets for the browse UI. When mature content is locked, counts and
+/// even tag names are derived only from visible models so a tag such as an
+/// adult theme cannot leak through an otherwise empty search screen.
+pub fn list_tags_for_browse(
+    conn: &Connection,
+    include_nsfw: bool,
+) -> Result<Vec<(String, u32)>, AppError> {
+    if include_nsfw {
+        return list_tags(conn);
+    }
+    let sql = format!(
+        "SELECT mt.tag, COUNT(*)
+         FROM model_tags mt
+         JOIN models m ON m.dir_path = mt.dir_path
+         LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
+         WHERE {NSFW_EFFECTIVE_SQL} = 0
+         GROUP BY mt.tag
+         ORDER BY COUNT(*) DESC, mt.tag COLLATE NOCASE"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| AppError::ConfigError(format!("Tag listing failed: {e}")))?;
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(|e| AppError::ConfigError(format!("Tag listing failed: {e}")))
 }
 
 /// The dir_paths shown under one card — the same display-name resolution as
@@ -2206,6 +2325,39 @@ pub fn list_releases(conn: &Connection) -> Result<Vec<ReleaseSummary>, AppError>
     Ok(releases)
 }
 
+pub fn list_releases_for_browse(
+    conn: &Connection,
+    include_nsfw: bool,
+) -> Result<Vec<ReleaseSummary>, AppError> {
+    if include_nsfw {
+        return list_releases(conn);
+    }
+    let sql = format!(
+        "SELECT m.release_name,
+                MIN(COALESCE(u.designer, m.designer)),
+                COUNT(*), COALESCE(SUM(m.total_size_bytes), 0)
+         FROM models m
+         LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
+         WHERE m.release_name IS NOT NULL AND m.release_name != ''
+           AND {NSFW_EFFECTIVE_SQL} = 0
+         GROUP BY m.release_name
+         ORDER BY COUNT(*) DESC"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| AppError::ConfigError(format!("Release listing failed: {e}")))?;
+    stmt.query_map([], |row| {
+        Ok(ReleaseSummary {
+            release_name: row.get(0)?,
+            designer: row.get(1)?,
+            model_count: row.get(2)?,
+            total_size_bytes: row.get::<_, i64>(3)? as f64,
+        })
+    })
+    .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+    .map_err(|e| AppError::ConfigError(format!("Release listing failed: {e}")))
+}
+
 /// Every designer in the catalog with their logical-model (group) count,
 /// A–Z — the option list for the catalog's designer filter. Counts groups,
 /// not folder entries, so the numbers match the cards the filter yields.
@@ -2235,6 +2387,105 @@ pub fn designers(conn: &Connection) -> Result<Vec<DesignerCount>, AppError> {
         .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
         .map_err(map_err)?;
     Ok(designers)
+}
+
+pub fn designers_for_browse(
+    conn: &Connection,
+    include_nsfw: bool,
+) -> Result<Vec<DesignerCount>, AppError> {
+    if include_nsfw {
+        return designers(conn);
+    }
+    let sql = format!(
+        "SELECT COALESCE(u.designer, m.designer) AS d,
+                COUNT(DISTINCT lower(COALESCE(r.display_name, m.group_name, m.name)))
+         FROM models m
+         LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
+         LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)
+         WHERE COALESCE(u.designer, m.designer) IS NOT NULL
+           AND COALESCE(u.designer, m.designer) != ''
+           AND {NSFW_EFFECTIVE_SQL} = 0
+         GROUP BY lower(d)
+         ORDER BY d COLLATE NOCASE"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| AppError::ConfigError(format!("Designer listing failed: {e}")))?;
+    stmt.query_map([], |row| {
+        Ok(DesignerCount {
+            designer: row.get(0)?,
+            model_count: row.get(1)?,
+        })
+    })
+    .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+    .map_err(|e| AppError::ConfigError(format!("Designer listing failed: {e}")))
+}
+
+/// Rename an effective designer across the entire catalog. The values live
+/// as user overrides so a rescan cannot resurrect the old scanner spelling.
+/// A designer-wide mature-content rule follows the rename as well.
+pub fn rename_designer(
+    conn: &mut Connection,
+    old_name: &str,
+    new_name: &str,
+) -> Result<u32, AppError> {
+    let map_err = |e: rusqlite::Error| {
+        AppError::ConfigError(format!("Designer rename failed: {e}"))
+    };
+    let tx = conn.transaction().map_err(map_err)?;
+    let changed = tx
+        .execute(
+            "INSERT INTO model_user_meta (dir_path, designer)
+             SELECT m.dir_path, ?2
+             FROM models m
+             LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
+             WHERE lower(COALESCE(u.designer, m.designer, '')) = lower(?1)
+             ON CONFLICT(dir_path) DO UPDATE SET designer = excluded.designer",
+            params![old_name, new_name],
+        )
+        .map_err(map_err)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO nsfw_designers (designer)
+         SELECT ?2 FROM nsfw_designers WHERE lower(designer) = lower(?1)",
+        params![old_name, new_name],
+    )
+    .map_err(map_err)?;
+    tx.execute(
+        "DELETE FROM nsfw_designers WHERE lower(designer) = lower(?1)",
+        [old_name],
+    )
+    .map_err(map_err)?;
+    rebuild_fts(&tx).map_err(map_err)?;
+    tx.commit().map_err(map_err)?;
+    Ok(changed as u32)
+}
+
+/// Rename one release/collection within a designer. Release labels are not
+/// globally unique, so the designer scope prevents an identically named
+/// collection from another studio being changed with it.
+pub fn rename_release(
+    conn: &mut Connection,
+    designer: &str,
+    old_name: &str,
+    new_name: &str,
+) -> Result<u32, AppError> {
+    let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Release rename failed: {e}"));
+    let tx = conn.transaction().map_err(map_err)?;
+    let changed = tx
+        .execute(
+        "INSERT INTO model_user_meta (dir_path, release_name)
+         SELECT m.dir_path, ?3
+         FROM models m
+         LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
+         WHERE lower(COALESCE(u.designer, m.designer, '')) = lower(?1)
+           AND lower(COALESCE(u.release_name, m.release_name, '')) = lower(?2)
+         ON CONFLICT(dir_path) DO UPDATE SET release_name = excluded.release_name",
+        params![designer, old_name, new_name],
+    )
+        .map_err(map_err)?;
+    rebuild_fts(&tx).map_err(map_err)?;
+    tx.commit().map_err(map_err)?;
+    Ok(changed as u32)
 }
 
 fn require_model(conn: &Connection, dir_path: &str) -> Result<(), AppError> {
@@ -2758,6 +3009,71 @@ pub fn list_scan_ignores(conn: &Connection) -> Result<Vec<(String, i64)>, AppErr
     Ok(rows)
 }
 
+/// Upsert model_user_meta.nsfw for a set of dirs — same ON CONFLICT DO
+/// UPDATE-one-column pattern as set_model_preview/set_rotation, so the
+/// other user-meta fields on each row are untouched. `None` writes NULL
+/// (unset, falls through to the designer rule); `Some(false)` writes an
+/// explicit 0, which is what lets one model opt OUT of an otherwise-flagged
+/// designer (see NSFW_EFFECTIVE_SQL — u.nsfw is read before the designer
+/// subquery even runs).
+pub fn set_models_nsfw(
+    conn: &Connection,
+    dirs: &[String],
+    nsfw: Option<bool>,
+) -> Result<(), AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Failed to set 18+ flag: {}", e));
+    let value = nsfw.map(|b| b as i64);
+    let mut stmt = conn
+        .prepare(
+            "INSERT INTO model_user_meta (dir_path, nsfw) VALUES (?1, ?2)
+             ON CONFLICT(dir_path) DO UPDATE SET nsfw = excluded.nsfw",
+        )
+        .map_err(map_err)?;
+    for dir in dirs {
+        stmt.execute(params![dir, value]).map_err(map_err)?;
+    }
+    Ok(())
+}
+
+/// The designer-wide 18+ list, A–Z — the Settings chip list.
+pub fn list_nsfw_designers(conn: &Connection) -> Result<Vec<String>, AppError> {
+    let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Catalog read failed: {}", e));
+    let mut stmt = conn
+        .prepare("SELECT designer FROM nsfw_designers ORDER BY designer COLLATE NOCASE")
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(map_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
+/// Add or remove a designer from the 18+ list. OR IGNORE/plain DELETE (like
+/// add_scan_ignores/remove_scan_ignores_under) rather than an error on a
+/// no-op — re-adding an already-listed designer or removing an absent one
+/// is just the UI's toggle landing on the state it already wants.
+pub fn set_designer_nsfw(conn: &Connection, designer: &str, nsfw: bool) -> Result<(), AppError> {
+    let map_err = |e: rusqlite::Error| {
+        AppError::ConfigError(format!("Failed to update designer 18+ rule: {}", e))
+    };
+    if nsfw {
+        conn.execute(
+            "INSERT OR IGNORE INTO nsfw_designers (designer) VALUES (?1)",
+            params![designer],
+        )
+        .map_err(map_err)?;
+    } else {
+        conn.execute(
+            "DELETE FROM nsfw_designers WHERE designer = ?1",
+            params![designer],
+        )
+        .map_err(map_err)?;
+    }
+    Ok(())
+}
+
 /// Every distinct root the index knows about. Disk-side deletion uses these
 /// as hard ceilings: folder consolidation may climb toward a root but never
 /// reach it, so "delete the last model in a catalog" can never trash the
@@ -3119,25 +3435,25 @@ mod tests {
         replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
 
         // prefix match on name
-        let page = search(&conn, "new", &[], 10, 0).unwrap();
+        let page = search(&conn, "new", &[], 10, 0, true).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.entries[0].name, "Giant Newt");
         assert_eq!(page.entries[0].tags, vec!["amphibian"]);
 
         // tag search through FTS
-        let page = search(&conn, "amphib", &[], 10, 0).unwrap();
+        let page = search(&conn, "amphib", &[], 10, 0, true).unwrap();
         assert_eq!(page.total, 1);
 
         // empty query lists everything
-        let page = search(&conn, "", &[], 10, 0).unwrap();
+        let page = search(&conn, "", &[], 10, 0, true).unwrap();
         assert_eq!(page.total, 2);
 
         // tag filter
-        let page = search(&conn, "", &["amphibian".to_string()], 10, 0).unwrap();
+        let page = search(&conn, "", &["amphibian".to_string()], 10, 0, true).unwrap();
         assert_eq!(page.total, 1);
 
         // no match
-        let page = search(&conn, "dragon", &[], 10, 0).unwrap();
+        let page = search(&conn, "dragon", &[], 10, 0, true).unwrap();
         assert_eq!(page.total, 0);
     }
 
@@ -3195,8 +3511,8 @@ mod tests {
         assert_eq!(count("SELECT COUNT(*) FROM group_covers"), 0);
         assert_eq!(count("SELECT COUNT(*) FROM packs"), 0);
         // FTS forgot the deleted model but still finds the survivor
-        assert_eq!(search(&conn, "newt", &[], 10, 0).unwrap().total, 0);
-        assert_eq!(search(&conn, "bugbear", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(search(&conn, "newt", &[], 10, 0, true).unwrap().total, 0);
+        assert_eq!(search(&conn, "bugbear", &[], 10, 0, true).unwrap().total, 1);
 
         let (file_count, bytes) = dirs_summary(&conn, &["/lib/bugbear".to_string()]).unwrap();
         assert_eq!((file_count, bytes), (1, 4096));
@@ -3211,13 +3527,13 @@ mod tests {
         // Soft remove the newt: rows go, marker stays
         add_scan_ignores(&conn, &["/lib/newt".to_string()]).unwrap();
         remove_models(&mut conn, &["/lib/newt".to_string()]).unwrap();
-        assert_eq!(search(&conn, "", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(search(&conn, "", &[], 10, 0, true).unwrap().total, 1);
 
         // The rescan walks the SAME disk state (newt still exists on disk) —
         // the whole point: it must not resurrect what the user removed
         replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
-        assert_eq!(search(&conn, "newt", &[], 10, 0).unwrap().total, 0);
-        assert_eq!(search(&conn, "bugbear", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(search(&conn, "newt", &[], 10, 0, true).unwrap().total, 0);
+        assert_eq!(search(&conn, "bugbear", &[], 10, 0, true).unwrap().total, 1);
         let file_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
             .unwrap();
@@ -3226,7 +3542,83 @@ mod tests {
         // Unignore + rescan brings it back
         remove_scan_ignores_under(&conn, &["/lib/newt".to_string()]).unwrap();
         replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
-        assert_eq!(search(&conn, "newt", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(search(&conn, "newt", &[], 10, 0, true).unwrap().total, 1);
+    }
+
+    #[test]
+    fn nsfw_flag_and_designer_rule_hide_from_browse_but_not_data_ops() {
+        let mut conn = test_conn();
+        let (mut files, mut models, tags) = sample_rows();
+        // A third model sharing Giant Newt's designer (DTL) but carrying no
+        // per-model override of its own — the designer-rule half of the test.
+        files.push(file_row("/lib/owlbear/Owlbear.stl", "/lib/owlbear", 512));
+        models.push(ModelRow {
+            dir_path: "/lib/owlbear".into(),
+            name: "Owlbear".into(),
+            designer: Some("DTL".into()),
+            source: "heuristic".into(),
+            file_count: 1,
+            total_size_bytes: 512,
+            group_name: Some("Owlbear".into()),
+            ..Default::default()
+        });
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+
+        // Explicit per-model flag: Giant Newt is 18+, nobody else is yet
+        set_models_nsfw(&conn, &["/lib/newt".to_string()], Some(true)).unwrap();
+
+        let hidden = search_groups(&conn, "", &[], None, "name", 10, 0, false).unwrap();
+        assert_eq!(hidden.total, 2, "newt hidden; bugbear and owlbear still show");
+        assert!(!hidden.groups.iter().any(|g| g.group_name == "Giant Newt"));
+
+        let shown = search_groups(&conn, "", &[], None, "name", 10, 0, true).unwrap();
+        assert_eq!(shown.total, 3);
+        let newt_group = shown.groups.iter().find(|g| g.group_name == "Giant Newt").unwrap();
+        assert!(newt_group.nsfw, "any effectively-flagged member marks the card");
+
+        assert!(group_members(&conn, "Giant Newt", false).unwrap().is_empty());
+        let newt_members = group_members(&conn, "Giant Newt", true).unwrap();
+        assert_eq!(newt_members.len(), 1);
+        assert!(newt_members[0].nsfw);
+
+        // Designer-wide rule: every DTL model becomes 18+ unless it opts out
+        set_designer_nsfw(&conn, "DTL", true).unwrap();
+        assert_eq!(list_nsfw_designers(&conn).unwrap(), vec!["DTL".to_string()]);
+
+        let hidden = search_groups(&conn, "", &[], None, "name", 10, 0, false).unwrap();
+        assert_eq!(hidden.total, 1, "owlbear now hidden too, via the designer rule");
+        assert!(group_members(&conn, "Owlbear", false).unwrap().is_empty());
+        assert!(group_members(&conn, "Owlbear", true).unwrap()[0].nsfw);
+        assert!(list_tags_for_browse(&conn, false).unwrap().is_empty());
+        assert_eq!(
+            list_tags_for_browse(&conn, true).unwrap(),
+            vec![("amphibian".to_string(), 1)]
+        );
+        assert!(designers_for_browse(&conn, false).unwrap().is_empty());
+        assert_eq!(designers_for_browse(&conn, true).unwrap()[0].designer, "DTL");
+        assert!(list_releases_for_browse(&conn, false).unwrap().is_empty());
+        assert_eq!(
+            list_releases_for_browse(&conn, true).unwrap()[0].release_name,
+            "Critterfolk"
+        );
+
+        // Explicit "not 18+" on Owlbear overrides the designer-wide rule —
+        // it's read first in the COALESCE chain (NSFW_EFFECTIVE_SQL)
+        set_models_nsfw(&conn, &["/lib/owlbear".to_string()], Some(false)).unwrap();
+        let hidden = search_groups(&conn, "", &[], None, "name", 10, 0, false).unwrap();
+        assert_eq!(hidden.total, 2, "owlbear opted out is visible again; newt stays hidden");
+        let owlbear_members = group_members(&conn, "Owlbear", false).unwrap();
+        assert_eq!(owlbear_members.len(), 1);
+        assert!(!owlbear_members[0].nsfw);
+        assert!(
+            group_members(&conn, "Giant Newt", false).unwrap().is_empty(),
+            "newt's own explicit flag is untouched by owlbear's override"
+        );
+
+        // Removing the designer rule doesn't resurrect it — list_nsfw_designers
+        // is the source of truth for the chip list Settings shows
+        set_designer_nsfw(&conn, "DTL", false).unwrap();
+        assert!(list_nsfw_designers(&conn).unwrap().is_empty());
     }
 
     #[test]
@@ -3237,14 +3629,14 @@ mod tests {
 
         add_tag(&conn, "/lib/newt", "painted").unwrap();
         // searchable immediately
-        assert_eq!(search(&conn, "painted", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(search(&conn, "painted", &[], 10, 0, true).unwrap().total, 1);
 
         // rescan with metadata tags gone: user tag survives, metadata tag drops
         replace_catalog(&mut conn, "/lib", &files, &models, &[], &[], &[]).unwrap();
-        let page = search(&conn, "", &["painted".to_string()], 10, 0).unwrap();
+        let page = search(&conn, "", &["painted".to_string()], 10, 0, true).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(
-            search(&conn, "", &["amphibian".to_string()], 10, 0)
+            search(&conn, "", &["amphibian".to_string()], 10, 0, true)
                 .unwrap()
                 .total,
             0
@@ -3312,14 +3704,14 @@ mod tests {
         replace_catalog(&mut conn, "/other", &other_files, &other_models, &[], &[], &[]).unwrap();
 
         // both roots coexist in one index
-        assert_eq!(search(&conn, "", &[], 10, 0).unwrap().total, 3);
-        assert_eq!(search(&conn, "wyvern", &[], 10, 0).unwrap().total, 1);
-        assert_eq!(search(&conn, "newt", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(search(&conn, "", &[], 10, 0, true).unwrap().total, 3);
+        assert_eq!(search(&conn, "wyvern", &[], 10, 0, true).unwrap().total, 1);
+        assert_eq!(search(&conn, "newt", &[], 10, 0, true).unwrap().total, 1);
 
         // a root whose scan comes back empty disappears — its sibling doesn't
         replace_catalog(&mut conn, "/other", &[], &[], &[], &[], &[]).unwrap();
-        assert_eq!(search(&conn, "wyvern", &[], 10, 0).unwrap().total, 0);
-        assert_eq!(search(&conn, "newt", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(search(&conn, "wyvern", &[], 10, 0, true).unwrap().total, 0);
+        assert_eq!(search(&conn, "newt", &[], 10, 0, true).unwrap().total, 1);
     }
 
     #[test]
@@ -3347,7 +3739,7 @@ mod tests {
         // metadata tag and the user tag both ride out the sibling scan
         replace_catalog(&mut conn, "/lib", &files, &models, &[], &[], &[]).unwrap();
         let by_tag = |tag: &str| {
-            search(&conn, "", &[tag.to_string()], 10, 0)
+            search(&conn, "", &[tag.to_string()], 10, 0, true)
                 .map(|page| page.total)
                 .unwrap()
         };
@@ -3382,8 +3774,8 @@ mod tests {
             .collect();
         replace_catalog(&mut conn, "/lib", &bug_files, &bug_models, &[], &[], &[]).unwrap();
 
-        assert_eq!(search(&conn, "newt", &[], 10, 0).unwrap().total, 0);
-        assert_eq!(search(&conn, "ghoul", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(search(&conn, "newt", &[], 10, 0, true).unwrap().total, 0);
+        assert_eq!(search(&conn, "ghoul", &[], 10, 0, true).unwrap().total, 1);
         let ghoul_root: Option<String> = conn
             .query_row(
                 "SELECT root FROM models WHERE dir_path = '/library/ghoul'",
@@ -3413,8 +3805,8 @@ mod tests {
             .cloned()
             .collect();
         replace_catalog(&mut conn, "/lib/", &bug_files, &bug_models, &[], &[], &[]).unwrap();
-        assert_eq!(search(&conn, "", &[], 10, 0).unwrap().total, 1);
-        assert_eq!(search(&conn, "newt", &[], 10, 0).unwrap().total, 0);
+        assert_eq!(search(&conn, "", &[], 10, 0, true).unwrap().total, 1);
+        assert_eq!(search(&conn, "newt", &[], 10, 0, true).unwrap().total, 0);
     }
 
     #[test]
@@ -3430,8 +3822,8 @@ mod tests {
 
         purge_root(&mut conn, "/lib").unwrap();
 
-        assert_eq!(search(&conn, "newt", &[], 10, 0).unwrap().total, 0);
-        assert_eq!(search(&conn, "wyvern", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(search(&conn, "newt", &[], 10, 0, true).unwrap().total, 0);
+        assert_eq!(search(&conn, "wyvern", &[], 10, 0, true).unwrap().total, 1);
         let orphaned_tags: u32 = conn
             .query_row(
                 "SELECT COUNT(*) FROM model_tags WHERE dir_path = '/lib/newt'",
@@ -3492,7 +3884,7 @@ mod tests {
             .collect();
         replace_catalog(&mut conn, "/lib", &bugbear_only, &bugbear_model, &[], &[], &[]).unwrap();
         assert_eq!(
-            search(&conn, "newt", &[], 10, 0).unwrap().total,
+            search(&conn, "newt", &[], 10, 0, true).unwrap().total,
             1,
             "staged model must survive a rescan of the folder it moved OUT of"
         );
@@ -3617,7 +4009,7 @@ mod tests {
         move_model(&mut conn, "/lib/newt", "/lib/amphibians/newt").unwrap();
 
         // model, files and search index all follow the new path
-        let page = search(&conn, "newt", &[], 10, 0).unwrap();
+        let page = search(&conn, "newt", &[], 10, 0, true).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.entries[0].dir_path, "/lib/amphibians/newt");
         assert!(page.entries[0].tags.contains(&"painted".to_string()));
@@ -3638,7 +4030,7 @@ mod tests {
         models[0].dir_path = "/lib/amphibians/newt".into();
         replace_catalog(&mut conn, "/lib", &files, &models, &[], &[], &[]).unwrap();
         assert_eq!(
-            search(&conn, "", &["painted".to_string()], 10, 0)
+            search(&conn, "", &["painted".to_string()], 10, 0, true)
                 .unwrap()
                 .total,
             1
@@ -3778,7 +4170,7 @@ mod tests {
         replace_catalog(&mut conn, "/lib", &files, &models, &[], &[], &[]).unwrap();
 
         // before any split: one whole-folder member, all files, no key
-        let members = group_members(&conn, "mob").unwrap();
+        let members = group_members(&conn, "mob", true).unwrap();
         assert_eq!(members.len(), 1);
         assert!(members[0].variant_key.is_none());
         assert_eq!(model_files(&conn, "/dump/mob", None).unwrap().len(), 3);
@@ -3802,7 +4194,7 @@ mod tests {
         )
         .unwrap();
 
-        let members = group_members(&conn, "mob").unwrap();
+        let members = group_members(&conn, "mob", true).unwrap();
         // two facet members + one residual
         assert_eq!(members.len(), 3);
         let swordy = members
@@ -3843,7 +4235,7 @@ mod tests {
 
         // clearing every assignment collapses back to the whole-folder member
         clear_file_variants(&conn, &["/dump/mob/a.stl".into(), "/dump/mob/b.stl".into()]).unwrap();
-        assert_eq!(group_members(&conn, "mob").unwrap().len(), 1);
+        assert_eq!(group_members(&conn, "mob", true).unwrap().len(), 1);
     }
 
     #[test]
@@ -3882,7 +4274,7 @@ mod tests {
         .unwrap();
 
         // before: the card carries variants and poses
-        let before = group_members(&conn, "goblin").unwrap();
+        let before = group_members(&conn, "goblin", true).unwrap();
         assert!(before.iter().any(|m| m.variant.is_some()));
         assert!(before.iter().any(|m| m.pose.is_some()));
 
@@ -3892,7 +4284,7 @@ mod tests {
         // after: every member reads back with no variant and no pose, and the
         // clear is the '' tombstone so a rescan can't resurrect the guess
         replace_catalog(&mut conn, "/lib", &files, &models, &[], &[], &[]).unwrap();
-        let after = group_members(&conn, "goblin").unwrap();
+        let after = group_members(&conn, "goblin", true).unwrap();
         assert!(after.iter().all(|m| m.variant.is_none()));
         assert!(after.iter().all(|m| m.pose.is_none()));
         assert!(get_file_variants(&conn, "/lib/goblin/spear-a")
@@ -4050,7 +4442,7 @@ mod tests {
         )
         .unwrap();
 
-        let members = group_members(&conn, "Dark Wardens").unwrap();
+        let members = group_members(&conn, "Dark Wardens", true).unwrap();
         assert_eq!(members.len(), 2);
         for member in &members {
             assert_eq!(
@@ -4129,7 +4521,7 @@ mod tests {
         set_preview(&conn, "/dump/mob", Some(&key_a), "/previews/a.png").unwrap();
         set_preview(&conn, "/dump/mob", Some(&key_b), "/previews/b.png").unwrap();
 
-        let members = group_members(&conn, "mob").unwrap();
+        let members = group_members(&conn, "mob", true).unwrap();
         let preview_of = |members: &[CatalogEntry], pose: &str| {
             members
                 .iter()
@@ -4150,7 +4542,7 @@ mod tests {
 
         // re-rendering A updates only A
         set_preview(&conn, "/dump/mob", Some(&key_a), "/previews/a2.png").unwrap();
-        let members = group_members(&conn, "mob").unwrap();
+        let members = group_members(&conn, "mob", true).unwrap();
         assert_eq!(
             preview_of(&members, "A").as_deref(),
             Some("/previews/a2.png")
@@ -4170,7 +4562,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let members = group_members(&conn, "mob").unwrap();
+        let members = group_members(&conn, "mob", true).unwrap();
         assert_eq!(
             preview_of(&members, "A").as_deref(),
             Some("/previews/a2.png")
@@ -4203,7 +4595,7 @@ mod tests {
 
         // the whole point of model_user_meta: a full rescan keeps user edits
         replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
-        let page = search(&conn, "repose", &[], 10, 0).unwrap();
+        let page = search(&conn, "repose", &[], 10, 0, true).unwrap();
         assert_eq!(page.total, 1, "custom name is searchable after rescan");
         let entry = &page.entries[0];
         assert_eq!(entry.name, "Newt, Giant (repose)");
@@ -4216,20 +4608,20 @@ mod tests {
         assert_eq!(entry.release_name.as_deref(), Some("Order of the Unicorn"));
         assert_eq!(entry.variant.as_deref(), Some("mounted"));
         assert_eq!(
-            search(&conn, "mounted", &[], 10, 0).unwrap().total,
+            search(&conn, "mounted", &[], 10, 0, true).unwrap().total,
             1,
             "variant is searchable"
         );
         // fuzzy/trigram search: possessive apostrophe is folded out, so the
         // designer matches when typed as "trappers"; and a mid-word chunk of
         // sculptor matches by substring — neither worked with prefix-only FTS
-        assert_eq!(search(&conn, "trappers", &[], 10, 0).unwrap().total, 1);
-        assert_eq!(search(&conn, "ulpto", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(search(&conn, "trappers", &[], 10, 0, true).unwrap().total, 1);
+        assert_eq!(search(&conn, "ulpto", &[], 10, 0, true).unwrap().total, 1);
         // the release name is searchable too
-        assert_eq!(search(&conn, "unicorn", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(search(&conn, "unicorn", &[], 10, 0, true).unwrap().total, 1);
         // a multi-field query still ANDs: designer word + the model name
         assert_eq!(
-            search(&conn, "trappers repose", &[], 10, 0).unwrap().total,
+            search(&conn, "trappers repose", &[], 10, 0, true).unwrap().total,
             1
         );
         assert_eq!(
@@ -4257,7 +4649,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let page = search(&conn, "newt", &[], 10, 0).unwrap();
+        let page = search(&conn, "newt", &[], 10, 0, true).unwrap();
         assert_eq!(page.entries[0].name, "Giant Newt");
         assert!(
             page.entries[0].designer.is_none(),
@@ -4292,7 +4684,7 @@ mod tests {
         replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
 
         // untouched, the scanner value shows through
-        let page = search(&conn, "newt", &[], 10, 0).unwrap();
+        let page = search(&conn, "newt", &[], 10, 0, true).unwrap();
         assert_eq!(page.entries[0].pose.as_deref(), Some("Attacking"));
 
         // the user blanks the pose (the full-form save sends None for
@@ -4313,7 +4705,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let page = search(&conn, "newt", &[], 10, 0).unwrap();
+        let page = search(&conn, "newt", &[], 10, 0, true).unwrap();
         assert!(
             page.entries[0].pose.is_none(),
             "cleared pose must not resurrect"
@@ -4322,7 +4714,7 @@ mod tests {
 
         // ...and the clear survives a rescan repopulating models.pose
         replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
-        let page = search(&conn, "newt", &[], 10, 0).unwrap();
+        let page = search(&conn, "newt", &[], 10, 0, true).unwrap();
         assert!(
             page.entries[0].pose.is_none(),
             "rescan must not resurrect the cleared pose"
@@ -4345,7 +4737,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let page = search(&conn, "newt", &[], 10, 0).unwrap();
+        let page = search(&conn, "newt", &[], 10, 0, true).unwrap();
         assert_eq!(page.entries[0].pose.as_deref(), Some("B"));
     }
 
@@ -4383,7 +4775,7 @@ mod tests {
         )
         .unwrap();
         rebuild_fts(&conn).unwrap();
-        assert_eq!(search(&conn, "new", &[], 10, 0).unwrap().total, 0);
+        assert_eq!(search(&conn, "new", &[], 10, 0, true).unwrap().total, 0);
 
         init_schema(&conn).unwrap();
 
@@ -4395,7 +4787,7 @@ mod tests {
             )
             .unwrap();
         assert!(sql.contains("trigram"));
-        assert_eq!(search(&conn, "new", &[], 10, 0).unwrap().total, 1);
+        assert_eq!(search(&conn, "new", &[], 10, 0, true).unwrap().total, 1);
     }
 
     #[test]
@@ -4412,7 +4804,7 @@ mod tests {
 
         let (files, models, tags) = sample_rows();
         replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
-        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0, true).unwrap();
         assert_eq!(page.total, 2, "grouped search works after self-heal");
     }
 
@@ -4450,7 +4842,7 @@ mod tests {
         ];
         replace_catalog(&mut conn, "/lib", &[], &models, &[], &[], &[]).unwrap();
 
-        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0, true).unwrap();
         assert_eq!(page.total, 1, "four variants, one card");
         let group = &page.groups[0];
         assert_eq!(group.group_name, "galeb duhr");
@@ -4462,7 +4854,7 @@ mod tests {
         assert_eq!(supports, vec!["supported", "unsupported"]);
 
         // FTS still finds the group through any variant's name
-        let page = search_groups(&conn, "galeb", &[], None, "name", 10, 0).unwrap();
+        let page = search_groups(&conn, "galeb", &[], None, "name", 10, 0, true).unwrap();
         assert_eq!(page.total, 1);
 
         // The displayed logical title is independently searchable. Variant
@@ -4471,20 +4863,20 @@ mod tests {
             .unwrap();
         rebuild_fts(&conn).unwrap();
         assert_eq!(
-            search_groups(&conn, "gal", &[], None, "name", 10, 0)
+            search_groups(&conn, "gal", &[], None, "name", 10, 0, true)
                 .unwrap()
                 .total,
             1
         );
         assert_eq!(
-            search_groups(&conn, "GALEB", &[], None, "name", 10, 0)
+            search_groups(&conn, "GALEB", &[], None, "name", 10, 0, true)
                 .unwrap()
                 .total,
             1
         );
 
         // members ordered: supported A, supported B, unsupported A, ...
-        let members = group_members(&conn, "GALEB DUHR").unwrap();
+        let members = group_members(&conn, "GALEB DUHR", true).unwrap();
         assert_eq!(members.len(), 4, "lookup is case-insensitive");
         let order: Vec<_> = members
             .iter()
@@ -4538,16 +4930,16 @@ mod tests {
         let names = |page: GroupPage| -> Vec<String> {
             page.groups.into_iter().map(|g| g.group_name).collect()
         };
-        let page = search_groups(&conn, "", &[], None, "designer", 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "designer", 10, 0, true).unwrap();
         assert_eq!(names(page), vec!["zeb", "bog hag", "ash golem", "stray"]);
 
         // date mode: newest release first WITHIN a designer; 2/2026 must beat
         // 12/2025 (string comparison would get this backwards)
-        let page = search_groups(&conn, "", &[], None, "designer_date", 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "designer_date", 10, 0, true).unwrap();
         assert_eq!(names(page), vec!["zeb", "ash golem", "bog hag", "stray"]);
 
         // the facet is exact but case-insensitive, and total honors it
-        let page = search_groups(&conn, "", &[], Some("bestiarum"), "name", 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], Some("bestiarum"), "name", 10, 0, true).unwrap();
         assert_eq!(page.total, 2);
         assert_eq!(names(page), vec!["ash golem", "bog hag"]);
 
@@ -4563,9 +4955,77 @@ mod tests {
         );
 
         // release fields ride on the group rows for the UI's section headers
-        let page = search_groups(&conn, "", &[], None, "designer", 10, 1).unwrap();
+        let page = search_groups(&conn, "", &[], None, "designer", 10, 1, true).unwrap();
         assert_eq!(page.groups[0].release_name.as_deref(), Some("Dread Swamp"));
         assert_eq!(page.groups[0].release_date.as_deref(), Some("12/2025"));
+    }
+
+    #[test]
+    fn facet_renames_update_all_matching_models_and_keep_release_scope() {
+        let mut conn = test_conn();
+        let (files, mut models, tags) = sample_rows();
+        let mut second_dtl = models[0].clone();
+        second_dtl.dir_path = "/lib/toad".into();
+        second_dtl.name = "Giant Toad".into();
+        second_dtl.group_name = Some("Giant Toad".into());
+        let mut other_studio = models[0].clone();
+        other_studio.dir_path = "/lib/other-newt".into();
+        other_studio.name = "Other Newt".into();
+        other_studio.group_name = Some("Other Newt".into());
+        other_studio.designer = Some("Other Studio".into());
+        models.extend([second_dtl, other_studio]);
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+
+        set_designer_nsfw(&conn, "DTL", true).unwrap();
+        assert_eq!(rename_designer(&mut conn, "dtl", "Dragon Trappers Lodge").unwrap(), 2);
+        assert_eq!(list_nsfw_designers(&conn).unwrap(), vec!["Dragon Trappers Lodge"]);
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0, true).unwrap();
+        assert_eq!(
+            page.groups
+                .iter()
+                .filter(|group| group.designer.as_deref() == Some("Dragon Trappers Lodge"))
+                .count(),
+            2
+        );
+
+        assert_eq!(
+            rename_release(
+                &mut conn,
+                "Dragon Trappers Lodge",
+                "Critterfolk",
+                "Critter Folk",
+            )
+            .unwrap(),
+            2
+        );
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0, true).unwrap();
+        for group in &page.groups {
+            if group.designer.as_deref() == Some("Dragon Trappers Lodge") {
+                assert_eq!(group.release_name.as_deref(), Some("Critter Folk"));
+            }
+        }
+        assert_eq!(
+            page.groups
+                .iter()
+                .find(|group| group.designer.as_deref() == Some("Other Studio"))
+                .and_then(|group| group.release_name.as_deref()),
+            Some("Critterfolk")
+        );
+        assert_eq!(
+            search_groups(
+                &conn,
+                "critter folk",
+                &[],
+                Some("Dragon Trappers Lodge"),
+                "name",
+                10,
+                0,
+                true,
+            )
+            .unwrap()
+            .total,
+            2
+        );
     }
 
     #[test]
@@ -4575,33 +5035,33 @@ mod tests {
         replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
 
         rename_group(&conn, "Giant Newt", "Stone Guardian").unwrap();
-        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0, true).unwrap();
         assert!(page.groups.iter().any(|g| g.group_name == "Stone Guardian"));
         assert!(!page.groups.iter().any(|g| g.group_name == "Giant Newt"));
 
         // findable by the new name, both in FTS and member lookup
         assert_eq!(
-            search_groups(&conn, "guardian", &[], None, "name", 10, 0).unwrap().total,
+            search_groups(&conn, "guardian", &[], None, "name", 10, 0, true).unwrap().total,
             1
         );
-        assert_eq!(group_members(&conn, "stone guardian").unwrap().len(), 1);
+        assert_eq!(group_members(&conn, "stone guardian", true).unwrap().len(), 1);
 
         // a rescan keeps the rename (keyed on the scanner's group name)
         replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
         assert_eq!(
-            search_groups(&conn, "guardian", &[], None, "name", 10, 0).unwrap().total,
+            search_groups(&conn, "guardian", &[], None, "name", 10, 0, true).unwrap().total,
             1
         );
 
         // renaming another group to the same display name merges them
         rename_group(&conn, "Bugbear", "Stone Guardian").unwrap();
-        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0, true).unwrap();
         assert_eq!(page.total, 1, "two groups now share one card");
-        assert_eq!(group_members(&conn, "Stone Guardian").unwrap().len(), 2);
+        assert_eq!(group_members(&conn, "Stone Guardian", true).unwrap().len(), 2);
 
         // empty name reverts every override displaying that name
         rename_group(&conn, "Stone Guardian", "").unwrap();
-        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0, true).unwrap();
         assert_eq!(page.total, 2);
         assert!(page.groups.iter().any(|g| g.group_name == "Giant Newt"));
 
@@ -4653,13 +5113,13 @@ mod tests {
         )
         .unwrap();
 
-        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0, true).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.groups[0].group_name, "Dungeon Denizens");
-        assert_eq!(group_members(&conn, "Dungeon Denizens").unwrap().len(), 2);
+        assert_eq!(group_members(&conn, "Dungeon Denizens", true).unwrap().len(), 2);
         // findable by the combined name
         assert_eq!(
-            search_groups(&conn, "denizens", &[], None, "name", 10, 0).unwrap().total,
+            search_groups(&conn, "denizens", &[], None, "name", 10, 0, true).unwrap().total,
             1
         );
 
@@ -4691,7 +5151,7 @@ mod tests {
 
         // Splitting = clearing the renames: the sources come back as cards
         rename_group(&conn, "Dungeon Denizens", "").unwrap();
-        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0, true).unwrap();
         let names: Vec<_> = page.groups.iter().map(|g| g.group_name.clone()).collect();
         assert!(names.contains(&"Giant Newt".to_string()));
         assert!(names.contains(&"Bugbear".to_string()));
@@ -4713,11 +5173,11 @@ mod tests {
 
         // Pull one back out: it's its own card again, the other stays put
         detach_group_source(&conn, "Dungeon Denizens", "Bugbear").unwrap();
-        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0, true).unwrap();
         let names: Vec<_> = page.groups.iter().map(|g| g.group_name.clone()).collect();
         assert!(names.contains(&"Bugbear".to_string()));
         assert!(names.contains(&"Dungeon Denizens".to_string()));
-        assert_eq!(group_members(&conn, "Dungeon Denizens").unwrap().len(), 1);
+        assert_eq!(group_members(&conn, "Dungeon Denizens", true).unwrap().len(), 1);
 
         // Detaching something that isn't rename-combined is a clear error,
         // not a silent no-op
@@ -4737,7 +5197,7 @@ mod tests {
         replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
 
         set_group_cover(&conn, "critters", &picked_dir, None).unwrap();
-        let page = search_groups(&conn, "", &[], None, "name", 10, 0).unwrap();
+        let page = search_groups(&conn, "", &[], None, "name", 10, 0, true).unwrap();
         assert_eq!(
             page.groups[0].preview_path.as_deref(),
             Some("/previews/newt.png"),
@@ -4842,7 +5302,7 @@ mod tests {
 
         move_model(&mut conn, "/lib/newt", "/lib/amphibians/newt").unwrap();
 
-        let page = search(&conn, "shiny", &[], 10, 0).unwrap();
+        let page = search(&conn, "shiny", &[], 10, 0, true).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.entries[0].dir_path, "/lib/amphibians/newt");
     }
@@ -4889,9 +5349,9 @@ mod tests {
         // file + member + group all report packed; the other model doesn't
         let listed = model_files(&conn, "/lib/newt", None).unwrap();
         assert!(listed[0].packed);
-        let newt = group_members(&conn, "Giant Newt").unwrap();
+        let newt = group_members(&conn, "Giant Newt", true).unwrap();
         assert!(newt[0].packed);
-        let bugbear = group_members(&conn, "Bugbear").unwrap();
+        let bugbear = group_members(&conn, "Bugbear", true).unwrap();
         assert!(!bugbear[0].packed);
         // the pack checksum joins duplicate detection without a disk read —
         // stored BARE (the dup scanner's format), not "blake3:"-prefixed
@@ -4975,7 +5435,7 @@ mod tests {
         models[0].part_count = Some("3".into());
         replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
 
-        let newt = group_members(&conn, "Giant Newt").unwrap();
+        let newt = group_members(&conn, "Giant Newt", true).unwrap();
         assert_eq!(newt[0].rotation.as_deref(), Some("0,0,90"));
         assert_eq!(newt[0].dims_mm.as_deref(), Some("60.2x35.1x88.7"));
         assert_eq!(newt[0].part_count.as_deref(), Some("3"));
@@ -4984,18 +5444,18 @@ mod tests {
 
         // the studio-saved rotation (user meta) overlays the scanner value
         set_rotation(&conn, "/lib/newt", "90,0,0").unwrap();
-        let newt = group_members(&conn, "Giant Newt").unwrap();
+        let newt = group_members(&conn, "Giant Newt", true).unwrap();
         assert_eq!(newt[0].rotation.as_deref(), Some("90,0,0"));
 
         // measured geometry lands in place (the batch job path)
         set_measured(&conn, "/lib/bugbear", "25.0x25.0x40.5", 1).unwrap();
-        let bugbear = group_members(&conn, "Bugbear").unwrap();
+        let bugbear = group_members(&conn, "Bugbear", true).unwrap();
         assert_eq!(bugbear[0].dims_mm.as_deref(), Some("25.0x25.0x40.5"));
         assert_eq!(bugbear[0].part_count.as_deref(), Some("1"));
 
         // a rescan rebuilds models wholesale — the user-meta rotation survives
         replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
-        let newt = group_members(&conn, "Giant Newt").unwrap();
+        let newt = group_members(&conn, "Giant Newt", true).unwrap();
         assert_eq!(
             newt[0].rotation.as_deref(),
             Some("90,0,0"),

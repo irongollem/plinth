@@ -145,6 +145,11 @@ pub struct CatalogEntry {
     pub dims_mm: Option<String>,
     #[serde(default)]
     pub part_count: Option<String>,
+    /// This member's effective 18+ flag (explicit override, or the
+    /// designer-wide rule when unset) — a display filter, not encryption;
+    /// scans still index everything. See db::NSFW_EFFECTIVE_SQL.
+    #[serde(default)]
+    pub nsfw: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
@@ -174,6 +179,10 @@ pub struct CatalogGroup {
     /// True when every member of the group is compressed at rest.
     #[serde(default)]
     pub packed: bool,
+    /// True when ANY member is effectively 18+ — the card-level badge and
+    /// what the browse filter hides when Settings' "Show 18+" is off.
+    #[serde(default)]
+    pub nsfw: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]

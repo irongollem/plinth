@@ -23,6 +23,7 @@ blake3 = "1"
 image = "0.25.6"
 rusqlite = { version = "0.37", features = ["bundled"] }
 once_cell = "1.21.1"
+pbkdf2 = "0.12"
 # Blender download only. rustls: no OpenSSL build matrix on Windows;
 # stream: progress + incremental hashing while the bytes arrive.
 reqwest = { version = "0.12", default-features = false, features = [

@@ -135,6 +135,62 @@ async setSettings(settings: Settings) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getNsfwAccessState() : Promise<Result<NsfwAccessState, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_nsfw_access_state") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async unlockNsfw(pin: string | null) : Promise<Result<NsfwAccessState, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("unlock_nsfw", { pin }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async lockNsfw() : Promise<Result<NsfwAccessState, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("lock_nsfw") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async configureNsfwPin(pin: string) : Promise<Result<NsfwPinSetup, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("configure_nsfw_pin", { pin }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeNsfwPin(currentPin: string, newPin: string) : Promise<Result<NsfwAccessState, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_nsfw_pin", { currentPin, newPin }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async recoverNsfwPin(recoveryCode: string, newPin: string) : Promise<Result<NsfwPinSetup, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("recover_nsfw_pin", { recoveryCode, newPin }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async removeNsfwPin(currentPin: string) : Promise<Result<NsfwAccessState, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("remove_nsfw_pin", { currentPin }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async detectBlender() : Promise<Result<BlenderInfo, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("detect_blender") };
@@ -419,6 +475,22 @@ async getCatalogDesigners() : Promise<Result<DesignerCount[], AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async renameCatalogDesigner(oldName: string, newName: string) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("rename_catalog_designer", { oldName, newName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async renameCatalogRelease(designer: string, oldName: string, newName: string) : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("rename_catalog_release", { designer, oldName, newName }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Update one member's metadata, then propagate the shared facets (variant,
  * pose, scale) to its support twins — the supported/unsupported builds of
@@ -502,6 +574,37 @@ async listIgnoredFolders() : Promise<Result<IgnoredFolder[], AppError>> {
 async unignoreFolder(dirPath: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("unignore_folder", { dirPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Flag or unflag every model behind one or more card names — the drawer's
+ * "mark 18+" button and the batch bar's equivalent both land here. Resolves
+ * through group_members with include_nsfw=true so an ALREADY-hidden member
+ * still gets updated (unmarking a mixed group must reach every variant, not
+ * just the ones currently visible).
+ */
+async setGroupNsfw(groupNames: string[], nsfw: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_group_nsfw", { groupNames, nsfw }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async listNsfwDesigners() : Promise<Result<string[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_nsfw_designers") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setDesignerNsfw(designer: string, nsfw: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_designer_nsfw", { designer, nsfw }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1319,7 +1422,13 @@ rotation?: string | null;
  * Measured printed size "60.2x35.1x88.7" in mm, and how many part
  * files make up the model — captured by the render pipeline.
  */
-dims_mm?: string | null; part_count?: string | null }
+dims_mm?: string | null; part_count?: string | null; 
+/**
+ * This member's effective 18+ flag (explicit override, or the
+ * designer-wide rule when unset) — a display filter, not encryption;
+ * scans still index everything. See db::NSFW_EFFECTIVE_SQL.
+ */
+nsfw?: boolean }
 export type CatalogFile = { path: string; file_name: string; extension: string; size_bytes: number; 
 /**
  * True when the bytes live inside the model's pack archive — `path` is
@@ -1341,7 +1450,12 @@ release_name: string | null; release_date: string | null; variant_count: number;
 /**
  * True when every member of the group is compressed at rest.
  */
-packed?: boolean }
+packed?: boolean; 
+/**
+ * True when ANY member is effectively 18+ — the card-level badge and
+ * what the browse filter hides when Settings' "Show 18+" is off.
+ */
+nsfw?: boolean }
 export type CatalogGroupResult = { groups: CatalogGroup[]; total: number }
 /**
  * One configured catalog folder and its indexed footprint — a row in the
@@ -1797,6 +1911,12 @@ groups: NormalizeGroupPlan[]; skipped: NormalizeSkip[]; total_ops: number; clean
  */
 clean_names: string[] }
 export type NormalizeSkip = { group_name: string; reason: string }
+export type NsfwAccessState = { unlocked: boolean; pin_configured: boolean; recovery_configured: boolean }
+export type NsfwPinSetup = { state: NsfwAccessState; 
+/**
+ * Shown once. Only a verifier is retained locally.
+ */
+recovery_code: string }
 export type PackCancelledStatus = { job_id: string; succeeded: number }
 export type PackCompletedStatus = { job_id: string; action: string; succeeded: number; total_models: number; 
 /**
