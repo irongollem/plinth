@@ -418,9 +418,23 @@ so every stage that produces terrain can additionally emit a `.glb` twin.
   `0.032` units — baked by scaling the mesh by `0.001` immediately after
   the (unscaled, millimeter) STL export; the STL itself never changes
   size or orientation.
-- **Catalog export**: `export_cuts_to_catalog` copies a cut's `.glb`
-  sidecar alongside its STL automatically whenever one exists — no
-  separate opt-in on the catalog side.
+- **Catalog export**: the UI sends `CutCatalogArtifact[]`, not bare output
+  paths. Every artifact carries a stable UUID, nominal `CutterKind`, and
+  base/topper mode; Blender's scratch filename is never treated as catalog
+  identity. Rust allocates a globally collision-free human name such as
+  `Ruined Chapel — 32 mm Round — 01`, then writes the canonical
+  `{root}/Plinth Bases/{YYYY-MM Collection}/{Model}/` layout and a complete
+  `model.json` (`id`, designer, release name/date, generated tags, footprint,
+  and base size where the catalog has a matching field). An identical UUID
+  re-export is a no-op; changed geometry for that UUID updates the one model
+  instead of creating a false multipart model. A `.glb` twin follows its STL
+  automatically. Raw Blender output is rejected inside catalog roots—the
+  structured export is the only path from scratch files into the catalog.
+- **Legacy repair**: opening the Catalog repairs old
+  `Plinth Bases/YYYY-MM Collection/...` sidecars in place and starts a
+  rescan. It adds UUID/release metadata and collection-scopes bare names;
+  files do not move until the user runs the catalog's normal **Clean up**
+  workflow.
 
 See also docs/SCATTER.md (scatter piece coloring) and
 docs/SCATTER-ASSETS.md (the `color` field on bundled/user-library
