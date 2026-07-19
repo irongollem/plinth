@@ -22,6 +22,8 @@ import type {
   CatalogRootSummary,
   Cutter,
   CutterKind,
+  CutCatalogArtifact,
+  CutCatalogMode,
   FlowLayer,
   GeneratedPieceKind,
   GeneratorPreset,
@@ -817,10 +819,10 @@ const catalogRoots = ref<CatalogRootSummary[]>([]);
 /** Selected destination folder — defaulted to catalog_primary_root (via its
  * `primary` flag on the loaded list) once roots resolve below. */
 const exportRoot = ref("");
-/** Group-name field, prefilled from the landscape's own file name the first
+/** Collection field, prefilled from the landscape's own file name the first
  * time a job finishes with a keeper (see the finishedSummary watcher) —
  * never overwritten after that, so a user edit survives a later job. */
-const exportGroupName = ref("");
+const exportCollectionName = ref("");
 const exportBusy = ref(false);
 
 onMounted(async () => {
@@ -1733,10 +1735,20 @@ const canCut = computed(
     !!landscapePath.value &&
     placements.value.length > 0 &&
     !!outDir.value &&
+    !outDirInsideCatalog.value &&
     !baseCut.isRunning.value &&
     !landscapeGen.isRunning.value && // generation and cutting share Blender — never both at once
     !debrisScatter.isRunning.value,
 );
+const cutBlockedReason = computed(() => {
+  if (!landscapePath.value) return "Choose or generate a landscape first";
+  if (!placements.value.length) return "Place at least one cutter";
+  if (!outDir.value) return "Choose a scratch output folder";
+  if (outDirInsideCatalog.value)
+    return "Choose a scratch folder outside the catalog";
+  if (locked.value) return "Another Blender job is running";
+  return "";
+});
 
 /** BASE TOPPER mode (docs/BASECUTTER.md "Pinned interfaces" topper_mm): no
  * plinth at all — the plug is flat-trimmed and exported as a glue-on
@@ -1778,10 +1790,18 @@ const cutButtonLabel = computed(() => {
 // stays stable even though editing is locked out anyway while running (see
 // `locked`). Belt-and-suspenders against index drift, not just UI lockout.
 const jobPlacementNames = ref<(string | null)[]>([]);
+type CutArtifactSnapshot = Omit<CutCatalogArtifact, "source_path">;
+const jobArtifactSnapshots = ref<CutArtifactSnapshot[]>([]);
 
 const startCut = async () => {
   if (!canCut.value) return;
   jobPlacementNames.value = placements.value.map((p) => p.name);
+  const mode: CutCatalogMode = topperMode.value ? "topper" : "base";
+  jobArtifactSnapshots.value = placements.value.map((placement) => ({
+    id: crypto.randomUUID(),
+    cutter: cloneRaw(placement.cutter),
+    mode,
+  }));
   const job: BaseCutJob = {
     landscape: landscapePath.value,
     placements: placements.value,
@@ -1882,17 +1902,17 @@ watch(baseCut.finishedSummary, (summary) => {
     `Cut ${ok_count}/${total} base${total === 1 ? "" : "s"}`,
     ok_count === total ? "success" : "warning",
   );
-  // Seed the "Add to catalog" group name from the landscape's own file name
+  // Seed the catalog collection from the landscape's own file name
   // the first time there's something to export — never overrides a name
   // the user already typed (this fires again on every finish, including a
   // second job in the same session).
-  if (ok_count > 0 && !exportGroupName.value.trim()) {
+  if (ok_count > 0 && !exportCollectionName.value.trim()) {
     const base = landscapePath.value.split(/[/\\]/).pop() ?? "";
     const stem = base
       .replace(/\.stl$/i, "")
       .replace(/[_-]+/g, " ")
       .trim();
-    exportGroupName.value = stem || "Cut bases";
+    exportCollectionName.value = stem || "Cut bases";
   }
 });
 watch(baseCut.failedMessage, (message) => {
@@ -1945,13 +1965,18 @@ const resultDisplayName = (r: BaseCutResult) => {
  * (Releases.vue / file::commands::create_release): licensing covers
  * personal printing, not redistribution. */
 
-const successfulOutPaths = computed(() =>
+const successfulArtifacts = computed<CutCatalogArtifact[]>(() =>
   baseCut.results.value
     .filter((r) => r.ok && r.out_path)
-    .map((r) => r.out_path as string),
+    .flatMap((result) => {
+      const snapshot = jobArtifactSnapshots.value[result.index];
+      return snapshot
+        ? [{ ...snapshot, source_path: result.out_path as string }]
+        : [];
+    }),
 );
 const hasSuccessfulResults = computed(
-  () => !baseCut.isRunning.value && successfulOutPaths.value.length > 0,
+  () => !baseCut.isRunning.value && successfulArtifacts.value.length > 0,
 );
 
 /** Folder basename for the picker's option label — the full path is the
@@ -1962,7 +1987,7 @@ const rootLabel = (root: string) => root.split(/[/\\]/).pop() || root;
 const exportBlockedReason = computed(() => {
   if (!catalogRoots.value.length) return "Add a catalog folder in Settings";
   if (!exportRoot.value) return "Choose a catalog folder";
-  if (!exportGroupName.value.trim()) return "Enter a group name";
+  if (!exportCollectionName.value.trim()) return "Enter a collection name";
   if (exportBusy.value) return "Adding to catalog…";
   return "";
 });
@@ -1973,32 +1998,33 @@ const exportToCatalog = async () => {
   exportBusy.value = true;
   try {
     const result = await commands.exportCutsToCatalog(
-      successfulOutPaths.value,
+      successfulArtifacts.value,
       exportRoot.value,
-      exportGroupName.value.trim(),
+      exportCollectionName.value.trim(),
     );
     if (result.status === "error") {
       toastStore.reportError("Failed to add bases to catalog", result.error);
       return;
     }
-    const destDir = result.data;
+    const summary = result.data;
     // Kick a rescan of the destination root so the new bases show up
     // without a manual rescan — a failure here doesn't undo the copy, it
     // just means the catalog view is stale until the next scan.
     const scanResult = await commands.startCatalogScan(exportRoot.value);
     if (scanResult.status === "error") {
       toastStore.reportError(
-        `Added to catalog at ${destDir}, but the rescan didn't start`,
+        `Added to catalog at ${summary.release_dir}, but the rescan didn't start`,
         scanResult.error,
       );
       return;
     }
     toastStore.addToast(
-      `Added ${successfulOutPaths.value.length} base${
-        successfulOutPaths.value.length === 1 ? "" : "s"
-      } to catalog — ${destDir}`,
+      `Catalog updated — ${summary.added} added, ${summary.updated} updated, ${summary.unchanged} already current`,
       "success",
     );
+    for (const warning of summary.warnings) {
+      toastStore.addToast(warning, "warning", 0);
+    }
   } finally {
     exportBusy.value = false;
   }
@@ -3773,10 +3799,10 @@ watch(baseCut.finishedSummary, (summary) => {
               />
               <button class="btn btn-sm" @click="chooseOutDir">Choose…</button>
             </div>
-            <p v-if="outDirInsideCatalog" class="text-[10.5px] text-warning">
-              This folder is inside a catalog folder — every scan will read the
-              raw cuts here as one junk "model". Pick a folder outside the
-              catalog, then use Add to catalog for the keepers.
+            <p v-if="outDirInsideCatalog" class="text-[10.5px] text-error">
+              Raw output cannot be written inside a catalog folder. Pick a
+              scratch folder outside the catalog, then use Add to catalog for
+              the keepers.
             </p>
           </div>
 
@@ -3784,6 +3810,7 @@ watch(baseCut.finishedSummary, (summary) => {
             <button
               class="btn btn-primary grow"
               :disabled="!canCut"
+              :title="cutBlockedReason"
               @click="startCut"
             >
               <template v-if="baseCut.isRunning.value">
@@ -3909,9 +3936,9 @@ watch(baseCut.finishedSummary, (summary) => {
                 <input
                   type="text"
                   class="input input-xs w-full"
-                  placeholder="Group name"
+                  placeholder="Collection name"
                   :disabled="exportBusy"
-                  v-model="exportGroupName"
+                  v-model="exportCollectionName"
                 />
               </template>
               <p v-else class="text-[10.5px] text-base-content/40">
@@ -3929,8 +3956,8 @@ watch(baseCut.finishedSummary, (summary) => {
                   <span>Adding…</span>
                 </template>
                 <span v-else
-                  >Add {{ successfulOutPaths.length }} base{{
-                    successfulOutPaths.length === 1 ? "" : "s"
+                  >Add {{ successfulArtifacts.length }} base{{
+                    successfulArtifacts.length === 1 ? "" : "s"
                   }}
                   to catalog</span
                 >

@@ -2448,7 +2448,26 @@ export const useCatalogStore = defineStore("catalog", () => {
   /** Orchestrated once by the Catalog view's onMounted. */
   const init = async () => {
     await Promise.all([initPackCleanupPref(), syncShowNsfw()]);
-    await Promise.all([refreshRoots(), runSearch(), refreshMeta()]);
+    await refreshRoots();
+    const repair = await commands.repairPlinthBaseExports();
+    if (repair.status === "ok") {
+      for (const warning of repair.data.warnings) {
+        toastStore.addToast(warning, "warning", 0);
+      }
+      if (repair.data.repaired > 0) {
+        toastStore.addToast(
+          `Repaired metadata for ${repair.data.repaired} existing Plinth base${repair.data.repaired === 1 ? "" : "s"}; rescanning the catalog`,
+          "success",
+        );
+        await scanAll();
+      }
+    } else {
+      toastStore.reportError(
+        "Failed to repair existing Plinth base metadata",
+        repair.error,
+      );
+    }
+    await Promise.all([runSearch(), refreshMeta()]);
   };
 
   /** Orchestrated by the Catalog view's onActivated (KeepAlive re-entry). */

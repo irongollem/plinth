@@ -13,6 +13,8 @@ use crate::models::events::{
 };
 use crate::render::engine;
 use once_cell::sync::Lazy;
+use serde::{Deserialize, Serialize};
+use specta::Type;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -185,6 +187,23 @@ pub fn validate_placements(placements: &[Placement], plinth: &PlinthParams) -> R
 /// the doc calls for, no map needed.
 static ACTIVE_BASE_CUT: Lazy<Mutex<Option<(String, Arc<Notify>)>>> = Lazy::new(|| Mutex::new(None));
 
+fn output_is_inside_catalog(output: &str, roots: &[String]) -> bool {
+    let normalize = |path: &str| {
+        Path::new(path)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(path))
+            .to_string_lossy()
+            .trim_end_matches(['/', '\\'])
+            .replace('\\', "/")
+            .to_lowercase()
+    };
+    let output = normalize(output);
+    roots.iter().any(|root| {
+        let root = normalize(root);
+        output == root || output.starts_with(&format!("{root}/"))
+    })
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn start_base_cut(app_handle: AppHandle, job: BaseCutJob) -> Result<String, AppError> {
@@ -209,6 +228,15 @@ pub async fn start_base_cut(app_handle: AppHandle, job: BaseCutJob) -> Result<St
     }
     validate_placements(&job.placements, &job.plinth)?;
     validate_topper_mm(job.topper_mm)?;
+    let settings = crate::settings::get_settings(app_handle.clone())
+        .await
+        .map_err(AppError::ConfigError)?;
+    if output_is_inside_catalog(&job.out_dir, &settings.catalog_roots.unwrap_or_default()) {
+        return Err(AppError::InvalidInput(
+            "The raw output folder must be outside every catalog root — use Add to catalog for finished cuts"
+                .to_string(),
+        ));
+    }
 
     let blender = engine::detect_blender_cached().await?;
     let script = job::materialize_base_cut_script(&app_handle)?;
@@ -425,6 +453,41 @@ fn handle_token(app_handle: &AppHandle, job_id: &str, token: &BaseCutToken) {
 /// for why that separation is the whole reason this parses cleanly).
 const PLINTH_DESIGNER: &str = "Plinth Bases";
 
+/// A successful cut as it crosses from the transient Blender output area
+/// into the durable catalog. Identity and footprint travel explicitly — a
+/// filename collision suffix is storage trivia, never model metadata.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct CutCatalogArtifact {
+    pub id: String,
+    pub source_path: String,
+    pub cutter: CutterKind,
+    pub mode: CutCatalogMode,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum CutCatalogMode {
+    Base,
+    Topper,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, Type)]
+pub struct CutCatalogExportSummary {
+    pub release_dir: String,
+    pub added: u32,
+    pub updated: u32,
+    pub unchanged: u32,
+    pub repaired: u32,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, Type)]
+pub struct PlinthRepairSummary {
+    pub repaired: u32,
+    pub unchanged: u32,
+    pub warnings: Vec<String>,
+}
+
 /// Proleptic-Gregorian (year, month, day) from a Unix timestamp, UTC. No
 /// date/time crate is in Cargo.toml (elsewhere in the codebase a raw
 /// SystemTime/UNIX_EPOCH duration is the calendar-free norm, e.g.
@@ -457,269 +520,633 @@ fn current_year_month_utc() -> (i64, u32) {
     (year, month)
 }
 
-/// Copy a finished job's successful cuts into a catalog root, process-free
-/// and settings-free so the folder-layout decision is unit-testable without
-/// an AppHandle (same split as `validate_placements` above). The exported
-/// tauri command below only adds the settings lookup and the current date.
-///
-/// Layout: `{root}/Plinth Bases/{YYYY-MM group_name}/{cut file stem}/file`.
-/// This is deliberately THREE tiers deep, reusing catalog::layout::model_dir
-/// verbatim (the exact function the release builder/normalizer write
-/// through) rather than dropping files straight into the release folder:
-/// scanner::infer_model_identity climbs from the leaf directory up and stops
-/// naming the model at the FIRST non-generic, non-pose, non-support
-/// segment — so if the date-bearing "YYYY-MM group_name" folder held the
-/// files directly, that same segment would supply both the release date
-/// AND the model's display name, baking "2026-07 " into every card's
-/// title. A per-cut model folder underneath keeps the leaf segment
-/// (the cut's own name) clean, and the date is still recovered one level up
-/// by scanner::date_from_segment. See catalog/scanner.rs's
-/// infer_model_identity and date_from_segment for the exact climb this
-/// relies on.
-///
-/// Never a move: cut output stays local/catalog-bound per docs/BASECUTTER.md
-/// "Risks" (licensing covers personal printing, not redistribution) — this
-/// function only ever copies into a configured catalog root and has no path
-/// into file::commands' release/share pipeline.
-///
-/// The per-cut folder is keyed on the cut's file stem, but the stem alone
-/// is not a reliable identity: base_cut.py names an unnamed placement off
-/// its index within ONE job's out_dir (unique_out_path), so two SEPARATE
-/// job runs each independently start back at the same bare stem (a
-/// 28.5mm round cutter cut in two different sessions is "round285.stl"
-/// both times). Landing both in the same folder would silently merge two
-/// unrelated bases into one catalog model with the second read as an
-/// extra PART of the first — see `cut_dest_dir`, which only reuses an
-/// existing per-cut folder when it already holds this exact cut (a true
-/// re-export), and gives any other stem collision its own folder instead.
-///
-/// Each per-cut model folder also gets a minimal `model.json` sidecar naming
-/// PLINTH_DESIGNER (see `write_export_model_json`): the scanner's designer
-/// resolution is model.json designer -> release.json designer -> a
-/// known-designers folder-name lexicon, in that order, and "Plinth Bases" is
-/// in none of them — without the sidecar an export would scan back in as an
-/// undesignered heuristic model instead of a Plinth Bases one.
-pub fn export_cuts(
-    paths: &[String],
+fn format_mm(value: f64) -> String {
+    if value.fract().abs() < f64::EPSILON {
+        format!("{}", value as i64)
+    } else {
+        let formatted = format!("{value:.3}");
+        formatted
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    }
+}
+
+fn footprint_label(cutter: &CutterKind) -> String {
+    match cutter {
+        CutterKind::Circle { diameter_mm } => format!("{} mm Round", format_mm(*diameter_mm)),
+        CutterKind::Ellipse { major_mm, minor_mm } => {
+            format!("{}×{} mm Oval", format_mm(*major_mm), format_mm(*minor_mm))
+        }
+        CutterKind::Rect { width_mm, depth_mm } if (width_mm - depth_mm).abs() < f64::EPSILON => {
+            format!("{} mm Square", format_mm(*width_mm))
+        }
+        CutterKind::Rect { width_mm, depth_mm } => format!(
+            "{}×{} mm Rectangle",
+            format_mm(*width_mm),
+            format_mm(*depth_mm)
+        ),
+    }
+}
+
+fn parse_release_segment(name: &str) -> Option<(&str, &str)> {
+    let bytes = name.as_bytes();
+    if bytes.len() < 9
+        || bytes[4] != b'-'
+        || bytes[7] != b' '
+        || !bytes[..4].iter().all(u8::is_ascii_digit)
+        || !bytes[5..7].iter().all(u8::is_ascii_digit)
+    {
+        return None;
+    }
+    let month: u32 = name[5..7].parse().ok()?;
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    Some((&name[..7], name[8..].trim()))
+}
+
+fn sidecar_value(path: &Path) -> Result<serde_json::Value, AppError> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| AppError::IoError(format!("Failed to read {}: {e}", path.display())))?;
+    serde_json::from_str(&contents)
+        .map_err(|e| AppError::JsonError(format!("Failed to parse {}: {e}", path.display())))
+}
+
+fn write_sidecar_value(path: &Path, value: &serde_json::Value) -> Result<(), AppError> {
+    let contents = serde_json::to_string_pretty(value)
+        .map_err(|e| AppError::JsonError(format!("Failed to encode {}: {e}", path.display())))?;
+    std::fs::write(path, contents)
+        .map_err(|e| AppError::IoError(format!("Failed to write {}: {e}", path.display())))
+}
+
+fn normalized_name_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Bring early Base Cutter exports up to the same metadata contract as new
+/// ones. Files do not move here: cleanup remains the one explicit folder
+/// mutation workflow. Existing sidecar fields are preserved unless they are
+/// absent; names gain their collection prefix so bare `round32-1` identities
+/// cannot merge across releases in the globally name-keyed catalog.
+pub fn repair_plinth_base_exports_in_root(root: &Path) -> Result<PlinthRepairSummary, AppError> {
+    repair_plinth_base_exports_with_names(root, &mut HashSet::new())
+}
+
+fn repair_plinth_base_exports_with_names(
+    root: &Path,
+    used_names: &mut HashSet<String>,
+) -> Result<PlinthRepairSummary, AppError> {
+    let mut summary = PlinthRepairSummary::default();
+    let designer_dir = root.join(PLINTH_DESIGNER);
+    if !designer_dir.is_dir() {
+        return Ok(summary);
+    }
+    let releases = std::fs::read_dir(&designer_dir).map_err(|e| {
+        AppError::IoError(format!("Failed to inspect {}: {e}", designer_dir.display()))
+    })?;
+    let mut release_paths = releases
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    release_paths.sort();
+    for release_path in release_paths {
+        let release_label = release_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let Some((release_date, collection)) = parse_release_segment(&release_label) else {
+            continue;
+        };
+        if collection.is_empty() {
+            continue;
+        }
+        let model_entries = match std::fs::read_dir(&release_path) {
+            Ok(entries) => entries,
+            Err(e) => {
+                summary
+                    .warnings
+                    .push(format!("Could not inspect {}: {e}", release_path.display()));
+                continue;
+            }
+        };
+        let mut model_paths = model_entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        model_paths.sort();
+        for model_path in model_paths {
+            let sidecar_path = model_path.join("model.json");
+            if !sidecar_path.is_file() {
+                continue;
+            }
+            let mut value = match sidecar_value(&sidecar_path) {
+                Ok(value) if value.is_object() => value,
+                Ok(_) => {
+                    summary
+                        .warnings
+                        .push(format!("{} is not a JSON object", sidecar_path.display()));
+                    continue;
+                }
+                Err(e) => {
+                    summary.warnings.push(e.to_string());
+                    continue;
+                }
+            };
+            let object = value.as_object_mut().expect("checked object above");
+            let before = serde_json::to_string(object).unwrap_or_default();
+            if !object
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| Uuid::parse_str(id).is_ok())
+            {
+                object.insert(
+                    "id".to_string(),
+                    serde_json::Value::String(Uuid::new_v4().to_string()),
+                );
+            }
+            object.insert(
+                "designer".to_string(),
+                serde_json::Value::String(PLINTH_DESIGNER.to_string()),
+            );
+            object.insert(
+                "release_name".to_string(),
+                serde_json::Value::String(collection.to_string()),
+            );
+            object.insert(
+                "release_date".to_string(),
+                serde_json::Value::String(release_date.to_string()),
+            );
+
+            let old_name = object
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(String::from)
+                .unwrap_or_else(|| {
+                    model_path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "Generated base".to_string())
+                });
+            let mut repaired_name =
+                if normalized_name_key(&old_name).starts_with(&normalized_name_key(collection)) {
+                    old_name
+                } else {
+                    format!("{collection} — {old_name}")
+                };
+            if !used_names.insert(repaired_name.to_lowercase()) {
+                let base = repaired_name.clone();
+                for ordinal in 2.. {
+                    let candidate = format!("{base} — {ordinal:02}");
+                    if used_names.insert(candidate.to_lowercase()) {
+                        repaired_name = candidate;
+                        break;
+                    }
+                }
+            }
+            object.insert("name".to_string(), serde_json::Value::String(repaired_name));
+
+            let tags = object
+                .entry("tags")
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            if let Some(tags) = tags.as_array_mut() {
+                for tag in ["generated", "terrain base"] {
+                    if !tags.iter().any(|value| value.as_str() == Some(tag)) {
+                        tags.push(serde_json::Value::String(tag.to_string()));
+                    }
+                }
+            }
+            object
+                .entry("generated")
+                .or_insert_with(|| serde_json::json!({ "tool": "base_cutter", "migrated": true }));
+
+            let after = serde_json::to_string(object).unwrap_or_default();
+            if before == after {
+                summary.unchanged += 1;
+            } else if let Err(e) = write_sidecar_value(&sidecar_path, &value) {
+                summary.warnings.push(e.to_string());
+            } else {
+                summary.repaired += 1;
+            }
+        }
+    }
+    Ok(summary)
+}
+
+fn artifact_id_in_dir(dir: &Path) -> Option<String> {
+    sidecar_value(&dir.join("model.json"))
+        .ok()?
+        .get("id")?
+        .as_str()
+        .map(String::from)
+}
+
+fn find_artifact_dir(roots: &[String], id: &str) -> Option<PathBuf> {
+    for root in roots {
+        let designer_dir = Path::new(root).join(PLINTH_DESIGNER);
+        let Ok(releases) = std::fs::read_dir(designer_dir) else {
+            continue;
+        };
+        for release in releases.flatten().filter(|entry| entry.path().is_dir()) {
+            let Ok(models) = std::fs::read_dir(release.path()) else {
+                continue;
+            };
+            for model in models.flatten().filter(|entry| entry.path().is_dir()) {
+                if artifact_id_in_dir(&model.path()).as_deref() == Some(id) {
+                    return Some(model.path());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn all_plinth_model_names(roots: &[String]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for root in roots {
+        let designer_dir = Path::new(root).join(PLINTH_DESIGNER);
+        let Ok(releases) = std::fs::read_dir(designer_dir) else {
+            continue;
+        };
+        for release in releases.flatten().filter(|entry| entry.path().is_dir()) {
+            let Ok(models) = std::fs::read_dir(release.path()) else {
+                continue;
+            };
+            for model in models.flatten().filter(|entry| entry.path().is_dir()) {
+                if let Ok(value) = sidecar_value(&model.path().join("model.json")) {
+                    if let Some(name) = value.get("name").and_then(serde_json::Value::as_str) {
+                        names.insert(name.to_lowercase());
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+fn next_artifact_name(
+    collection: &str,
+    cutter: &CutterKind,
+    mode: CutCatalogMode,
+    used_names: &mut HashSet<String>,
+) -> String {
+    let mode_label = if mode == CutCatalogMode::Topper {
+        " Topper"
+    } else {
+        ""
+    };
+    let base = format!("{collection} — {}{mode_label}", footprint_label(cutter));
+    for ordinal in 1.. {
+        let candidate = format!("{base} — {ordinal:02}");
+        if used_names.insert(candidate.to_lowercase()) {
+            return candidate;
+        }
+    }
+    unreachable!("ran out of artifact ordinals")
+}
+
+fn artifact_tags(cutter: &CutterKind, mode: CutCatalogMode) -> Vec<String> {
+    let shape = match cutter {
+        CutterKind::Circle { .. } => "round",
+        CutterKind::Ellipse { .. } => "oval",
+        CutterKind::Rect { width_mm, depth_mm } if (width_mm - depth_mm).abs() < f64::EPSILON => {
+            "square"
+        }
+        CutterKind::Rect { .. } => "rectangle",
+    };
+    vec![
+        "generated".to_string(),
+        if mode == CutCatalogMode::Topper {
+            "terrain topper".to_string()
+        } else {
+            "terrain base".to_string()
+        },
+        shape.to_string(),
+        footprint_label(cutter).to_lowercase(),
+    ]
+}
+
+fn artifact_sidecar(
+    artifact: &CutCatalogArtifact,
+    model_name: &str,
+    collection: &str,
+    release_date: &str,
+    existing: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut value = existing
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({ "name": model_name }));
+    let object = value.as_object_mut().expect("json object");
+    object.insert(
+        "id".to_string(),
+        serde_json::Value::String(artifact.id.clone()),
+    );
+    object
+        .entry("name")
+        .or_insert_with(|| serde_json::Value::String(model_name.to_string()));
+    object.insert(
+        "designer".to_string(),
+        serde_json::Value::String(PLINTH_DESIGNER.to_string()),
+    );
+    object.insert(
+        "release_name".to_string(),
+        serde_json::Value::String(collection.to_string()),
+    );
+    object.insert(
+        "release_date".to_string(),
+        serde_json::Value::String(release_date.to_string()),
+    );
+    let tags = object
+        .entry("tags")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if let Some(tags) = tags.as_array_mut() {
+        for tag in artifact_tags(&artifact.cutter, artifact.mode) {
+            if !tags.iter().any(|value| value.as_str() == Some(&tag)) {
+                tags.push(serde_json::Value::String(tag));
+            }
+        }
+    }
+    object.insert(
+        "generated".to_string(),
+        serde_json::json!({
+            "tool": "base_cutter",
+            "mode": match artifact.mode { CutCatalogMode::Base => "base", CutCatalogMode::Topper => "topper" },
+            "footprint": artifact.cutter,
+        }),
+    );
+    match artifact.cutter {
+        CutterKind::Circle { diameter_mm } => {
+            object.insert(
+                "base_round_mm".to_string(),
+                serde_json::Value::String(format_mm(diameter_mm)),
+            );
+        }
+        CutterKind::Rect { width_mm, depth_mm } if (width_mm - depth_mm).abs() < f64::EPSILON => {
+            object.insert(
+                "base_square_mm".to_string(),
+                serde_json::Value::String(format_mm(width_mm)),
+            );
+        }
+        _ => {}
+    }
+    value
+}
+
+fn copy_artifact_file(source: &Path, destination: &Path) -> Result<bool, AppError> {
+    if destination.is_file() && crate::catalog::normalize::same_content(destination, source) {
+        return Ok(false);
+    }
+    std::fs::copy(source, destination).map_err(|e| {
+        AppError::IoError(format!(
+            "Failed to copy {} to {}: {e}",
+            source.display(),
+            destination.display()
+        ))
+    })?;
+    Ok(true)
+}
+
+pub fn export_cut_artifacts(
+    artifacts: &[CutCatalogArtifact],
     root: &str,
-    group_name: &str,
+    collection: &str,
     catalog_roots: &[String],
     year_month: (i64, u32),
-) -> Result<String, AppError> {
-    if paths.is_empty() {
+) -> Result<CutCatalogExportSummary, AppError> {
+    if artifacts.is_empty() {
         return Err(AppError::InvalidInput(
-            "No cut STLs to export".to_string(),
+            "No cut artifacts to export".to_string(),
         ));
     }
-    let group_name = group_name.trim();
-    if group_name.is_empty() {
+    let collection = collection.trim();
+    if collection.is_empty() {
         return Err(AppError::InvalidInput(
-            "A group name is required".to_string(),
+            "A collection name is required".to_string(),
         ));
     }
-
     let root_norm = crate::catalog::commands::normalized_root(root);
+    let catalog_roots = catalog_roots
+        .iter()
+        .map(|candidate| crate::catalog::commands::normalized_root(candidate))
+        .collect::<Vec<_>>();
     if !catalog_roots
         .iter()
-        .any(|r| crate::catalog::commands::normalized_root(r) == root_norm)
+        .any(|candidate| candidate == &root_norm)
     {
         return Err(AppError::InvalidInput(format!(
-            "'{}' is not a configured catalog folder — add it in Settings first",
-            root
+            "'{root}' is not a configured catalog folder — add it in Settings first"
         )));
     }
     let root_path = Path::new(&root_norm);
     if !root_path.is_dir() {
         return Err(AppError::NotFoundError(format!(
-            "Catalog folder not found: {}",
-            root_norm
+            "Catalog folder not found: {root_norm}"
         )));
     }
 
-    // Exact-path duplicates in the input list are a caller bug (the same
-    // cut named twice), distinct from a destination already holding a file
-    // of the same name (handled below with a -N suffix, never an error).
-    let mut seen: HashSet<&str> = HashSet::new();
-    for path in paths {
-        if !seen.insert(path.as_str()) {
+    let mut ids = HashSet::new();
+    for artifact in artifacts {
+        Uuid::parse_str(&artifact.id).map_err(|_| {
+            AppError::InvalidInput(format!("Invalid cut artifact ID: {}", artifact.id))
+        })?;
+        if !ids.insert(artifact.id.to_lowercase()) {
             return Err(AppError::InvalidInput(format!(
-                "'{}' is listed twice in the export",
-                path
+                "Cut artifact {} is listed twice",
+                artifact.id
             )));
         }
-    }
-
-    // Validate every source up front so a missing file fails clearly before
-    // any copying starts, rather than leaving a partial export behind.
-    for path in paths {
-        let source = Path::new(path);
-        if !source.is_file() {
-            return Err(AppError::NotFoundError(format!(
-                "Cut STL not found: {}",
-                path
-            )));
-        }
-        if !source
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("stl"))
+        let source = Path::new(&artifact.source_path);
+        if !source.is_file()
+            || !source
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("stl"))
         {
             return Err(AppError::InvalidInput(format!(
-                "Not an STL file: {}",
-                path
+                "Cut artifact is not a readable STL: {}",
+                artifact.source_path
             )));
         }
     }
 
-    let date = format!("{:04}-{:02}", year_month.0, year_month.1);
-
-    for path in paths {
-        let source = Path::new(path);
-        let stem = source
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "cut".to_string());
-        let dest_dir = cut_dest_dir(root_path, group_name, &date, &stem, source);
-        std::fs::create_dir_all(&dest_dir)?;
-        // The sidecar's name must match the folder THIS cut actually landed
-        // in, not the raw stem: cut_dest_dir may have pushed a stem-collided
-        // cut to "{stem} 2" to keep it a separate model, and naming it
-        // "{stem}" there would hand it the same group_name as the folder it
-        // was disambiguated away from, undoing the split at the metadata
-        // layer.
-        let dir_stem = dest_dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| stem.clone());
-        let file_name = source
-            .file_name()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(format!("{stem}.stl")));
-        let dest_file = crate::file::utils::unique_path(dest_dir.join(file_name));
-        std::fs::copy(source, &dest_file).map_err(|e| {
-            AppError::IoError(format!(
-                "Failed to copy {} to {}: {}",
-                path,
-                dest_file.display(),
-                e
-            ))
-        })?;
-        // VTT GLB export design doc "Base cut": a glb-mode cut writes a
-        // `.glb` twin right next to its STL (same stem). Copy it alongside
-        // under the SAME naming the STL just landed under — `dest_file`
-        // already carries whatever unique_path suffix it got, so the
-        // sidecar mirrors that exactly rather than re-deriving its own.
-        // Not every cut has one (glb:false jobs, or STLs that never came
-        // from base_cut.py at all), so this is silently skipped when the
-        // source doesn't carry a sidecar.
-        let source_glb = source.with_extension("glb");
-        if source_glb.is_file() {
-            let dest_glb = dest_file.with_extension("glb");
-            std::fs::copy(&source_glb, &dest_glb).map_err(|e| {
-                AppError::IoError(format!(
-                    "Failed to copy {} to {}: {}",
-                    source_glb.display(),
-                    dest_glb.display(),
-                    e
-                ))
-            })?;
+    // Catalog scans are rooted operations. Updating a stable artifact in a
+    // different configured root while the caller scans only `root` would
+    // leave that other root's index stale, so fail before writing anything.
+    for artifact in artifacts {
+        if let Some(existing_dir) = find_artifact_dir(&catalog_roots, &artifact.id) {
+            if !existing_dir.starts_with(root_path) {
+                let owner = catalog_roots
+                    .iter()
+                    .find(|candidate| existing_dir.starts_with(Path::new(candidate)))
+                    .map(String::as_str)
+                    .unwrap_or("another configured catalog folder");
+                return Err(AppError::InvalidInput(format!(
+                    "Cut artifact {} is already cataloged under {owner}; export it to that catalog folder to update it",
+                    artifact.id
+                )));
+            }
         }
-        write_export_model_json(&dest_dir, &dir_stem)?;
     }
 
-    let release_dir =
-        crate::catalog::layout::release_dir(root_path, PLINTH_DESIGNER, group_name, Some(&date));
-    Ok(release_dir.to_string_lossy().into_owned())
-}
-
-/// The per-cut model folder for `source`, disambiguated against a stem
-/// collision with an UNRELATED cut (see export_cuts's doc comment for why
-/// that's a real scenario, not a hypothetical one). A folder is reused
-/// only when it already holds a model file byte-identical to `source` —
-/// the genuine re-export/versioning case (`export_suffixes_instead_of_
-/// overwriting_on_a_second_export`). Anything else occupying the stem is a
-/// different base and gets pushed to "{stem} 2", "{stem} 3", ... until a
-/// free or matching folder is found — mirroring normalize::numbered_name's
-/// pattern, but at the folder tier instead of the file tier.
-fn cut_dest_dir(root_path: &Path, group_name: &str, date: &str, stem: &str, source: &Path) -> PathBuf {
-    let mut candidate_stem = stem.to_string();
-    for n in 2.. {
-        let dir = crate::catalog::layout::model_dir(
-            root_path,
-            PLINTH_DESIGNER,
-            Some(group_name),
-            Some(date),
-            &candidate_stem,
-        );
-        if !dir.is_dir() || dir_holds_the_same_cut(&dir, source) {
-            return dir;
-        }
-        candidate_stem = format!("{stem} {n}");
-    }
-    unreachable!("ran out of integers before a landing spot")
-}
-
-/// Whether `dir` already contains a model file with the exact bytes of
-/// `source` — the signal that this folder is a re-export of the SAME cut
-/// rather than a different one that happens to share a stem.
-fn dir_holds_the_same_cut(dir: &Path, source: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
+    let repaired = repair_plinth_base_exports_in_root(root_path)?;
+    let release_date = format!("{:04}-{:02}", year_month.0, year_month.1);
+    let release_dir = crate::catalog::layout::release_dir(
+        root_path,
+        PLINTH_DESIGNER,
+        collection,
+        Some(&release_date),
+    );
+    std::fs::create_dir_all(&release_dir)?;
+    let mut used_names = all_plinth_model_names(&catalog_roots);
+    let mut summary = CutCatalogExportSummary {
+        release_dir: release_dir.to_string_lossy().into_owned(),
+        repaired: repaired.repaired,
+        warnings: repaired.warnings,
+        ..Default::default()
     };
-    entries.flatten().any(|entry| {
-        let path = entry.path();
-        path.is_file()
-            && path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("stl"))
-            && crate::catalog::normalize::same_content(&path, source)
-    })
-}
 
-/// Write a minimal `model.json` naming PLINTH_DESIGNER into a per-cut model
-/// folder, matching catalog::scanner::ModelJson's shape (`name` is its only
-/// required field). Never overwrites an existing sidecar: a re-export into
-/// the same folder (`file::utils::unique_path`'s -N suffix case, above) adds
-/// a second STL beside the first, but the folder's designer/name were
-/// already settled by the first export — and the user may have hand-edited
-/// that sidecar since, which a blind rewrite here would silently discard.
-fn write_export_model_json(dest_dir: &Path, stem: &str) -> Result<(), AppError> {
-    let sidecar_path = dest_dir.join("model.json");
-    if sidecar_path.exists() {
-        return Ok(());
+    for artifact in artifacts {
+        let existing = find_artifact_dir(&catalog_roots, &artifact.id);
+        let existing_value = existing
+            .as_ref()
+            .and_then(|dir| sidecar_value(&dir.join("model.json")).ok())
+            .filter(serde_json::Value::is_object);
+        let model_name = existing_value
+            .as_ref()
+            .and_then(|value| value.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .map(String::from)
+            .unwrap_or_else(|| {
+                next_artifact_name(collection, &artifact.cutter, artifact.mode, &mut used_names)
+            });
+        let effective_collection = existing_value
+            .as_ref()
+            .and_then(|value| value.get("release_name"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(collection)
+            .to_string();
+        let effective_release_date = existing_value
+            .as_ref()
+            .and_then(|value| value.get("release_date"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&release_date)
+            .to_string();
+        if let Some(existing_dir) = &existing {
+            if existing_dir.parent() != Some(release_dir.as_path()) {
+                summary.warnings.push(format!(
+                    "{} was already cataloged in {}; its stable identity was updated there instead of duplicated",
+                    model_name,
+                    existing_dir.display()
+                ));
+            }
+        }
+        let model_dir = existing.unwrap_or_else(|| {
+            crate::catalog::layout::model_dir(
+                root_path,
+                PLINTH_DESIGNER,
+                Some(collection),
+                Some(&release_date),
+                &model_name,
+            )
+        });
+        let was_existing = model_dir.is_dir();
+        std::fs::create_dir_all(&model_dir)?;
+        let file_stem = crate::catalog::layout::sanitize_segment(&model_name);
+        let dest_stl = if was_existing {
+            std::fs::read_dir(&model_dir)
+                .ok()
+                .and_then(|entries| {
+                    entries.flatten().map(|entry| entry.path()).find(|path| {
+                        path.is_file()
+                            && path
+                                .extension()
+                                .is_some_and(|extension| extension.eq_ignore_ascii_case("stl"))
+                    })
+                })
+                .unwrap_or_else(|| model_dir.join(format!("{file_stem}.stl")))
+        } else {
+            model_dir.join(format!("{file_stem}.stl"))
+        };
+        let changed = copy_artifact_file(Path::new(&artifact.source_path), &dest_stl)?;
+        let source_glb = Path::new(&artifact.source_path).with_extension("glb");
+        if source_glb.is_file() {
+            copy_artifact_file(&source_glb, &dest_stl.with_extension("glb"))?;
+        }
+        let sidecar_path = model_dir.join("model.json");
+        let existing_sidecar = sidecar_value(&sidecar_path).ok();
+        write_sidecar_value(
+            &sidecar_path,
+            &artifact_sidecar(
+                artifact,
+                &model_name,
+                &effective_collection,
+                &effective_release_date,
+                existing_sidecar.or(existing_value),
+            ),
+        )?;
+        if !was_existing {
+            summary.added += 1;
+        } else if changed {
+            summary.updated += 1;
+        } else {
+            summary.unchanged += 1;
+        }
     }
-    let sidecar = serde_json::json!({
-        "name": stem,
-        "designer": PLINTH_DESIGNER,
-    });
-    let contents = serde_json::to_string_pretty(&sidecar)
-        .map_err(|e| AppError::ConfigError(format!("Failed to encode model.json: {}", e)))?;
-    std::fs::write(&sidecar_path, contents).map_err(|e| {
-        AppError::IoError(format!(
-            "Failed to write {}: {}",
-            sidecar_path.display(),
-            e
-        ))
-    })
+    Ok(summary)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn export_cuts_to_catalog(
     app_handle: AppHandle,
-    paths: Vec<String>,
+    artifacts: Vec<CutCatalogArtifact>,
     root: String,
-    group_name: String,
-) -> Result<String, AppError> {
+    collection: String,
+) -> Result<CutCatalogExportSummary, AppError> {
     let settings = crate::settings::get_settings(app_handle.clone())
         .await
         .map_err(AppError::ConfigError)?;
     let catalog_roots = settings.catalog_roots.unwrap_or_default();
     let year_month = current_year_month_utc();
     tauri::async_runtime::spawn_blocking(move || {
-        export_cuts(&paths, &root, &group_name, &catalog_roots, year_month)
+        export_cut_artifacts(&artifacts, &root, &collection, &catalog_roots, year_month)
     })
     .await
     .map_err(|e| AppError::IoError(format!("Export task panicked: {}", e)))?
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn repair_plinth_base_exports(
+    app_handle: AppHandle,
+) -> Result<PlinthRepairSummary, AppError> {
+    let settings = crate::settings::get_settings(app_handle)
+        .await
+        .map_err(AppError::ConfigError)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut total = PlinthRepairSummary::default();
+        let mut used_names = HashSet::new();
+        for root in settings.catalog_roots.unwrap_or_default() {
+            match repair_plinth_base_exports_with_names(Path::new(&root), &mut used_names) {
+                Ok(summary) => {
+                    total.repaired += summary.repaired;
+                    total.unchanged += summary.unchanged;
+                    total.warnings.extend(summary.warnings);
+                }
+                Err(error) => total.warnings.push(error.to_string()),
+            }
+        }
+        Ok(total)
+    })
+    .await
+    .map_err(|e| AppError::IoError(format!("Base export repair task panicked: {e}")))?
 }
 
 #[cfg(test)]
@@ -843,7 +1270,10 @@ mod tests {
     #[test]
     fn rejects_placement_names_that_escape_out_dir() {
         for bad in ["../evil", "a/b", "a\\b", "C:evil", "/etc/passwd", "..", "."] {
-            let placements = vec![placement(Some(bad), CutterKind::Circle { diameter_mm: 32.0 })];
+            let placements = vec![placement(
+                Some(bad),
+                CutterKind::Circle { diameter_mm: 32.0 },
+            )];
             let err = validate_placements(&placements, &PlinthParams::default())
                 .expect_err(&format!("'{bad}' must be rejected as a placement name"));
             assert!(
@@ -855,7 +1285,10 @@ mod tests {
 
     #[test]
     fn accepts_an_ordinary_placement_name() {
-        let placements = vec![placement(Some("round32"), CutterKind::Circle { diameter_mm: 32.0 })];
+        let placements = vec![placement(
+            Some("round32"),
+            CutterKind::Circle { diameter_mm: 32.0 },
+        )];
         assert!(validate_placements(&placements, &PlinthParams::default()).is_ok());
     }
 
@@ -916,6 +1349,49 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
+    /// Compatibility harness for the historical export tests below. It
+    /// deliberately routes through the structured production exporter;
+    /// content-derived UUIDs make a byte-identical re-export the same
+    /// artifact while different geometry remains a distinct artifact.
+    fn export_cuts(
+        paths: &[String],
+        root: &str,
+        collection: &str,
+        catalog_roots: &[String],
+        year_month: (i64, u32),
+    ) -> Result<String, AppError> {
+        let artifacts = paths
+            .iter()
+            .map(|path| {
+                let bytes = std::fs::read(path).unwrap_or_default();
+                let stem = Path::new(path)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("cut");
+                let mut identity = stem.as_bytes().to_vec();
+                identity.extend_from_slice(&bytes);
+                let hash = blake3::hash(&identity);
+                let mut id = [0_u8; 16];
+                id.copy_from_slice(&hash.as_bytes()[..16]);
+                CutCatalogArtifact {
+                    id: Uuid::from_bytes(id).to_string(),
+                    source_path: path.clone(),
+                    cutter: if stem.starts_with("square25") {
+                        CutterKind::Rect {
+                            width_mm: 25.0,
+                            depth_mm: 25.0,
+                        }
+                    } else {
+                        CutterKind::Circle { diameter_mm: 32.0 }
+                    },
+                    mode: CutCatalogMode::Base,
+                }
+            })
+            .collect::<Vec<_>>();
+        export_cut_artifacts(&artifacts, root, collection, catalog_roots, year_month)
+            .map(|summary| summary.release_dir)
+    }
+
     /// Pins the folder shape this module deliberately chose: three tiers
     /// (Designer/Release/Model) so the release-date segment never has to
     /// double as the model's name segment — see export_cuts's doc comment.
@@ -938,15 +1414,17 @@ mod tests {
 
         assert_eq!(
             Path::new(&dest),
-            root.path().join("Plinth Bases").join("2026-07 Test Regiment")
+            root.path()
+                .join("Plinth Bases")
+                .join("2026-07 Test Regiment")
         );
         assert!(root
             .path()
-            .join("Plinth Bases/2026-07 Test Regiment/round32/round32.stl")
+            .join("Plinth Bases/2026-07 Test Regiment/Test Regiment — 32 mm Round — 01/Test Regiment — 32 mm Round — 01.stl")
             .is_file());
         assert!(root
             .path()
-            .join("Plinth Bases/2026-07 Test Regiment/square25/square25.stl")
+            .join("Plinth Bases/2026-07 Test Regiment/Test Regiment — 25 mm Square — 01/Test Regiment — 25 mm Square — 01.stl")
             .is_file());
     }
 
@@ -966,11 +1444,22 @@ mod tests {
         std::fs::write(src.path().join("round32.glb"), glb_contents).unwrap();
         let roots = vec![root.path().to_string_lossy().into_owned()];
 
-        export_cuts(&[stl], &root.path().to_string_lossy(), "Group", &roots, (2026, 7))
-            .expect("export should succeed");
+        export_cuts(
+            &[stl],
+            &root.path().to_string_lossy(),
+            "Group",
+            &roots,
+            (2026, 7),
+        )
+        .expect("export should succeed");
 
-        let dest_glb = root.path().join("Plinth Bases/2026-07 Group/round32/round32.glb");
-        assert!(dest_glb.is_file(), "expected the .glb sidecar to be copied alongside the STL");
+        let dest_glb = root.path().join(
+            "Plinth Bases/2026-07 Group/Group — 32 mm Round — 01/Group — 32 mm Round — 01.glb",
+        );
+        assert!(
+            dest_glb.is_file(),
+            "expected the .glb sidecar to be copied alongside the STL"
+        );
         assert_eq!(
             std::fs::read(&dest_glb).unwrap(),
             glb_contents,
@@ -987,40 +1476,68 @@ mod tests {
         let stl = write_stub_stl(src.path(), "round32.stl");
         let roots = vec![root.path().to_string_lossy().into_owned()];
 
-        export_cuts(&[stl], &root.path().to_string_lossy(), "Group", &roots, (2026, 7))
-            .expect("export should succeed");
+        export_cuts(
+            &[stl],
+            &root.path().to_string_lossy(),
+            "Group",
+            &roots,
+            (2026, 7),
+        )
+        .expect("export should succeed");
 
-        let dest_glb = root.path().join("Plinth Bases/2026-07 Group/round32/round32.glb");
-        assert!(!dest_glb.is_file(), "no sidecar existed on disk, so none should have been copied");
+        let dest_glb = root.path().join(
+            "Plinth Bases/2026-07 Group/Group — 32 mm Round — 01/Group — 32 mm Round — 01.glb",
+        );
+        assert!(
+            !dest_glb.is_file(),
+            "no sidecar existed on disk, so none should have been copied"
+        );
     }
 
-    /// The sidecar's destination name mirrors whatever unique_path suffix
-    /// the STL itself got on a re-export — same collision handling, same
-    /// stem, so a re-exported glb-mode cut's twin lands beside the
-    /// -N-suffixed STL it belongs to, not the first export's.
+    /// Re-exporting the same UUID updates the one GLB twin in place instead
+    /// of growing filename-suffixed duplicate parts.
     #[test]
-    fn export_glb_sidecar_mirrors_the_stl_suffix_on_a_second_export() {
+    fn reexport_updates_one_glb_twin_in_place() {
         let root = TempRoot::new("glb_sidecar_suffix");
         let roots = vec![root.path().to_string_lossy().into_owned()];
 
         let src1 = TempRoot::new("glb_sidecar_suffix_src1");
         let first = write_stub_stl(src1.path(), "round32.stl");
         std::fs::write(src1.path().join("round32.glb"), b"first-glb").unwrap();
-        export_cuts(&[first], &root.path().to_string_lossy(), "Group", &roots, (2026, 7)).unwrap();
+        export_cuts(
+            &[first],
+            &root.path().to_string_lossy(),
+            "Group",
+            &roots,
+            (2026, 7),
+        )
+        .unwrap();
 
         let src2 = TempRoot::new("glb_sidecar_suffix_src2");
         let second = write_stub_stl(src2.path(), "round32.stl");
         std::fs::write(src2.path().join("round32.glb"), b"second-glb").unwrap();
-        export_cuts(&[second], &root.path().to_string_lossy(), "Group", &roots, (2026, 7)).unwrap();
+        export_cuts(
+            &[second],
+            &root.path().to_string_lossy(),
+            "Group",
+            &roots,
+            (2026, 7),
+        )
+        .unwrap();
 
-        let model_dir = root.path().join("Plinth Bases/2026-07 Group/round32");
-        assert!(model_dir.join("round32.glb").is_file());
-        assert_eq!(std::fs::read(model_dir.join("round32.glb")).unwrap(), b"first-glb");
-        assert!(
-            model_dir.join("round32-1.glb").is_file(),
-            "the second export's sidecar must mirror its STL's -1 suffix"
+        let model_dir = root
+            .path()
+            .join("Plinth Bases/2026-07 Group/Group — 32 mm Round — 01");
+        let glb = model_dir.join("Group — 32 mm Round — 01.glb");
+        assert_eq!(std::fs::read(glb).unwrap(), b"second-glb");
+        assert_eq!(
+            std::fs::read_dir(model_dir)
+                .unwrap()
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "glb"))
+                .count(),
+            1
         );
-        assert_eq!(std::fs::read(model_dir.join("round32-1.glb")).unwrap(), b"second-glb");
     }
 
     /// The scanner's designer resolution is model.json designer ->
@@ -1047,12 +1564,15 @@ mod tests {
 
         let sidecar_path = root
             .path()
-            .join("Plinth Bases/2026-07 Test Regiment/round32/model.json");
+            .join("Plinth Bases/2026-07 Test Regiment/Test Regiment — 32 mm Round — 01/model.json");
         let contents = std::fs::read_to_string(&sidecar_path).expect("sidecar written");
         let parsed: ModelJson =
             serde_json::from_str(&contents).expect("sidecar must parse as the scanner's ModelJson");
-        assert_eq!(parsed.name, "round32");
+        assert_eq!(parsed.name, "Test Regiment — 32 mm Round — 01");
         assert_eq!(parsed.designer.as_deref(), Some(PLINTH_DESIGNER));
+        assert_eq!(parsed.release_name.as_deref(), Some("Test Regiment"));
+        assert_eq!(parsed.release_date.as_deref(), Some("2026-07"));
+        assert_eq!(parsed.base_round_mm.as_deref(), Some("32"));
     }
 
     #[test]
@@ -1076,13 +1596,63 @@ mod tests {
     }
 
     #[test]
+    fn reexport_rejects_updating_an_artifact_in_another_catalog_root() {
+        let first_root = TempRoot::new("cross_root_first");
+        let second_root = TempRoot::new("cross_root_second");
+        let src = TempRoot::new("cross_root_src");
+        let source_path = write_stub_stl(src.path(), "round32.stl");
+        let roots = vec![
+            first_root.path().to_string_lossy().into_owned(),
+            second_root.path().to_string_lossy().into_owned(),
+        ];
+        let artifact = CutCatalogArtifact {
+            id: Uuid::new_v4().to_string(),
+            source_path,
+            cutter: CutterKind::Circle { diameter_mm: 32.0 },
+            mode: CutCatalogMode::Base,
+        };
+
+        export_cut_artifacts(
+            std::slice::from_ref(&artifact),
+            &first_root.path().to_string_lossy(),
+            "Group",
+            &roots,
+            (2026, 7),
+        )
+        .expect("first export should succeed");
+
+        let error = export_cut_artifacts(
+            &[artifact],
+            &second_root.path().to_string_lossy(),
+            "Group",
+            &roots,
+            (2026, 7),
+        )
+        .expect_err("a different root cannot be updated behind its index");
+
+        assert!(error.to_string().contains("already cataloged under"));
+        assert!(second_root
+            .path()
+            .read_dir()
+            .expect("second root remains readable")
+            .next()
+            .is_none());
+    }
+
+    #[test]
     fn export_rejects_a_missing_source() {
         let root = TempRoot::new("missing_src");
         let roots = vec![root.path().to_string_lossy().into_owned()];
         let missing = root.path().join("nope.stl").to_string_lossy().into_owned();
 
-        let err = export_cuts(&[missing.clone()], &root.path().to_string_lossy(), "Group", &roots, (2026, 7))
-            .expect_err("a missing source must be rejected");
+        let err = export_cuts(
+            &[missing.clone()],
+            &root.path().to_string_lossy(),
+            "Group",
+            &roots,
+            (2026, 7),
+        )
+        .expect_err("a missing source must be rejected");
         assert!(
             err.to_string().contains(&missing),
             "error should name the missing source: {err}"
@@ -1110,11 +1680,10 @@ mod tests {
         );
     }
 
-    /// Re-exporting into the same group never overwrites the earlier copy —
-    /// the file gets a -N suffix instead (file::utils::unique_path, shared
-    /// with render/commands.rs), never silent data loss.
+    /// Re-exporting the same artifact is idempotent: it remains one model
+    /// with one STL rather than becoming a false multipart model.
     #[test]
-    fn export_suffixes_instead_of_overwriting_on_a_second_export() {
+    fn reexport_is_idempotent_instead_of_creating_another_part() {
         let root = TempRoot::new("collision");
         let src = TempRoot::new("collision_src");
         let roots = vec![root.path().to_string_lossy().into_owned()];
@@ -1133,30 +1702,31 @@ mod tests {
         // temp dir, so this isn't the "same path twice" guard above).
         let second_src = TempRoot::new("collision_src2");
         let second = write_stub_stl(second_src.path(), "round32.stl");
-        let dest2 = export_cuts(&[second], &root.path().to_string_lossy(), "Group", &roots, (2026, 7)).unwrap();
+        let dest2 = export_cuts(
+            &[second],
+            &root.path().to_string_lossy(),
+            "Group",
+            &roots,
+            (2026, 7),
+        )
+        .unwrap();
 
         assert_eq!(dest1, dest2, "same group -> same release dir");
-        let model_dir = Path::new(&dest1).join("round32");
-        assert!(model_dir.join("round32.stl").is_file());
-        assert!(
-            model_dir.join("round32-1.stl").is_file(),
-            "the second export must land beside the first, not over it"
+        let model_dir = Path::new(&dest1).join("Group — 32 mm Round — 01");
+        assert!(model_dir.join("Group — 32 mm Round — 01.stl").is_file());
+        assert_eq!(
+            std::fs::read_dir(model_dir)
+                .unwrap()
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "stl"))
+                .count(),
+            1,
+            "a byte-identical re-export must not create another part"
         );
     }
 
-    /// Two DIFFERENT bases that happen to land on the same default stem
-    /// ("round285" from a 28.5mm round cutter, cut in two separate job
-    /// runs — each run's own out_dir independently starts base_cut.py's
-    /// unique_out_path numbering back at the bare name) must NOT collapse
-    /// into one catalog model. Before the fix, export_cuts keyed the
-    /// per-cut folder on stem alone and reused it on any name collision,
-    /// and write_export_model_json's never-clobber guard then froze the
-    /// FIRST cut's sidecar over the folder — so the scanner read the
-    /// second (unrelated) cut as a second FILE of the first cut's model,
-    /// producing one card with the two bases as overlapping "parts"
-    /// instead of two cards. Distinguishing content (not the byte-for-byte
-    /// stub `export_suffixes_instead_of_overwriting_on_a_second_export`
-    /// uses) is what makes this a genuinely different base, not a re-export.
+    /// Two different UUIDs remain two models even when Blender happened to
+    /// give their scratch outputs the same stem in separate sessions.
     #[test]
     fn distinct_bases_sharing_a_default_stem_scan_as_separate_models() {
         let root = TempRoot::new("stem_collision");
@@ -1179,8 +1749,11 @@ mod tests {
         // "round285.stl" name in this run's own out_dir.
         let src2 = TempRoot::new("stem_collision_src2");
         let second = src2.path().join("round285.stl");
-        std::fs::write(&second, b"solid base two, totally different geometry\nendsolid base two\n")
-            .unwrap();
+        std::fs::write(
+            &second,
+            b"solid base two, totally different geometry\nendsolid base two\n",
+        )
+        .unwrap();
         export_cuts(
             &[second.to_string_lossy().into_owned()],
             &root.path().to_string_lossy(),
@@ -1212,9 +1785,8 @@ mod tests {
         }
     }
 
-    /// A second export into an already-sidecar'd folder must not clobber a
-    /// sidecar the user has since hand-edited — write_export_model_json
-    /// checks existence first, unconditionally, every time.
+    /// Generated metadata is merged into an existing sidecar rather than
+    /// replacing user-owned fields such as a curated display name.
     #[test]
     fn export_does_not_overwrite_an_existing_model_json_sidecar() {
         let root = TempRoot::new("sidecar_reexport");
@@ -1233,18 +1805,166 @@ mod tests {
 
         let sidecar_path = root
             .path()
-            .join("Plinth Bases/2026-07 Group/round32/model.json");
+            .join("Plinth Bases/2026-07 Group/Group — 32 mm Round — 01/model.json");
         // simulate a user hand-edit landing between the two exports
-        std::fs::write(&sidecar_path, r#"{"name":"Round 32 (renamed)"}"#).unwrap();
+        let id = sidecar_value(&sidecar_path).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        std::fs::write(
+            &sidecar_path,
+            serde_json::json!({
+                "id": id,
+                "name": "Round 32 (renamed)",
+                "notes": "hand curated",
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         let second_src = TempRoot::new("sidecar_reexport_src2");
         let second = write_stub_stl(second_src.path(), "round32.stl");
-        export_cuts(&[second], &root.path().to_string_lossy(), "Group", &roots, (2026, 7)).unwrap();
+        export_cuts(
+            &[second],
+            &root.path().to_string_lossy(),
+            "Group",
+            &roots,
+            (2026, 7),
+        )
+        .unwrap();
 
         let contents = std::fs::read_to_string(&sidecar_path).unwrap();
         assert!(
             contents.contains("renamed"),
             "re-export must not clobber the user's hand-edited sidecar: {contents}"
         );
+        assert!(contents.contains("hand curated"));
+    }
+
+    #[test]
+    fn repairs_legacy_plinth_sidecars_without_moving_files() {
+        let root = TempRoot::new("repair_legacy");
+        let model_dir = root
+            .path()
+            .join("Plinth Bases/2026-07 Ruined Chapel/round32-1");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(model_dir.join("round32-1.stl"), b"solid legacy").unwrap();
+        std::fs::write(
+            model_dir.join("model.json"),
+            r#"{"name":"round32-1","designer":"Plinth Bases","tags":["painted"]}"#,
+        )
+        .unwrap();
+        let duplicate_dir = root
+            .path()
+            .join("Plinth Bases/2026-07 Ruined Chapel/round32-2");
+        std::fs::create_dir_all(&duplicate_dir).unwrap();
+        std::fs::write(duplicate_dir.join("round32-2.stl"), b"solid other").unwrap();
+        std::fs::write(
+            duplicate_dir.join("model.json"),
+            r#"{"name":"round32-1","designer":"Plinth Bases"}"#,
+        )
+        .unwrap();
+
+        let summary = repair_plinth_base_exports_in_root(root.path()).unwrap();
+        assert_eq!(summary.repaired, 2);
+        assert!(summary.warnings.is_empty());
+        assert!(
+            model_dir.join("round32-1.stl").is_file(),
+            "repair never moves files"
+        );
+        let value = sidecar_value(&model_dir.join("model.json")).unwrap();
+        assert_eq!(value["name"], "Ruined Chapel — round32-1");
+        assert_eq!(value["release_name"], "Ruined Chapel");
+        assert_eq!(value["release_date"], "2026-07");
+        assert!(Uuid::parse_str(value["id"].as_str().unwrap()).is_ok());
+        assert!(value["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("painted")));
+        assert!(value["tags"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("generated")));
+        let duplicate = sidecar_value(&duplicate_dir.join("model.json")).unwrap();
+        assert_eq!(duplicate["name"], "Ruined Chapel — round32-1 — 02");
+
+        let second = repair_plinth_base_exports_in_root(root.path()).unwrap();
+        assert_eq!(second.repaired, 0);
+        assert_eq!(second.unchanged, 2);
+    }
+
+    #[test]
+    fn stable_uuid_updates_changed_geometry_without_creating_a_second_model() {
+        let root = TempRoot::new("stable_uuid_update");
+        let src = TempRoot::new("stable_uuid_update_src");
+        let path = src.path().join("blender-name-does-not-matter.stl");
+        std::fs::write(&path, b"solid first").unwrap();
+        let roots = vec![root.path().to_string_lossy().into_owned()];
+        let artifact = CutCatalogArtifact {
+            id: Uuid::new_v4().to_string(),
+            source_path: path.to_string_lossy().into_owned(),
+            cutter: CutterKind::Ellipse {
+                major_mm: 60.0,
+                minor_mm: 35.0,
+            },
+            mode: CutCatalogMode::Topper,
+        };
+
+        let first = export_cut_artifacts(
+            &[artifact.clone()],
+            &root.path().to_string_lossy(),
+            "Marsh Temple",
+            &roots,
+            (2026, 7),
+        )
+        .unwrap();
+        assert_eq!(first.added, 1);
+        std::fs::write(&path, b"solid revised").unwrap();
+        let second = export_cut_artifacts(
+            &[artifact],
+            &root.path().to_string_lossy(),
+            "Marsh Temple",
+            &roots,
+            (2026, 7),
+        )
+        .unwrap();
+        assert_eq!(second.updated, 1);
+
+        let release = root.path().join("Plinth Bases/2026-07 Marsh Temple");
+        let model_dirs = std::fs::read_dir(&release)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .collect::<Vec<_>>();
+        assert_eq!(model_dirs.len(), 1);
+        let model_dir = model_dirs[0].path();
+        assert!(model_dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("60×35 mm Oval Topper"));
+        let stls = std::fs::read_dir(model_dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "stl"))
+            .collect::<Vec<_>>();
+        assert_eq!(stls.len(), 1);
+        assert_eq!(std::fs::read(&stls[0]).unwrap(), b"solid revised");
+    }
+
+    #[test]
+    fn raw_output_folder_must_not_be_inside_a_catalog_root() {
+        let roots = vec!["C:\\Miniatures\\Catalog".to_string()];
+        assert!(output_is_inside_catalog(
+            "c:\\miniatures\\catalog\\raw-cuts",
+            &roots
+        ));
+        assert!(output_is_inside_catalog("C:\\Miniatures\\Catalog", &roots));
+        assert!(!output_is_inside_catalog(
+            "C:\\Miniatures\\Catalog Backup",
+            &roots
+        ));
+        assert!(!output_is_inside_catalog("C:\\Temp\\raw-cuts", &roots));
     }
 }

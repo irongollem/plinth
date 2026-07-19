@@ -1042,9 +1042,17 @@ async cancelBaseCut(jobId: string) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async exportCutsToCatalog(paths: string[], root: string, groupName: string) : Promise<Result<string, AppError>> {
+async exportCutsToCatalog(artifacts: CutCatalogArtifact[], root: string, collection: string) : Promise<Result<CutCatalogExportSummary, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("export_cuts_to_catalog", { paths, root, groupName }) };
+    return { status: "ok", data: await TAURI_INVOKE("export_cuts_to_catalog", { artifacts, root, collection }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async repairPlinthBaseExports() : Promise<Result<PlinthRepairSummary, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("repair_plinth_base_exports") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1518,6 +1526,14 @@ model_names: string[];
 detail: string | null }
 export type CompressionStatus = { Started: StartedStatus } | { Progress: ProgressStatus } | { Completed: CompletedStatus } | { Failed: FailedStatus } | { Cancelled: CancelledStatus }
 export type CompressionType = "SevenZip" | "Zip"
+/**
+ * A successful cut as it crosses from the transient Blender output area
+ * into the durable catalog. Identity and footprint travel explicitly — a
+ * filename collision suffix is storage trivia, never model metadata.
+ */
+export type CutCatalogArtifact = { id: string; source_path: string; cutter: CutterKind; mode: CutCatalogMode }
+export type CutCatalogExportSummary = { release_dir: string; added: number; updated: number; unchanged: number; repaired: number; warnings: string[] }
+export type CutCatalogMode = "base" | "topper"
 /**
  * A standard-library cutter (or a later user-defined one). Dimensions are
  * the NOMINAL (bottom-face, table-touching) footprint — the smaller cut
@@ -1996,6 +2012,7 @@ hollow: boolean; wall_mm: number; top_mm: number;
  * differs again, so this stays a user-visible, per-job knob.
  */
 magnet_clearance_mm: number }
+export type PlinthRepairSummary = { repaired: number; unchanged: number; warnings: string[] }
 export type ProgressStatus = { job_id: string; processed_files: number; total_files: number; processed_size_kb: number; total_size_kb: number; percent_size: number; percent_files: number; current_file: string }
 export type ProvisionCancelledStatus = { job_id: string }
 export type ProvisionCompletedStatus = { job_id: string; info: BlenderInfo }
