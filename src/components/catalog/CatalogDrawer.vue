@@ -16,11 +16,23 @@
     :style="{ width: `${drawerWidth}px` }"
     class="shrink-0 overflow-y-auto"
   >
-    <div
-      v-if="!selected"
-      class="h-40 flex items-center justify-center opacity-40"
-    >
-      <span class="loading loading-spinner loading-sm"></span>
+    <div v-if="!selected" class="h-40 flex items-center justify-center">
+      <div
+        v-if="drawerLoadError"
+        class="flex flex-col items-center gap-2 px-5 text-center"
+      >
+        <span class="font-mono text-[10.5px] text-base-content/50">
+          {{ drawerLoadError }}
+        </span>
+        <button
+          type="button"
+          class="btn btn-xs"
+          @click="selectedGroup && selectGroup(selectedGroup)"
+        >
+          Try again
+        </button>
+      </div>
+      <span v-else class="loading loading-spinner loading-sm opacity-40"></span>
     </div>
     <template v-else>
       <!-- Picture area: preview image, or the 3D viewport inline when
@@ -125,58 +137,6 @@
         </button>
       </div>
 
-      <!-- Compressed-at-rest state: a running job, the packed banner,
-           or the offer to pack -->
-      <div
-        v-if="isPacking"
-        class="mt-2 border border-base-content/15 rounded-md px-2 py-1.5 flex items-center gap-2 font-mono text-[10.5px]"
-      >
-        <span class="loading loading-spinner loading-xs shrink-0"></span>
-        <span class="flex-1 truncate">
-          {{ packJobLabel }}
-          <template v-if="packProgress">
-            · {{ packProgress.model_index }}/{{ packProgress.total_models }} ·
-            {{ packProgress.phase }} · {{ packProgress.percent }}%
-          </template>
-        </span>
-        <button type="button" class="btn btn-xs btn-ghost" @click="cancelPack">
-          cancel
-        </button>
-      </div>
-      <div
-        v-else-if="selected.packed || packedDirs.length"
-        class="mt-2 border border-primary/30 bg-primary/5 rounded-md px-2 py-1.5 flex items-center gap-2 font-mono text-[10.5px]"
-      >
-        <span title="Compressed at rest">📦</span>
-        <span class="flex-1 truncate">
-          {{
-            packableDirs.length
-              ? `${packedDirs.length} of ${packedDirs.length + packableDirs.length} folders packed`
-              : "Packed — files live in a compressed archive"
-          }}
-        </span>
-        <button
-          v-if="packableDirs.length"
-          type="button"
-          class="btn btn-xs btn-ghost"
-          title="Compress the remaining folders too"
-          @click="packSelectedGroup"
-        >
-          pack rest
-        </button>
-        <button type="button" class="btn btn-xs" @click="unpackSelectedGroup">
-          Unpack
-        </button>
-      </div>
-      <button
-        v-else-if="packableDirs.length"
-        type="button"
-        class="mt-2 w-full font-mono text-[10.5px] text-base-content/40 hover:text-base-content/70 border border-dashed border-base-content/15 rounded-md py-1 cursor-pointer"
-        title="Compress this model's files into pack archives to save disk space — it stays in the catalog and unpacks on demand"
-        @click="packSelectedGroup"
-      >
-        📦 pack — save disk space
-      </button>
       <div class="py-3.5 flex flex-col gap-2.5">
         <div>
           <!-- Group title: the logical model; rename applies to the whole
@@ -184,9 +144,15 @@
           <div class="flex items-start gap-1.5">
             <h2
               v-if="!renamingGroup"
-              class="font-bold text-[16px] leading-tight flex-1"
+              class="font-bold text-[16px] leading-tight flex-1 flex items-center gap-1.5"
             >
               {{ selectedGroup?.group_name ?? selected.name }}
+              <span
+                v-if="selectedGroup?.nsfw"
+                class="badge badge-xs badge-error badge-outline font-mono"
+                title="Hidden from browsing unless Show 18+ is on in Settings"
+                >18+</span
+              >
             </h2>
             <form
               v-else
@@ -211,10 +177,7 @@
               ✎
             </button>
           </div>
-          <div
-            v-if="!renamingGroup && groupSources.length > 1"
-            class="flex flex-wrap gap-x-3 mt-0.5"
-          >
+          <div v-if="!renamingGroup && groupSources.length > 1" class="mt-0.5">
             <button
               type="button"
               class="font-mono text-[10px] text-primary/70 hover:text-primary cursor-pointer"
@@ -223,44 +186,16 @@
             >
               combined from {{ groupSources.length }} models · split
             </button>
-            <button
-              v-if="
-                selected.source_group.toLowerCase() !==
-                selectedGroup?.group_name.toLowerCase()
-              "
-              type="button"
-              class="font-mono text-[10px] text-error/70 hover:text-error cursor-pointer"
-              :title="`Pull “${selected.source_group}” back out of this model — the rest stays combined`"
-              @click="detachSelectedSource"
-            >
-              remove “{{ selected.source_group }}”
-            </button>
           </div>
           <p
-            v-if="selected.designer || selected.release_name"
+            v-if="selectedGroup?.designer || selectedGroup?.release_name"
             class="font-mono text-[11px] text-base-content/50 mt-0.5"
           >
             {{
-              [selected.designer, selected.release_name]
+              [selectedGroup?.designer, selectedGroup?.release_name]
                 .filter(Boolean)
                 .join(" · ")
             }}
-          </p>
-          <button
-            type="button"
-            class="block max-w-full font-mono text-[10px] text-base-content/40 truncate mt-0.5 cursor-pointer hover:text-base-content/70"
-            :title="`${selected.dir_path} — click to reveal`"
-            @click="reveal(selected.dir_path)"
-          >
-            {{ displayPath }}
-          </button>
-          <!-- Machine facts from the render pipeline: true printed size -->
-          <p
-            v-if="measuredLabel"
-            class="font-mono text-[10px] text-base-content/40 mt-0.5"
-            title="Measured from the geometry when this model was rendered"
-          >
-            📐 {{ measuredLabel }}
           </p>
         </div>
 
@@ -317,6 +252,49 @@
           >
             {{ member.pose || member.name }}
           </button>
+        </div>
+
+        <!-- Everything here belongs to the selected physical build, so it
+             sits after the build navigation. The model identity above stays
+             fixed while Supported/Unsupported changes this small region. -->
+        <div class="border-l-2 border-base-content/10 pl-2 min-w-0">
+          <div class="flex items-center gap-1.5 min-w-0">
+            <span
+              class="font-mono font-semibold text-[9px] tracking-[0.1em] text-base-content/30 shrink-0"
+            >
+              SELECTED BUILD
+            </span>
+            <span
+              v-if="measuredLabel"
+              class="font-mono text-[9.5px] text-base-content/40 truncate"
+              title="Measured from the geometry when this build was rendered"
+            >
+              · {{ measuredLabel }}
+            </span>
+          </div>
+          <div class="flex items-center gap-x-2 min-w-0">
+            <button
+              type="button"
+              class="min-w-0 truncate font-mono text-[10px] text-base-content/45 cursor-pointer hover:text-base-content/75 text-left"
+              :title="`${selected.dir_path} — click to reveal`"
+              @click="reveal(selected.dir_path)"
+            >
+              {{ displayPath }}
+            </button>
+            <button
+              v-if="
+                groupSources.length > 1 &&
+                selected.source_group.toLowerCase() !==
+                  selectedGroup?.group_name.toLowerCase()
+              "
+              type="button"
+              class="font-mono text-[9.5px] text-error/60 hover:text-error cursor-pointer shrink-0"
+              :title="`Pull “${selected.source_group}” back out of this model — the rest stays combined`"
+              @click="detachSelectedSource"
+            >
+              detach source
+            </button>
+          </div>
         </div>
 
         <div class="flex flex-wrap gap-1.5">
@@ -491,72 +469,313 @@
           </button>
         </div>
 
-        <button
-          v-if="structureClean === true"
-          type="button"
-          class="font-semibold text-[11px] tracking-[0.03em] text-center rounded-md py-2 text-success flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-60"
-          title="Folders already match the canonical layout — click to re-write this model's metadata file from the catalog (repairs a stale/incomplete model.json)"
-          :disabled="refreshingSidecars"
-          @click="refreshSidecars([selectedGroup?.group_name ?? ''])"
-        >
-          {{
-            refreshingSidecars
-              ? "refreshing metadata…"
-              : "✓ folder structure OK"
-          }}
-        </button>
-        <button
-          v-else
-          type="button"
-          class="font-semibold text-[11px] tracking-[0.03em] text-center border border-dashed rounded-md py-2 cursor-pointer disabled:opacity-40 disabled:cursor-default"
+        <!-- Folder layout and compression are two states in the same library
+             lifecycle. Keeping them together also makes the required
+             unpack → clean up → repack sequence visible. -->
+        <div
+          class="rounded-lg border"
           :class="
-            structureClean === false
-              ? 'border-warning/40 text-warning'
-              : 'border-base-content/15 text-base-content/40'
+            metaDirty || structureClean === false
+              ? 'border-warning/30 bg-warning/5'
+              : 'border-base-content/10 bg-base-200/60'
           "
-          :disabled="structureClean === null"
-          title="Restructure only this model's folders to the canonical layout — you review the moves first"
-          @click="openNormalize(selectedGroup?.group_name)"
         >
-          {{
-            structureClean === null
-              ? "checking folder structure…"
-              : "⚠ fix folder structure…"
-          }}
-        </button>
+          <div class="flex items-center gap-2.5 px-2.5 py-2">
+            <span
+              class="size-6 shrink-0 rounded-full flex items-center justify-center text-[11px]"
+              :class="
+                structureClean === true && !metaDirty
+                  ? 'bg-success/12 text-success'
+                  : metaDirty || structureClean === false
+                    ? 'bg-warning/15 text-warning'
+                    : 'bg-base-content/8 text-base-content/35'
+              "
+            >
+              <span
+                v-if="
+                  (!metaDirty && structureClean === null) || refreshingSidecars
+                "
+                class="loading loading-spinner loading-xs"
+              ></span>
+              <template v-else>{{
+                structureClean && !metaDirty ? "✓" : "!"
+              }}</template>
+            </span>
+            <div class="min-w-0 flex-1">
+              <div
+                class="font-mono font-semibold text-[9px] tracking-[0.11em] text-base-content/35"
+              >
+                FOLDER STRUCTURE
+              </div>
+              <div
+                class="text-[11px] leading-tight"
+                :class="
+                  metaDirty || structureClean === false
+                    ? 'text-warning'
+                    : 'text-base-content/65'
+                "
+              >
+                {{
+                  refreshingSidecars
+                    ? "Updating metadata…"
+                    : metaDirty
+                      ? "Edits will change the target path"
+                      : structureClean === null
+                        ? "Checking folder layout…"
+                        : structureClean
+                          ? "Matches model metadata"
+                          : "Doesn’t match model metadata"
+                }}
+              </div>
+            </div>
+            <button
+              v-if="metaDirty || structureClean === false"
+              type="button"
+              class="btn btn-xs btn-ghost px-2 text-[10px] text-warning"
+              :disabled="isPacking"
+              :title="
+                packedDirs.length
+                  ? 'Packed folders must be unpacked before their structure can change'
+                  : 'Save these details, then review the file moves needed to match them'
+              "
+              @click="
+                packedDirs.length
+                  ? unpackSelectedGroup()
+                  : cleanUpSelectedGroup()
+              "
+            >
+              {{ packedDirs.length ? "Unpack first" : "Clean up…" }}
+            </button>
+          </div>
 
-        <button
-          type="button"
-          class="font-semibold text-[11px] tracking-[0.03em] text-center border border-dashed rounded-md py-2 cursor-pointer"
-          :class="
-            releasesStore.modelCount
-              ? 'border-base-content/25 text-primary'
-              : 'border-base-content/15 text-base-content/40'
-          "
-          @click="addToDraftRelease"
-        >
-          + Add to release
-        </button>
+          <div class="mx-2.5 h-px bg-base-content/8"></div>
 
-        <button
-          v-if="hasAutoSplit"
-          type="button"
-          class="font-semibold text-[11px] tracking-[0.03em] text-center border border-dashed border-base-content/15 text-base-content/40 hover:border-error/40 hover:text-error rounded-md py-2 cursor-pointer disabled:opacity-40 disabled:cursor-default"
-          title="The auto-detected variant/pose split got it wrong — clear every variant and pose tag on this model and dump all files into one box to re-file by hand. Nothing on disk moves."
-          :disabled="isFlattening"
-          @click="flattenGroup"
-        >
-          {{ isFlattening ? "resetting…" : "⇋ dump into one box" }}
-        </button>
+          <div class="flex items-center gap-2.5 px-2.5 py-2">
+            <span
+              class="size-6 shrink-0 rounded-full flex items-center justify-center font-mono text-[12px] bg-base-content/8 text-base-content/45"
+            >
+              <span
+                v-if="isPacking"
+                class="loading loading-spinner loading-xs"
+              ></span>
+              <template v-else>{{ packedDirs.length ? "▣" : "□" }}</template>
+            </span>
+            <div class="min-w-0 flex-1">
+              <div
+                class="font-mono font-semibold text-[9px] tracking-[0.11em] text-base-content/35"
+              >
+                STORAGE
+              </div>
+              <div
+                class="font-mono text-[10.5px] leading-tight text-base-content/60 truncate"
+              >
+                <template v-if="isPacking">
+                  {{ packJobLabel }}
+                  <template v-if="packProgress">
+                    · {{ packProgress.percent }}%
+                  </template>
+                </template>
+                <template v-else-if="packedDirs.length && packableDirs.length">
+                  {{ packedDirs.length }} of
+                  {{ packedDirs.length + packableDirs.length }} folders
+                  compressed
+                </template>
+                <template v-else-if="packedDirs.length">
+                  Compressed at rest
+                </template>
+                <template v-else-if="packableDirs.length">
+                  Loose files · ready to compress
+                </template>
+                <template v-else>No packable files</template>
+              </div>
+            </div>
+            <button
+              v-if="isPacking"
+              type="button"
+              class="btn btn-xs btn-ghost px-2 text-[10px]"
+              @click="cancelPack"
+            >
+              Cancel
+            </button>
+            <template v-else>
+              <button
+                v-if="packableDirs.length"
+                type="button"
+                class="btn btn-xs btn-ghost px-2 text-[10px]"
+                :title="
+                  packedDirs.length
+                    ? 'Compress the remaining folders'
+                    : 'Compress this model to save disk space'
+                "
+                @click="packSelectedGroup"
+              >
+                {{ packedDirs.length ? "Pack rest" : "Pack" }}
+              </button>
+              <button
+                v-if="packedDirs.length"
+                type="button"
+                class="btn btn-xs btn-ghost px-2 text-[10px]"
+                @click="unpackSelectedGroup"
+              >
+                Unpack
+              </button>
+            </template>
+          </div>
+        </div>
 
-        <button
-          type="button"
-          class="font-semibold text-[11px] tracking-[0.03em] text-center border border-dashed border-base-content/15 text-base-content/40 hover:border-error/40 hover:text-error rounded-md py-2 cursor-pointer"
-          title="Delete this model — from the catalog, and by default its folders go to the system trash. You confirm first."
-          @click="openDeleteModal([selectedGroup?.group_name ?? selected.name])"
-        >
-          🗑 delete model…
-        </button>
+        <!-- A compact action rail, not another full-width panel. The wrapper
+             around the disabled release action keeps its cursor and tooltip:
+             disabled buttons themselves do not reliably receive either. -->
+        <div class="flex items-center gap-1 min-h-7">
+          <span
+            class="font-mono font-semibold text-[9px] tracking-[0.11em] text-base-content/30 mr-auto"
+          >
+            MODEL ACTIONS
+          </span>
+          <span
+            :class="releasesStore.releaseExists ? '' : 'cursor-not-allowed'"
+            :title="
+              releasesStore.releaseExists
+                ? 'Add every available variant of this model to the active release'
+                : 'Start or resume a release before adding models'
+            "
+          >
+            <button
+              type="button"
+              class="btn btn-xs btn-ghost min-h-7 h-7 gap-1 px-2 font-mono text-[10px] font-medium text-primary disabled:pointer-events-none disabled:opacity-30"
+              :disabled="!releasesStore.releaseExists"
+              @click="addToDraftRelease"
+            >
+              <span class="text-sm leading-none">＋</span>
+              Release
+              <span
+                v-if="releasesStore.modelCount"
+                class="badge badge-xs badge-primary badge-outline"
+              >
+                {{ releasesStore.modelCount }}
+              </span>
+            </button>
+          </span>
+
+          <details class="dropdown dropdown-end shrink-0">
+            <summary
+              class="btn btn-xs btn-ghost min-h-7 h-7 gap-1 px-2 font-mono text-[10px] font-medium text-base-content/50 hover:text-base-content list-none [&::-webkit-details-marker]:hidden"
+              title="More model actions"
+            >
+              More
+              <span class="text-[8px] opacity-60">▾</span>
+            </summary>
+            <ul
+              class="dropdown-content menu z-30 mt-1 w-64 rounded-lg border border-base-content/15 bg-base-100 p-1.5 shadow-xl"
+            >
+              <li>
+                <button
+                  type="button"
+                  class="items-start gap-2 py-2 disabled:opacity-40"
+                  :disabled="refreshingSidecars"
+                  @click="
+                    closeActionMenu($event);
+                    refreshSidecars([selectedGroup?.group_name ?? '']);
+                  "
+                >
+                  <span class="mt-0.5 text-base-content/40">↻</span>
+                  <span class="flex flex-col items-start">
+                    <span class="text-[11px] font-semibold">
+                      {{
+                        refreshingSidecars
+                          ? "Rebuilding metadata…"
+                          : "Rebuild metadata file"
+                      }}
+                    </span>
+                    <span
+                      class="text-[9.5px] leading-tight font-normal text-base-content/45"
+                    >
+                      Write catalog details back to model.json
+                    </span>
+                  </span>
+                </button>
+              </li>
+              <li v-if="hasAutoSplit">
+                <button
+                  type="button"
+                  class="items-start gap-2 py-2 disabled:opacity-40"
+                  :disabled="isFlattening"
+                  @click="
+                    closeActionMenu($event);
+                    flattenGroup();
+                  "
+                >
+                  <span class="mt-0.5 text-base-content/40">↹</span>
+                  <span class="flex flex-col items-start">
+                    <span class="text-[11px] font-semibold">
+                      {{ isFlattening ? "Resetting filing…" : "Reset filing" }}
+                    </span>
+                    <span
+                      class="text-[9.5px] leading-tight font-normal text-base-content/45"
+                    >
+                      Clear detected variants and poses
+                    </span>
+                  </span>
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
+                  class="items-start gap-2 py-2"
+                  @click="
+                    closeActionMenu($event);
+                    toggleGroupNsfw([
+                      selectedGroup?.group_name ?? selected.name,
+                    ]);
+                  "
+                >
+                  <span class="mt-0.5">18+</span>
+                  <span class="flex flex-col items-start">
+                    <span class="text-[11px] font-semibold">
+                      {{
+                        selectedGroup?.nsfw
+                          ? "Remove mature label"
+                          : "Mark as mature"
+                      }}
+                    </span>
+                    <span
+                      class="text-[9.5px] leading-tight font-normal text-base-content/45"
+                    >
+                      {{
+                        selectedGroup?.nsfw
+                          ? "Show while the content filter is locked"
+                          : "Hide while the content filter is locked"
+                      }}
+                    </span>
+                  </span>
+                </button>
+              </li>
+              <li class="my-1 h-px bg-base-content/10"></li>
+              <li>
+                <button
+                  type="button"
+                  class="items-start gap-2 py-2 text-error hover:bg-error/10!"
+                  @click="
+                    closeActionMenu($event);
+                    openDeleteModal([
+                      selectedGroup?.group_name ?? selected.name,
+                    ]);
+                  "
+                >
+                  <span class="mt-0.5">⌫</span>
+                  <span class="flex flex-col items-start">
+                    <span class="text-[11px] font-semibold">Delete model…</span>
+                    <span
+                      class="text-[9.5px] leading-tight font-normal opacity-60"
+                    >
+                      Confirmation required · files go to Trash
+                    </span>
+                  </span>
+                </button>
+              </li>
+            </ul>
+          </details>
+        </div>
 
         <div>
           <div
@@ -683,6 +902,7 @@ const store = useCatalogStore();
 const releasesStore = useReleasesStore();
 const {
   selectedGroup,
+  drawerLoadError,
   drawerWidth,
   selected,
   show3d,
@@ -721,6 +941,7 @@ const {
 } = storeToRefs(store);
 const {
   startDrawerResize,
+  selectGroup,
   pickPreviewImage,
   useAsCardImage,
   printModel,
@@ -744,13 +965,22 @@ const {
   removeTag,
   saveMetadata,
   refreshSidecars,
-  openNormalize,
+  cleanUpSelectedGroup,
   addToDraftRelease,
   flattenGroup,
   openDeleteModal,
+  toggleGroupNsfw,
   selectMatchingFiles,
   assignChecked,
   clearChecked,
   toggleCheckedFile,
 } = store;
+
+/** Native details gives the action menu keyboard semantics without another
+ * overlay dependency; action buttons close it explicitly after selection. */
+const closeActionMenu = (event: MouseEvent) => {
+  (event.currentTarget as HTMLElement)
+    .closest("details")
+    ?.removeAttribute("open");
+};
 </script>

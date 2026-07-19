@@ -78,7 +78,7 @@
           v-if="!normalizePlanData.groups.length"
           class="py-6 text-center text-sm opacity-50"
         >
-          Everything already matches the canonical layout 🎉
+          Every folder already matches its model metadata 🎉
         </div>
 
         <ul v-else class="flex flex-col gap-1 max-h-80 overflow-y-auto pr-1">
@@ -196,7 +196,7 @@
             :disabled="!normalizeChecked.length"
             @click="applyNormalizePlan"
           >
-            Move {{ normalizeChecked.length }} model{{
+            Clean up {{ normalizeChecked.length }} model{{
               normalizeChecked.length === 1 ? "" : "s"
             }}
           </button>

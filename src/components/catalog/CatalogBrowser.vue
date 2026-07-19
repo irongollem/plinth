@@ -25,32 +25,28 @@
         <span class="w-15 text-right">SIZE</span>
       </div>
       <template v-for="section in sections" :key="section.key">
-        <div
+        <CatalogFacetHeader
           v-if="section.designer !== null"
-          class="flex items-baseline gap-2 pt-3 pb-1"
-        >
-          <span class="font-bold text-[13px]">{{ section.designer }}</span>
-          <span class="font-mono text-[10px] text-base-content/40">
-            {{ sectionModelCount(section) }} model{{
-              sectionModelCount(section) === 1 ? "" : "s"
-            }}
-          </span>
-        </div>
+          class="pt-3 pb-1"
+          kind="designer"
+          :label="section.designer"
+          :count="sectionModelCount(section)"
+          :editable="section.designerValue !== null"
+          :rename="(name) => renameDesignerFacet(section.designerValue!, name)"
+        />
         <template v-for="bucket in section.releases" :key="bucket.key">
-          <div
+          <CatalogFacetHeader
             v-if="bucket.label !== null"
-            class="flex items-baseline gap-2 py-1 pl-0.5"
-          >
-            <span
-              class="font-mono font-semibold text-[10px] tracking-widest uppercase text-base-content/50"
-              >{{ bucket.label }}</span
-            >
-            <span
-              v-if="bucket.date"
-              class="font-mono text-[9.5px] text-base-content/35"
-              >{{ bucket.date }}</span
-            >
-          </div>
+            class="py-1 pl-0.5"
+            kind="release"
+            :label="bucket.label"
+            :date="bucket.date"
+            :editable="section.designerValue !== null && bucket.value !== null"
+            :rename="
+              (name) =>
+                renameReleaseFacet(section.designerValue!, bucket.value!, name)
+            "
+          />
           <!-- div, not button: the row hosts a nested checkbox and
            interactive elements can't nest -->
           <div
@@ -83,9 +79,17 @@
               />
               <span v-else class="text-lg">🗿</span>
             </div>
-            <span class="flex-1 font-medium text-[13px] truncate">{{
-              group.group_name
-            }}</span>
+            <span class="flex-1 flex items-center gap-1.5 min-w-0">
+              <span class="font-medium text-[13px] truncate">{{
+                group.group_name
+              }}</span>
+              <span
+                v-if="group.nsfw"
+                class="badge badge-xs badge-error badge-outline font-mono shrink-0"
+                title="18+ — hidden from browsing when Show 18+ is off in Settings"
+                >18+</span
+              >
+            </span>
             <span class="w-35 text-[12px] text-base-content/60 truncate">{{
               group.designer
             }}</span>
@@ -105,32 +109,28 @@
     <!-- GRID MODE (sections stack; each release bucket is its own grid) -->
     <div v-else class="flex flex-col gap-1.5">
       <template v-for="section in sections" :key="section.key">
-        <div
+        <CatalogFacetHeader
           v-if="section.designer !== null"
-          class="flex items-baseline gap-2 pt-2"
-        >
-          <span class="font-bold text-[13px]">{{ section.designer }}</span>
-          <span class="font-mono text-[10px] text-base-content/40">
-            {{ sectionModelCount(section) }} model{{
-              sectionModelCount(section) === 1 ? "" : "s"
-            }}
-          </span>
-        </div>
+          class="pt-2"
+          kind="designer"
+          :label="section.designer"
+          :count="sectionModelCount(section)"
+          :editable="section.designerValue !== null"
+          :rename="(name) => renameDesignerFacet(section.designerValue!, name)"
+        />
         <template v-for="bucket in section.releases" :key="bucket.key">
-          <div
+          <CatalogFacetHeader
             v-if="bucket.label !== null"
-            class="flex items-baseline gap-2 pl-0.5"
-          >
-            <span
-              class="font-mono font-semibold text-[10px] tracking-widest uppercase text-base-content/50"
-              >{{ bucket.label }}</span
-            >
-            <span
-              v-if="bucket.date"
-              class="font-mono text-[9.5px] text-base-content/35"
-              >{{ bucket.date }}</span
-            >
-          </div>
+            class="pl-0.5"
+            kind="release"
+            :label="bucket.label"
+            :date="bucket.date"
+            :editable="section.designerValue !== null && bucket.value !== null"
+            :rename="
+              (name) =>
+                renameReleaseFacet(section.designerValue!, bucket.value!, name)
+            "
+          />
           <div
             class="grid gap-3 mb-1.5"
             style="grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr))"
@@ -161,6 +161,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { storeToRefs } from "pinia";
 import CatalogCard from "../CatalogCard.vue";
+import CatalogFacetHeader from "./CatalogFacetHeader.vue";
 import { useCatalogStore } from "../../stores/catalogStore";
 import { formatFileSize } from "../../utils/format";
 
@@ -177,6 +178,8 @@ const {
 } = storeToRefs(store);
 const {
   sectionModelCount,
+  renameDesignerFacet,
+  renameReleaseFacet,
   selectGroup,
   groupSummary,
   toggleCheckedGroup,

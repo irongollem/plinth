@@ -42,6 +42,14 @@
       </button>
       <button
         type="button"
+        class="btn btn-xs"
+        title="Toggle the 18+ flag for the selected models — hides them from browsing when Show 18+ is off in Settings"
+        @click="toggleGroupNsfw(checkedGroups)"
+      >
+        18+
+      </button>
+      <button
+        type="button"
         class="btn btn-xs btn-error btn-outline"
         title="Delete the selected models — you confirm first"
         @click="openDeleteModal(checkedGroups)"
@@ -96,5 +104,6 @@ const {
   openDeleteModal,
   clearSelection,
   combineChecked,
+  toggleGroupNsfw,
 } = store;
 </script>

@@ -44,12 +44,14 @@ const mmOrNull = (value: string) => {
 type ReleaseBucket = {
   key: string;
   label: string | null; // null = no release header (flat mode)
+  value: string | null; // raw metadata value; fallbacks such as "No release" aren't renameable
   date: string | null;
   groups: CatalogGroup[];
 };
 type DesignerSection = {
   key: string;
   designer: string | null; // null = no designer header (flat mode)
+  designerValue: string | null;
   releases: ReleaseBucket[];
 };
 
@@ -203,6 +205,10 @@ export const useCatalogStore = defineStore("catalog", () => {
   watch(groupMode, (mode) => localStorage.setItem("catalogGroupMode", mode));
   // exact-match facet on top of the fuzzy text search; "" = all designers
   const designerFilter = ref("");
+  // Mirrors the backend-owned, session-only mature-content access state.
+  // Search commands consult the same state themselves; this ref is only for
+  // frontend presentation and refreshing when Settings changes it.
+  const showNsfw = ref(false);
   const designers = ref<DesignerCount[]>([]);
   // the browsable units: one group per logical model
   const groups = ref<CatalogGroup[]>([]);
@@ -210,6 +216,7 @@ export const useCatalogStore = defineStore("catalog", () => {
   const stats = ref<CatalogStats | null>(null);
   // drill-down state: group -> its variant entries -> the active one
   const selectedGroup = ref<CatalogGroup | null>(null);
+  const drawerLoadError = ref<string | null>(null);
   const members = ref<CatalogEntry[]>([]);
   const activeSupport = ref("");
   // second navigation tier: within a support build, which variant is shown
@@ -361,27 +368,42 @@ export const useCatalogStore = defineStore("catalog", () => {
         {
           key: "all",
           designer: null,
+          designerValue: null,
           releases: [
-            { key: "all", label: null, date: null, groups: groups.value },
+            {
+              key: "all",
+              label: null,
+              value: null,
+              date: null,
+              groups: groups.value,
+            },
           ],
         },
       ];
     }
     const out: DesignerSection[] = [];
     for (const group of groups.value) {
-      const designer = group.designer?.trim() || "Unknown designer";
+      const designerValue = group.designer?.trim() || null;
+      const designer = designerValue || "Unknown designer";
       let section = out[out.length - 1];
       // compare case-insensitively, matching the backend's NOCASE ordering
       if (section?.designer?.toLowerCase() !== designer.toLowerCase()) {
-        section = { key: designer.toLowerCase(), designer, releases: [] };
+        section = {
+          key: designer.toLowerCase(),
+          designer,
+          designerValue,
+          releases: [],
+        };
         out.push(section);
       }
-      const label = group.release_name?.trim() || "No release";
+      const releaseValue = group.release_name?.trim() || null;
+      const label = releaseValue || "No release";
       let bucket = section.releases[section.releases.length - 1];
       if (bucket?.label?.toLowerCase() !== label.toLowerCase()) {
         bucket = {
           key: `${section.key}\u{1f}${label.toLowerCase()}`,
           label,
+          value: releaseValue,
           date: group.release_date,
           groups: [],
         };
@@ -404,6 +426,54 @@ export const useCatalogStore = defineStore("catalog", () => {
     if (statsResult.status === "ok") stats.value = statsResult.data;
     if (dupResult.status === "ok") dupGroups.value = dupResult.data;
     if (designerResult.status === "ok") designers.value = designerResult.data;
+  };
+
+  /** Facet headers are metadata, not folder names. Rename the metadata in one
+   * transaction; the existing Clean up flow then offers the corresponding
+   * canonical folder moves, keeping potentially large disk changes explicit. */
+  const renameDesignerFacet = async (oldName: string, newName: string) => {
+    const next = newName.trim();
+    if (!next || next === oldName) return next === oldName;
+    const confirmed = await confirm(
+      `Rename designer “${oldName}” to “${next}” across every assigned model?\n\nThis updates their metadata now. Use Clean up afterward to make their folders follow the new name.`,
+      { title: "Rename designer", kind: "warning" },
+    );
+    if (!confirmed) return false;
+    const result = await commands.renameCatalogDesigner(oldName, next);
+    if (result.status !== "ok") {
+      toastStore.reportError("Failed to rename designer", result.error);
+      return false;
+    }
+    if (designerFilter.value.toLowerCase() === oldName.toLowerCase()) {
+      designerFilter.value = next;
+    }
+    await Promise.all([runSearch(), refreshMeta()]);
+    if (selectedGroup.value) await selectGroup(selectedGroup.value);
+    toastStore.addToast(`Designer renamed to “${next}”`, "success");
+    return true;
+  };
+
+  const renameReleaseFacet = async (
+    designer: string,
+    oldName: string,
+    newName: string,
+  ) => {
+    const next = newName.trim();
+    if (!next || next === oldName) return next === oldName;
+    const confirmed = await confirm(
+      `Rename release “${oldName}” to “${next}” for ${designer}?\n\nThis updates every matching model's metadata now. Use Clean up afterward to make their folders follow the new name.`,
+      { title: "Rename release", kind: "warning" },
+    );
+    if (!confirmed) return false;
+    const result = await commands.renameCatalogRelease(designer, oldName, next);
+    if (result.status !== "ok") {
+      toastStore.reportError("Failed to rename release", result.error);
+      return false;
+    }
+    await Promise.all([runSearch(), refreshMeta()]);
+    if (selectedGroup.value) await selectGroup(selectedGroup.value);
+    toastStore.addToast(`Release renamed to “${next}”`, "success");
+    return true;
   };
 
   const toggleTag = (tag: string) => {
@@ -466,7 +536,15 @@ export const useCatalogStore = defineStore("catalog", () => {
     viewerExtracted.value = [];
   };
 
+  // Selection requests overlap easily when browsing quickly or switching
+  // support/pose tabs. Epochs make late IPC responses harmless instead of
+  // letting an old card overwrite the current drawer.
+  let groupSelectionEpoch = 0;
+  let entrySelectionEpoch = 0;
+
   const selectEntry = async (entry: CatalogEntry) => {
+    const epoch = ++entrySelectionEpoch;
+    const entryKey = memberKey(entry);
     selected.value = entry;
     files.value = [];
     // A synthesized pose member carries a variant_key; pass it so we list
@@ -475,6 +553,13 @@ export const useCatalogStore = defineStore("catalog", () => {
       commands.getCatalogModelFiles(entry.dir_path, entry.variant_key),
       commands.getFileVariants(entry.dir_path),
     ]);
+    if (
+      epoch !== entrySelectionEpoch ||
+      !selected.value ||
+      memberKey(selected.value) !== entryKey
+    ) {
+      return;
+    }
     if (fileResult.status === "ok") files.value = fileResult.data;
     if (variantResult.status === "ok") {
       const map: Record<string, string> = {};
@@ -695,19 +780,42 @@ export const useCatalogStore = defineStore("catalog", () => {
   const groupSources = ref<string[]>([]);
 
   const selectGroup = async (group: CatalogGroup) => {
+    const epoch = ++groupSelectionEpoch;
+    // Any file request belonging to the previous group is stale now, even
+    // before this group's first member has been chosen.
+    entrySelectionEpoch += 1;
     selectedGroup.value = group;
+    drawerLoadError.value = null;
     renamingGroup.value = false;
     members.value = [];
     selected.value = null;
     files.value = [];
     groupSources.value = [];
     commands.getCatalogGroupSources(group.group_name).then((sources) => {
-      if (sources.status === "ok") groupSources.value = sources.data;
+      if (
+        epoch === groupSelectionEpoch &&
+        selectedGroup.value?.group_name === group.group_name &&
+        sources.status === "ok"
+      ) {
+        groupSources.value = sources.data;
+      }
     });
     checkStructure(group.group_name);
     const result = await commands.getCatalogGroupMembers(group.group_name);
+    if (
+      epoch !== groupSelectionEpoch ||
+      selectedGroup.value?.group_name !== group.group_name
+    ) {
+      return;
+    }
     if (result.status !== "ok") {
       toastStore.reportError("Failed to load model variants", result.error);
+      drawerLoadError.value = "Couldn’t load this model’s variants.";
+      return;
+    }
+    if (!result.data.length) {
+      drawerLoadError.value =
+        "This model no longer has any variants available to browse.";
       return;
     }
     members.value = result.data;
@@ -935,10 +1043,17 @@ export const useCatalogStore = defineStore("catalog", () => {
     const result = await commands.getCatalogGroupMembers(group.group_name);
     if (result.status !== "ok") return;
     members.value = result.data;
+    if (!members.value.length) {
+      selectedGroup.value = null;
+      selected.value = null;
+      files.value = [];
+      show3d.value = false;
+      return;
+    }
     const updated = key
       ? members.value.find((m) => memberKey(m) === key)
       : undefined;
-    if (updated) selected.value = updated;
+    selected.value = updated ?? members.value[0] ?? null;
   };
 
   /* ---- transparent use: materialize packed bytes just-in-time ---- */
@@ -1360,7 +1475,10 @@ export const useCatalogStore = defineStore("catalog", () => {
   // disabled "checking…" state rather than flashing dirty-then-clean.
   const structureClean = ref<boolean | null>(null);
 
-  /** Dry-run the plan for one model to decide the drawer's badge/button. */
+  /** Dry-run the plan for one model to decide the drawer's status. The
+   * normalizer derives its canonical target from the effective metadata, so
+   * an empty plan means exactly "folders match metadata". Sidecar rebuilding
+   * is separate maintenance and must not make a green state look actionable. */
   const checkStructure = async (groupName: string) => {
     structureClean.value = null;
     if (!hasRoots.value) return;
@@ -1709,7 +1827,8 @@ export const useCatalogStore = defineStore("catalog", () => {
   const moveChecked = async () => {
     const dest = await selectDirectory({ title: "Move selected models into…" });
     if (!dest) return;
-    // a checked group means ALL of its variant folders move
+    // A checked group is already visible under the backend's current access
+    // state, so resolve exactly the variants the user was allowed to browse.
     const memberResults = await Promise.all(
       checkedGroups.value.map((name) => commands.getCatalogGroupMembers(name)),
     );
@@ -1767,7 +1886,7 @@ export const useCatalogStore = defineStore("catalog", () => {
 
   const openDeleteModal = async (names: string[]) => {
     if (!names.length) return;
-    // a model card means ALL of its variant folders, same as moving it
+    // Resolve exactly the currently accessible variants behind each card.
     const memberResults = await Promise.all(
       names.map((name) => commands.getCatalogGroupMembers(name)),
     );
@@ -1838,6 +1957,48 @@ export const useCatalogStore = defineStore("catalog", () => {
     }
   };
 
+  /* ---- 18+ marking: a display filter, not encryption — scans still index
+     everything; Settings' "Show 18+" toggle is what hides it from browsing */
+  // Toggle behavior: if EVERY named group is already flagged, the action
+  // unmarks all of them; otherwise it marks all of them — one button for
+  // both directions, same as how the batch bar's other togglers behave.
+  const toggleGroupNsfw = async (names: string[]) => {
+    if (!names.length) return;
+    // groups.value first (what the spec asks); fall back to the open
+    // drawer's own group, which may not be in the current page if it's
+    // currently hidden by the browse filter itself
+    const findGroup = (name: string) =>
+      groups.value.find(
+        (g) => g.group_name.toLowerCase() === name.toLowerCase(),
+      ) ??
+      (selectedGroup.value?.group_name.toLowerCase() === name.toLowerCase()
+        ? selectedGroup.value
+        : undefined);
+    const targeted = names.map(findGroup).filter((g): g is CatalogGroup => !!g);
+    const target = !(targeted.length && targeted.every((g) => g.nsfw));
+    const result = await commands.setGroupNsfw(names, target);
+    if (result.status !== "ok") {
+      toastStore.reportError("Failed to update the 18+ flag", result.error);
+      return;
+    }
+    toastStore.addToast(
+      target
+        ? `Marked ${names.length} model${names.length === 1 ? "" : "s"} 18+`
+        : `Removed 18+ mark from ${names.length} model${names.length === 1 ? "" : "s"}`,
+      "success",
+    );
+    await Promise.all([runSearch(), refreshMeta()]);
+    if (
+      selectedGroup.value &&
+      names.some(
+        (name) =>
+          name.toLowerCase() === selectedGroup.value?.group_name.toLowerCase(),
+      )
+    ) {
+      await refreshSelected();
+    }
+  };
+
   watch(selected, (entry) => {
     metaDraft.value = {
       // NAME is the card/sort name — i.e. the GROUP name — not the per-variant
@@ -1884,7 +2045,7 @@ export const useCatalogStore = defineStore("catalog", () => {
   const saveMetadata = async () => {
     const entry = selected.value;
     const group = selectedGroup.value;
-    if (!entry || !group) return;
+    if (!entry || !group) return false;
     const draft = metaDraft.value;
     // A file-split member's variant/pose/support live in file_variants, not
     // model_user_meta — writing them there would silently revert on reload.
@@ -1912,7 +2073,7 @@ export const useCatalogStore = defineStore("catalog", () => {
           : await commands.clearFilePose(paths);
       if (refiled.status !== "ok") {
         toastStore.reportError("Failed to re-file member", refiled.error);
-        return;
+        return false;
       }
     }
 
@@ -1934,7 +2095,7 @@ export const useCatalogStore = defineStore("catalog", () => {
     });
     if (result.status !== "ok") {
       toastStore.reportError("Failed to save details", result.error);
-      return;
+      return false;
     }
     // variant/pose/scale were also applied to this sculpt's other support
     // builds (exact folder twins) — say so, since the user didn't click them
@@ -1952,7 +2113,7 @@ export const useCatalogStore = defineStore("catalog", () => {
     if (newName && newName !== group.group_name) {
       if (!(await confirmRenameAmbiguity([group.group_name], "Rename"))) {
         savedToast();
-        return;
+        return false;
       }
       const renamed = await commands.renameCatalogGroup(
         group.group_name,
@@ -1964,7 +2125,7 @@ export const useCatalogStore = defineStore("catalog", () => {
           renamed.error,
         );
         await refreshSelected();
-        return;
+        return false;
       }
       savedToast();
       // the card moved to its new name — re-open it there
@@ -1973,7 +2134,7 @@ export const useCatalogStore = defineStore("catalog", () => {
         (g) => g.group_name.toLowerCase() === newName.toLowerCase(),
       );
       if (found) await selectGroup(found);
-      return;
+      return true;
     }
 
     savedToast();
@@ -1986,6 +2147,26 @@ export const useCatalogStore = defineStore("catalog", () => {
     } else {
       await refreshSelected();
     }
+    const currentGroupName = selectedGroup.value?.group_name;
+    if (currentGroupName) await checkStructure(currentGroupName);
+    return true;
+  };
+
+  /** The drawer's expected workflow: metadata defines the destination.
+   * Commit any edits first, then calculate a fresh reviewable move plan from
+   * that committed state. A failed/cancelled save never opens a stale plan. */
+  const cleanUpSelectedGroup = async () => {
+    const intendedName =
+      metaDraft.value.name.trim() || selectedGroup.value?.group_name || "";
+    if (metaDirty.value && !(await saveMetadata())) return;
+    const groupName =
+      groups.value.find(
+        (group) =>
+          group.group_name.toLowerCase() === intendedName.toLowerCase(),
+      )?.group_name ??
+      selectedGroup.value?.group_name ??
+      intendedName;
+    if (groupName) await openNormalize(groupName);
   };
 
   const pickPreviewImage = async () => {
@@ -2256,14 +2437,23 @@ export const useCatalogStore = defineStore("catalog", () => {
     }
   });
 
+  // Mirrors the backend session into this store; called before the refreshes
+  // below so a change made in Settings is already in effect by the time
+  // they run, not one visit later.
+  const syncShowNsfw = async () => {
+    const result = await commands.getNsfwAccessState();
+    if (result.status === "ok") showNsfw.value = result.data.unlocked;
+  };
+
   /** Orchestrated once by the Catalog view's onMounted. */
   const init = async () => {
-    await initPackCleanupPref();
+    await Promise.all([initPackCleanupPref(), syncShowNsfw()]);
     await Promise.all([refreshRoots(), runSearch(), refreshMeta()]);
   };
 
   /** Orchestrated by the Catalog view's onActivated (KeepAlive re-entry). */
   const onReactivated = async () => {
+    await syncShowNsfw();
     await Promise.all([
       selectedGroup.value ? refreshSelected() : runSearch(),
       refreshMeta(),
@@ -2311,11 +2501,14 @@ export const useCatalogStore = defineStore("catalog", () => {
     stats,
     sections,
     sectionModelCount,
+    renameDesignerFacet,
+    renameReleaseFacet,
     runSearch,
     loadMore,
     lastScanLabel,
     // selection / drawer
     selectedGroup,
+    drawerLoadError,
     members,
     activeSupport,
     activeVariant,
@@ -2389,6 +2582,7 @@ export const useCatalogStore = defineStore("catalog", () => {
     expandedPlanGroup,
     normalizeScope,
     openNormalize,
+    cleanUpSelectedGroup,
     toggleNormalizeGroup,
     allPlanChecked,
     toggleAllPlan,
@@ -2443,6 +2637,9 @@ export const useCatalogStore = defineStore("catalog", () => {
     deleteSummary,
     openDeleteModal,
     confirmDelete,
+    // 18+ marking
+    showNsfw,
+    toggleGroupNsfw,
     // duplicates
     dupGroups,
     showDups,

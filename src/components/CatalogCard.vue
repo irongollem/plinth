@@ -60,6 +60,15 @@ const previewUrl = computed(() =>
       >
         📦
       </span>
+      <!-- any effectively-flagged member marks the whole card -->
+      <span
+        v-if="group.nsfw"
+        class="badge badge-xs badge-error badge-outline font-mono absolute top-1.5"
+        :class="group.packed ? 'right-9' : 'right-1.5'"
+        title="18+ — hidden from browsing when Show 18+ is off in Settings"
+      >
+        18+
+      </span>
       <!-- support variants at a glance -->
       <div
         v-if="group.support_statuses.length"

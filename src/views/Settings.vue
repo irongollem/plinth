@@ -72,6 +72,246 @@
       </div>
 
       <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          >MATURE CONTENT</span
+        >
+        <div
+          class="flex flex-col gap-2 bg-base-200 border border-base-content/10 rounded-lg px-2.5 py-1.5"
+        >
+          <label class="flex items-center gap-2 cursor-pointer w-fit">
+            <input
+              type="checkbox"
+              class="toggle toggle-sm"
+              :checked="nsfwAccess.unlocked"
+              @change="onToggleShowNsfw"
+            />
+            <span class="font-mono text-[12px] text-base-content/70"
+              >Show 18+ models</span
+            >
+          </label>
+
+          <form
+            v-if="showUnlockPrompt"
+            class="flex items-center gap-1.5"
+            @submit.prevent="confirmUnlock"
+          >
+            <input
+              v-model="unlockPinInput"
+              type="password"
+              inputmode="numeric"
+              class="input input-xs font-mono w-24"
+              placeholder="PIN"
+              autofocus
+            />
+            <button type="submit" class="btn btn-xs btn-primary">Unlock</button>
+            <button
+              type="button"
+              class="btn btn-xs btn-ghost"
+              @click="cancelUnlock"
+            >
+              cancel
+            </button>
+            <button
+              v-if="nsfwAccess.recovery_configured"
+              type="button"
+              class="btn btn-xs btn-ghost"
+              @click="startRecovery"
+            >
+              forgot PIN?
+            </button>
+          </form>
+
+          <form
+            v-if="showRecovery"
+            class="flex flex-wrap items-center gap-1.5"
+            @submit.prevent="confirmRecovery"
+          >
+            <input
+              v-model="recoveryCodeInput"
+              type="text"
+              class="input input-xs font-mono w-72"
+              placeholder="recovery code"
+            />
+            <input
+              v-model="recoveryNewPin"
+              type="password"
+              inputmode="numeric"
+              class="input input-xs font-mono w-24"
+              placeholder="new PIN"
+            />
+            <button type="submit" class="btn btn-xs btn-primary">
+              Reset PIN
+            </button>
+            <button
+              type="button"
+              class="btn btn-xs btn-ghost"
+              @click="cancelRecovery"
+            >
+              cancel
+            </button>
+          </form>
+
+          <div
+            v-if="issuedRecoveryCode"
+            class="rounded-md border border-warning/40 bg-warning/10 p-2"
+          >
+            <div class="font-mono text-[11px] text-base-content/70">
+              Save this recovery code outside this computer. It is shown only
+              once.
+            </div>
+            <div class="font-mono text-[13px] font-semibold select-all my-1">
+              {{ issuedRecoveryCode }}
+            </div>
+            <button
+              type="button"
+              class="btn btn-xs"
+              @click="issuedRecoveryCode = ''"
+            >
+              I saved it
+            </button>
+          </div>
+
+          <div class="h-px bg-base-content/10"></div>
+
+          <template v-if="!nsfwAccess.pin_configured">
+            <form class="flex items-center gap-1.5" @submit.prevent="setPin">
+              <span
+                class="font-mono text-[11px] text-base-content/50 w-24 shrink-0"
+                >Lock behind a PIN</span
+              >
+              <input
+                v-model="newPinInput"
+                type="password"
+                inputmode="numeric"
+                class="input input-xs font-mono w-24"
+                placeholder="4–12 digits"
+              />
+              <button type="submit" class="btn btn-xs" :disabled="!newPinInput">
+                Set PIN
+              </button>
+            </form>
+          </template>
+          <template v-else>
+            <div class="flex items-center gap-1.5">
+              <span class="font-mono text-[11px] text-base-content/50 flex-1"
+                >PIN set — required to turn the toggle on</span
+              >
+              <button
+                type="button"
+                class="btn btn-xs btn-ghost"
+                @click="startChangePin"
+              >
+                Change PIN…
+              </button>
+              <button
+                type="button"
+                class="btn btn-xs btn-ghost"
+                @click="startRemovePin"
+              >
+                Remove PIN
+              </button>
+            </div>
+            <form
+              v-if="showChangePin"
+              class="flex items-center gap-1.5"
+              @submit.prevent="confirmChangePin"
+            >
+              <input
+                v-model="changeCurrentPin"
+                type="password"
+                inputmode="numeric"
+                class="input input-xs font-mono w-20"
+                placeholder="current"
+              />
+              <input
+                v-model="changeNewPin"
+                type="password"
+                inputmode="numeric"
+                class="input input-xs font-mono w-20"
+                placeholder="new"
+              />
+              <button
+                type="submit"
+                class="btn btn-xs btn-primary"
+                :disabled="!changeCurrentPin || !changeNewPin"
+              >
+                save
+              </button>
+              <button
+                type="button"
+                class="btn btn-xs btn-ghost"
+                @click="showChangePin = false"
+              >
+                cancel
+              </button>
+            </form>
+            <form
+              v-if="showRemovePin"
+              class="flex items-center gap-1.5"
+              @submit.prevent="confirmRemovePin"
+            >
+              <input
+                v-model="removePinInput"
+                type="password"
+                inputmode="numeric"
+                class="input input-xs font-mono w-24"
+                placeholder="current PIN"
+              />
+              <button type="submit" class="btn btn-xs btn-error">remove</button>
+              <button
+                type="button"
+                class="btn btn-xs btn-ghost"
+                @click="showRemovePin = false"
+              >
+                cancel
+              </button>
+            </form>
+          </template>
+
+          <div class="h-px bg-base-content/10"></div>
+
+          <div
+            v-if="nsfwAccess.unlocked"
+            class="flex flex-wrap gap-1.5 items-center"
+          >
+            <span
+              v-for="designer in nsfwDesigners"
+              :key="designer"
+              class="font-mono text-[11px] text-base-content/70 border border-base-content/15 rounded-full px-2.5 py-0.5 flex items-center gap-1"
+            >
+              {{ designer }}
+              <button
+                type="button"
+                class="opacity-50 hover:opacity-100"
+                @click="removeNsfwDesigner(designer)"
+              >
+                ✕
+              </button>
+            </span>
+            <form class="join" @submit.prevent="addNsfwDesigner">
+              <input
+                v-model="newNsfwDesigner"
+                type="text"
+                class="input input-xs join-item w-40 font-mono"
+                placeholder="+ designer, all 18+"
+              />
+            </form>
+          </div>
+          <span v-else class="font-mono text-[11px] text-base-content/45">
+            Unlock to view or change mature-content designer rules. You can
+            still mark a visible catalog model as 18+ while locked.
+          </span>
+        </div>
+        <p class="text-[10.5px] text-base-content/40">
+          Models marked 18+ — and everything by the designers listed here — are
+          hidden from browsing while locked. Access relocks whenever Plinth
+          restarts. Scanning still indexes them and the files remain on disk;
+          this is a family-PC filter, not encryption or OS parental controls.
+        </p>
+      </div>
+
+      <div class="flex flex-col gap-1.5">
         <FileSelect
           id="scratch_dir"
           label="Temporary files directory"
@@ -544,7 +784,12 @@
 
 <script setup lang="ts">
 import { computed, onActivated, onMounted, ref, watch } from "vue";
-import { type IgnoredFolder, type Settings, commands } from "../bindings.ts";
+import {
+  type IgnoredFolder,
+  type NsfwAccessState,
+  type Settings,
+  commands,
+} from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
 import { useBlenderProvision } from "../composables/useBlenderProvision";
 import { useFileSelect } from "../composables/useFileSelect";
@@ -796,12 +1041,196 @@ const unignoreFolder = async (dirPath: string) => {
   await loadIgnoredFolders();
 };
 
+/* ---- mature content: backend-owned, session-only family-PC filter ---- */
+
+const nsfwAccess = ref<NsfwAccessState>({
+  unlocked: false,
+  pin_configured: false,
+  recovery_configured: false,
+});
+
+const syncNsfwAccess = async () => {
+  const result = await commands.getNsfwAccessState();
+  if (result.status === "ok") nsfwAccess.value = result.data;
+};
+
+const showUnlockPrompt = ref(false);
+const unlockPinInput = ref("");
+const onToggleShowNsfw = async (event: Event) => {
+  const wantsOn = (event.target as HTMLInputElement).checked;
+  if (!wantsOn) {
+    const result = await commands.lockNsfw();
+    if (result.status === "ok") {
+      nsfwAccess.value = result.data;
+      nsfwDesigners.value = [];
+    } else {
+      toastStore.reportError("Failed to lock mature content", result.error);
+    }
+    return;
+  }
+  if (!nsfwAccess.value.pin_configured) {
+    const result = await commands.unlockNsfw(null);
+    if (result.status === "ok") {
+      nsfwAccess.value = result.data;
+      await loadNsfwDesigners();
+    } else {
+      toastStore.reportError("Failed to show mature content", result.error);
+    }
+    return;
+  }
+  showUnlockPrompt.value = true;
+  unlockPinInput.value = "";
+};
+const confirmUnlock = async () => {
+  const result = await commands.unlockNsfw(unlockPinInput.value);
+  if (result.status !== "ok") {
+    toastStore.reportError("Could not unlock mature content", result.error);
+    return;
+  }
+  nsfwAccess.value = result.data;
+  showUnlockPrompt.value = false;
+  unlockPinInput.value = "";
+  await loadNsfwDesigners();
+};
+const cancelUnlock = () => {
+  showUnlockPrompt.value = false;
+  unlockPinInput.value = "";
+};
+
+const issuedRecoveryCode = ref("");
+const newPinInput = ref("");
+const setPin = async () => {
+  if (!newPinInput.value) return;
+  const result = await commands.configureNsfwPin(newPinInput.value);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to set PIN", result.error);
+    return;
+  }
+  nsfwAccess.value = result.data.state;
+  issuedRecoveryCode.value = result.data.recovery_code;
+  newPinInput.value = "";
+  toastStore.addToast("PIN set — save the recovery code", "success");
+};
+
+const showChangePin = ref(false);
+const changeCurrentPin = ref("");
+const changeNewPin = ref("");
+const startChangePin = () => {
+  showChangePin.value = true;
+  showRemovePin.value = false;
+  changeCurrentPin.value = "";
+  changeNewPin.value = "";
+};
+const confirmChangePin = async () => {
+  const result = await commands.changeNsfwPin(
+    changeCurrentPin.value,
+    changeNewPin.value,
+  );
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to change PIN", result.error);
+    return;
+  }
+  nsfwAccess.value = result.data;
+  showChangePin.value = false;
+  changeCurrentPin.value = "";
+  changeNewPin.value = "";
+  toastStore.addToast("PIN changed", "success");
+};
+
+const showRemovePin = ref(false);
+const removePinInput = ref("");
+const startRemovePin = () => {
+  showRemovePin.value = true;
+  showChangePin.value = false;
+  removePinInput.value = "";
+};
+const confirmRemovePin = async () => {
+  const result = await commands.removeNsfwPin(removePinInput.value);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to remove PIN", result.error);
+    return;
+  }
+  nsfwAccess.value = result.data;
+  nsfwDesigners.value = [];
+  showRemovePin.value = false;
+  removePinInput.value = "";
+  toastStore.addToast("PIN removed", "success");
+};
+
+const showRecovery = ref(false);
+const recoveryCodeInput = ref("");
+const recoveryNewPin = ref("");
+const startRecovery = () => {
+  showUnlockPrompt.value = false;
+  showRecovery.value = true;
+  recoveryCodeInput.value = "";
+  recoveryNewPin.value = "";
+};
+const cancelRecovery = () => {
+  showRecovery.value = false;
+  recoveryCodeInput.value = "";
+  recoveryNewPin.value = "";
+};
+const confirmRecovery = async () => {
+  const result = await commands.recoverNsfwPin(
+    recoveryCodeInput.value,
+    recoveryNewPin.value,
+  );
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to recover PIN", result.error);
+    return;
+  }
+  nsfwAccess.value = result.data.state;
+  issuedRecoveryCode.value = result.data.recovery_code;
+  cancelRecovery();
+  await loadNsfwDesigners();
+  toastStore.addToast("PIN reset — save the new recovery code", "success");
+};
+
+// Designer-wide rule: every model by a listed designer counts as 18+ unless
+// it explicitly opts out (the drawer's per-model toggle). Backed by its own
+// table, not settings — set_designer_nsfw/list_nsfw_designers commands.
+const nsfwDesigners = ref<string[]>([]);
+const loadNsfwDesigners = async () => {
+  if (!nsfwAccess.value.unlocked) {
+    nsfwDesigners.value = [];
+    return;
+  }
+  const result = await commands.listNsfwDesigners();
+  if (result.status === "ok") nsfwDesigners.value = result.data;
+};
+const newNsfwDesigner = ref("");
+const addNsfwDesigner = async () => {
+  const name = newNsfwDesigner.value.trim();
+  newNsfwDesigner.value = "";
+  if (!name) return;
+  const result = await commands.setDesignerNsfw(name, true);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to add designer", result.error);
+    return;
+  }
+  await loadNsfwDesigners();
+};
+const removeNsfwDesigner = async (name: string) => {
+  const result = await commands.setDesignerNsfw(name, false);
+  if (result.status !== "ok") {
+    toastStore.reportError("Failed to remove designer", result.error);
+    return;
+  }
+  await loadNsfwDesigners();
+};
+
 // The tab is kept alive (KeepAlive in App.vue): onMounted fires once, but
 // folders get hidden from the Catalog tab — refresh the list on every return
-onActivated(loadIgnoredFolders);
+onActivated(() => {
+  loadIgnoredFolders();
+  syncNsfwAccess().then(loadNsfwDesigners);
+});
 
 onMounted(async () => {
   loadIgnoredFolders();
+  await syncNsfwAccess();
+  loadNsfwDesigners();
   try {
     const savedSettings = await commands.getSettings();
     if (savedSettings.status === "ok") {
