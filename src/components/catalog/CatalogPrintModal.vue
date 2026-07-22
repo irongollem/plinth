@@ -14,7 +14,7 @@
       <ul class="flex flex-col gap-0.5 max-h-72 overflow-y-auto">
         <li v-for="file in printCandidates" :key="file.path">
           <label
-            class="flex items-center gap-2 cursor-pointer py-1 px-1.5 rounded hover:bg-base-200"
+            class="print-row flex items-center gap-2 cursor-pointer py-1 px-1.5 rounded hover:bg-base-200"
           >
             <input
               type="checkbox"
@@ -85,10 +85,11 @@
               </svg>
             </span>
             <span
-              class="flex-1 truncate font-mono text-[11.5px]"
+              class="print-name flex-1 truncate font-mono text-[11.5px]"
               :title="file.path"
-              >{{ file.file_name }}</span
             >
+              <span class="print-name-inner">{{ file.file_name }}</span>
+            </span>
             <span
               class="font-mono text-[10px] text-base-content/40 w-14 text-right"
               >{{ formatFileSize(file.size_bytes) }}</span
@@ -249,3 +250,36 @@ const fileKind = (file: CatalogFile): FileKind => {
     : "raw";
 };
 </script>
+
+<style scoped>
+/* Hovering a row slides an overflowing filename back and forth so the
+   whole thing is readable. 100cqw is the visible column width (the outer
+   span is the container), 100% the full text width; min() pins names
+   that already fit. */
+.print-name {
+  container-type: inline-size;
+}
+
+.print-name-inner {
+  display: inline-block;
+}
+
+.print-row:hover .print-name {
+  text-overflow: clip;
+}
+
+.print-row:hover .print-name-inner {
+  animation: shimmy 6s ease-in-out 0.5s infinite alternate;
+}
+
+@keyframes shimmy {
+  0%,
+  12% {
+    transform: translateX(0);
+  }
+  88%,
+  100% {
+    transform: translateX(min(0px, calc(100cqw - 100%)));
+  }
+}
+</style>
