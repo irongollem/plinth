@@ -10,9 +10,12 @@ pub mod sidecar;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
-/// Extensions treated as printable model files during scans.
+/// Extensions treated as printable model files during scans. The second
+/// row is machine-ready sliced output (g-code, vendor resin plates) —
+/// not everyone keeps it, but it belongs with the model when they do.
 pub const MODEL_EXTENSIONS: &[&str] = &[
     "stl", "obj", "3mf", "lys", "chitu", "chitubox", "blend", "gcode",
+    "bgcode", "goo", "ctb", "cbddlp", "photon", "pwmx", "pwmo", "pwms", "pw0",
 ];
 /// Extensions usable as a model preview image.
 pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif"];

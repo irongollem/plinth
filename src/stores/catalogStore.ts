@@ -1352,24 +1352,39 @@ export const useCatalogStore = defineStore("catalog", () => {
   /* ---- print: pick exactly which files go to the slicer ---- */
   // Print-ready scene files beat raw geometry: a .lys/.chitu already carries
   // supports and plate layout, so when a member has both, those are what
-  // the modal pre-checks.
+  // the modal pre-checks. Machine output (g-code, vendor resin plates) is
+  // offered too but pre-checked only when it's all there is — nothing about
+  // it can still be edited, only reprinted.
   const SLICED_EXTS = ["lys", "chitu", "chitubox"];
   const RAW_EXTS = ["stl", "obj", "3mf"];
+  const MACHINE_EXTS = [
+    "gcode",
+    "bgcode",
+    "goo",
+    "ctb",
+    "cbddlp",
+    "photon",
+    "pwmx",
+    "pwmo",
+    "pwms",
+    "pw0",
+  ];
 
   // What the modal offers: everything a slicer could eat. Images, licences
   // and archives stay out — offering them would only invite mis-ticks.
   const printCandidates = computed(() =>
     files.value.filter((f) =>
-      [...SLICED_EXTS, ...RAW_EXTS].includes(f.extension),
+      [...SLICED_EXTS, ...RAW_EXTS, ...MACHINE_EXTS].includes(f.extension),
     ),
   );
 
   const printablePaths = computed(() => {
-    const sliced = printCandidates.value.filter((f) =>
-      SLICED_EXTS.includes(f.extension),
-    );
-    const pool = sliced.length ? sliced : printCandidates.value;
-    return pool.map((f) => f.path);
+    const pool = [SLICED_EXTS, RAW_EXTS, MACHINE_EXTS]
+      .map((exts) =>
+        printCandidates.value.filter((f) => exts.includes(f.extension)),
+      )
+      .find((tier) => tier.length);
+    return (pool ?? []).map((f) => f.path);
   });
 
   const showPrintModal = ref(false);
@@ -2625,6 +2640,7 @@ export const useCatalogStore = defineStore("catalog", () => {
     startBatchRender,
     // print
     SLICED_EXTS,
+    MACHINE_EXTS,
     showPrintModal,
     printSelection,
     printBusy,
