@@ -2639,7 +2639,6 @@ export const useCatalogStore = defineStore("catalog", () => {
     openBatchRender,
     startBatchRender,
     // print
-    SLICED_EXTS,
     MACHINE_EXTS,
     showPrintModal,
     printSelection,
