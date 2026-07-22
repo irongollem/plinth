@@ -103,12 +103,12 @@ const {
   selected,
   printCandidates,
   printSelection,
-  SLICED_EXTS,
   printSelectionPacked,
   packCleanupAfter,
   printBusy,
 } = storeToRefs(store);
 const {
+  SLICED_EXTS,
   togglePrintFile,
   persistCleanupAfter,
   revealFromPrintModal,
