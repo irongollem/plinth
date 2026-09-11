@@ -1372,8 +1372,14 @@ const fontCss = computed(
 // Shared with the setup dialog and Settings — the app probes once per
 // launch, and an install landing mid-session flips this badge live even
 // though KeepAlive never remounts this view.
-const { blenderInfo, verdict, renderBlocked, managedVersion, openDialog } =
-  useBlenderProvision();
+const {
+  blenderInfo,
+  verdict,
+  renderBlocked,
+  managedVersion,
+  offerSetupOnce,
+  openDialog,
+} = useBlenderProvision();
 // Session-only: an Outdated Blender still renders, the hint shouldn't nag
 const outdatedHintDismissed = ref(false);
 
@@ -1381,6 +1387,9 @@ onMounted(() => {
   loadRenderSettings();
   refreshScaleRefConfigured();
   loadCutterLibrary();
+  // Reaching the studio IS the ask for a renderer — this is where the
+  // download offer belongs, not on app launch.
+  void offerSetupOnce();
 });
 // keep-alive'd view: the user may configure a figure in Settings and come back
 onActivated(() => {

@@ -198,7 +198,6 @@
 <script setup lang="ts">
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { computed, onMounted, watch } from "vue";
-import { commands } from "../bindings";
 import { useBlenderProvision } from "../composables/useBlenderProvision";
 import { useReleasesStore } from "../stores/releasesStore";
 
@@ -223,7 +222,6 @@ const {
   acknowledge,
   clearBlenderPathSetting,
   dialogVisible,
-  openDialog,
   closeDialog,
 } = useBlenderProvision();
 
@@ -295,22 +293,16 @@ const finish = async () => {
 };
 
 const goToSettings = () => {
-  // Deliberately no ack: setup isn't done, the dialog should return next
-  // launch if they don't end up configuring a Blender
+  // Deliberately no ack: setup isn't done, so the offer should return the
+  // next time they open a surface that renders
   releasesStore.setActiveTab("settings");
   closeDialog();
 };
 
-// First-run gate: one probe per launch feeds every surface's verdict; the
-// dialog itself only appears until the user acknowledges this pinned
-// version — bumping the pin re-offers exactly once.
+// One probe per launch feeds every surface's verdict badge. Opening is NOT
+// this component's call: the surfaces that need Blender ask for the offer
+// via offerSetupOnce, so a user who only browses never meets this dialog.
 onMounted(async () => {
-  const settings = await commands.getSettings();
-  const acknowledged =
-    settings.status === "ok" ? settings.data.blender_setup_acknowledged : null;
-  const result = await runCheck();
-  if (result && acknowledged !== result.managed_version) {
-    openDialog();
-  }
+  await runCheck();
 });
 </script>

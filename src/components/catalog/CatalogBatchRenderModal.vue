@@ -19,6 +19,18 @@
         <span class="loading loading-spinner loading-sm"></span>
       </div>
       <template v-else>
+        <!-- Without this the Render button starts a sweep that dies on the
+             first launch and lands as an error toast -->
+        <div v-if="renderBlocked" class="alert alert-warning text-[12px] py-2">
+          <span>
+            {{
+              verdict === "TooOld"
+                ? `Blender ${blenderInfo?.version ?? ""} predates the 4.2 minimum.`
+                : "Previews are rendered by Blender, and none was found."
+            }}
+          </span>
+          <button class="btn btn-xs" @click="openDialog">Set up</button>
+        </div>
         <div class="font-mono text-[11.5px] flex flex-col gap-1">
           <span>
             {{ batchMissing.length }} model{{
@@ -92,8 +104,9 @@
             type="button"
             class="btn btn-sm btn-primary"
             :disabled="
-              !batchMissing.length &&
-              !(batchRerenderExisting && batchExisting.length)
+              renderBlocked ||
+              (!batchMissing.length &&
+                !(batchRerenderExisting && batchExisting.length))
             "
             @click="startBatchRender"
           >
@@ -112,6 +125,7 @@
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
 import ModalView from "../ModalView.vue";
+import { useBlenderProvision } from "../../composables/useBlenderProvision";
 import { useCatalogStore } from "../../stores/catalogStore";
 
 const store = useCatalogStore();
@@ -126,4 +140,6 @@ const {
   batchQuality,
 } = storeToRefs(store);
 const { startBatchRender } = store;
+const { blenderInfo, verdict, renderBlocked, openDialog } =
+  useBlenderProvision();
 </script>

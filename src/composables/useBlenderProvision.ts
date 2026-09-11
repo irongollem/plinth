@@ -160,6 +160,19 @@ const closeDialog = () => {
   dialogVisible.value = false;
 };
 
+/**
+ * Offer setup the first time the user reaches a surface that needs Blender,
+ * once per pinned version. Browsing and scanning a library never call this:
+ * a few hundred MB of Blender is not the price of looking at what you own.
+ */
+const offerSetupOnce = async () => {
+  const settings = await commands.getSettings();
+  const acknowledged =
+    settings.status === "ok" ? settings.data.blender_setup_acknowledged : null;
+  const result = check.value ?? (await runCheck());
+  if (result && acknowledged !== result.managed_version) openDialog();
+};
+
 export function useBlenderProvision() {
   ensureListener();
   return {
@@ -183,6 +196,7 @@ export function useBlenderProvision() {
     acknowledge,
     clearBlenderPathSetting,
     dialogVisible,
+    offerSetupOnce,
     openDialog,
     closeDialog,
   };

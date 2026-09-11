@@ -94,8 +94,14 @@ const StlViewport = defineAsyncComponent(
 // The cut path hard-requires Blender >= 4.2 (wm.stl_import/export), same as
 // Render.vue's gate — reuse that composable/verdict rather than inventing a
 // second Blender-detection mechanism.
-const { blenderInfo, verdict, renderBlocked, managedVersion, openDialog } =
-  useBlenderProvision();
+const {
+  blenderInfo,
+  verdict,
+  renderBlocked,
+  managedVersion,
+  offerSetupOnce,
+  openDialog,
+} = useBlenderProvision();
 
 const landscapePath = ref("");
 /** Bumped whenever the landscape must reload even at an unchanged path —
@@ -833,6 +839,8 @@ const exportCollectionName = ref("");
 const exportBusy = ref(false);
 
 onMounted(async () => {
+  // Every cut this tab runs goes through Blender, so opening it is the ask.
+  void offerSetupOnce();
   const [
     library,
     plinthDefaults,
