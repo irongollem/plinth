@@ -5,6 +5,9 @@ Bakes the locked look: warm resin material with subsurface scattering, a soft
 warm key on a pure-black backdrop with a deepened shadow side, Cycles + denoise,
 auto scale / center / floor / frame. Saves a PNG next to the first STL by default.
 
+--engine eevee rasterizes instead, for catalog thumbnails where the studio
+look costs more than it buys; it falls back to Cycles where EEVEE is absent.
+
 USAGE (headless, no UI):
     blender -b -P render_mini.py -- MODEL.stl
     blender -b -P render_mini.py -- BODY.stl BASE.stl            # multi-part mini
@@ -49,9 +52,9 @@ Render tool"):
 BATCH MODE (many minis, one Blender launch — startup cost paid once):
     blender -b -P render_mini.py -- --batch manifest.json
   manifest.json = {"entries":[{"parts":["a.stl","base.stl"],"out":"a.png",
-  "rotate":[90,0,0], ...optional per-entry overrides (color/look/res/samples/
-  azimuth/elev/zoom/align/config/scale_ref/scale_ref_height/base)}]}. Progress
-  is machine-readable on stdout:
+  "rotate":[90,0,0], ...optional per-entry overrides (color/look/engine/res/
+  samples/azimuth/elev/zoom/align/config/scale_ref/scale_ref_height/base)}]}.
+  Progress is machine-readable on stdout:
     BATCH_START {"total":N} / BATCH_MODEL {"index":i,"out":...} /
     MEASURED {"index":i,"dims_mm":[x,y,z],"parts":n} /
     BATCH_DONE {"index":i,"ok":true|false[,"error":...]}
@@ -223,7 +226,8 @@ def parse():
             merge_config(LOOK, load_config(argv[i + 1]))
     cfg = dict(paths=[], out=None, rotate=(90,0,0), color=LOOK["base_color"],
                azimuth=-15.0, elev=0.22, zoom=1.15, res=LOOK["res"], samples=LOOK["samples"],
-               look="flat", contact=False, sheet_cols=3, sheet_res=420, sheet_samples=24,
+               look="flat", engine="cycles", contact=False, sheet_cols=3,
+               sheet_res=420, sheet_samples=24,
                align=False, translucent=False, batch=None, scale_ref=None,
                scale_ref_height=28.0, base=None)
     i = 0
@@ -238,6 +242,7 @@ def parse():
         elif a == "--res":           i+=1; cfg["res"]=int(argv[i])
         elif a == "--samples":       i+=1; cfg["samples"]=int(argv[i])
         elif a == "--look":          i+=1; cfg["look"]=argv[i]
+        elif a == "--engine":        i+=1; cfg["engine"]=argv[i]
         elif a == "--config":        i+=1  # consumed in pass 1 above
         elif a == "--contact-sheet": cfg["contact"]=True
         elif a == "--align-parts":   cfg["align"]=True
@@ -611,8 +616,17 @@ def camera(objs, azimuth, elev, zoom):
     cam.rotation_euler = (bbc-Vector(cam.location)).to_track_quat('-Z','Y').to_euler()
     cam.data.dof.use_dof = False
 
-def setup_render(res, samples, look="flat"):
-    sc = bpy.context.scene
+# EEVEE's identifier moved inside the supported Blender range (4.2 ships it
+# as BLENDER_EEVEE_NEXT, 5.x took the plain name back), so ask the running
+# build what it actually has instead of mapping versions to names.
+def eevee_engine_id():
+    try:
+        names = bpy.types.RenderSettings.bl_rna.properties["engine"].enum_items.keys()
+    except Exception:
+        return None
+    return next((e for e in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE") if e in names), None)
+
+def setup_cycles(sc, samples):
     sc.render.engine = "CYCLES"; sc.cycles.samples = samples
     try: sc.cycles.use_denoising = True
     except Exception: pass
@@ -626,6 +640,21 @@ def setup_render(res, samples, look="flat"):
                     sc.cycles.device="GPU"; break
             except Exception: continue
     except Exception: pass
+
+def setup_render(res, samples, look="flat", engine="cycles"):
+    sc = bpy.context.scene
+    eevee = eevee_engine_id() if engine == "eevee" else None
+    if eevee:
+        sc.render.engine = eevee
+        # EEVEE counts its own temporal-AA samples; cycles.samples is unread
+        # under it, so the caller's sample budget has to land here instead.
+        try: sc.eevee.taa_render_samples = samples
+        except Exception: pass
+    else:
+        # No EEVEE to be found: Cycles at the caller's res/samples is still
+        # the fast path relative to the studio defaults, so fall back quietly
+        # rather than failing a sweep the user asked to be quick.
+        setup_cycles(sc, samples)
     # Standard (not AgX) on purpose: AgX desaturates the warm resin tones,
     # which is the opposite of the formal product-render look
     sc.view_settings.view_transform = "Standard"
@@ -684,7 +713,7 @@ def build_and_render(cfg, rotate, out, res, samples, index=0, measure=False):
     if ref is not None: stage.append(ref)
     if base_obj is not None: stage.append(base_obj)
     camera(stage, cfg["azimuth"], cfg["elev"], cfg["zoom"])
-    setup_render(res, samples, cfg["look"])
+    setup_render(res, samples, cfg["look"], cfg["engine"])
     bpy.context.scene.render.filepath = os.path.abspath(out).replace("\\","/")
     bpy.ops.render.render(write_still=True)
 
@@ -750,7 +779,7 @@ def run_batch(cfg, manifest_path):
             ecfg = dict(cfg)
             ecfg["paths"] = e["parts"]
             ecfg["align"] = bool(e.get("align", cfg["align"]))
-            for k in ("look", "res", "samples", "azimuth", "elev", "zoom",
+            for k in ("look", "engine", "res", "samples", "azimuth", "elev", "zoom",
                       "scale_ref", "scale_ref_height", "base", "translucent"):
                 if k in e: ecfg[k] = e[k]
             if "color" in e: ecfg["color"] = tuple(e["color"])

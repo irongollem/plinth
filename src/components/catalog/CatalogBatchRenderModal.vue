@@ -47,6 +47,38 @@
             </span>
           </label>
         </div>
+        <div class="flex flex-col gap-1">
+          <label class="flex items-start gap-2 cursor-pointer">
+            <input
+              v-model="batchQuality"
+              type="radio"
+              value="Fast"
+              class="radio radio-xs mt-0.5"
+            />
+            <span class="text-[11.5px]">
+              <span class="font-mono">Fast</span>
+              <span class="text-base-content/50">
+                — rasterized at thumbnail size. Minutes, not hours, across a
+                whole library.
+              </span>
+            </span>
+          </label>
+          <label class="flex items-start gap-2 cursor-pointer">
+            <input
+              v-model="batchQuality"
+              type="radio"
+              value="Studio"
+              class="radio radio-xs mt-0.5"
+            />
+            <span class="text-[11.5px]">
+              <span class="font-mono">Studio</span>
+              <span class="text-base-content/50">
+                — the full locked look, same as the render studio. Slow enough
+                to leave running.
+              </span>
+            </span>
+          </label>
+        </div>
         <div class="flex items-center gap-2">
           <span class="flex-1"></span>
           <button
@@ -91,6 +123,7 @@ const {
   batchPackedSkipped,
   batchExisting,
   batchRerenderExisting,
+  batchQuality,
 } = storeToRefs(store);
 const { startBatchRender } = store;
 </script>

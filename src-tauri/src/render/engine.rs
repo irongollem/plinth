@@ -589,11 +589,63 @@ pub fn parse_sample_progress(line: &str) -> Option<(u32, u32)> {
 /// Deliberately a struct, not positional args: a future scale-reference
 /// figure ("banana for scale") is one more optional field here plus a script
 /// flag, no pipeline redesign.
+/// A catalog card is drawn at roughly 250px, so the studio pass's 1600px is
+/// almost all thrown away by the grid; 512 still has headroom on a HiDPI
+/// screen and on the drawer's larger preview.
+const FAST_PREVIEW_RES: u32 = 512;
+/// A thumbnail's worth of anti-aliasing rather than a path tracer's noise
+/// budget — EEVEE resolves its TAA samples far sooner than Cycles converges.
+const FAST_PREVIEW_SAMPLES: u32 = 16;
+
+/// How much render one catalog preview is worth.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, specta::Type)]
+pub enum PreviewQuality {
+    /// Rasterized at thumbnail settings, for sweeping a whole library.
+    Fast,
+    /// The locked look at full settings.
+    Studio,
+}
+
+impl PreviewQuality {
+    /// Per-entry (res, samples) for the manifest. None for Studio, which
+    /// leaves every key out so the script stays on its own LOOK defaults and
+    /// a studio sweep renders exactly what it did before this preset existed.
+    fn manifest_overrides(self) -> Option<(u32, u32)> {
+        match self {
+            Self::Fast => Some((FAST_PREVIEW_RES, FAST_PREVIEW_SAMPLES)),
+            Self::Studio => None,
+        }
+    }
+
+    /// `--engine` argument, or None to leave the script on its Cycles default.
+    fn engine_flag(self) -> Option<&'static str> {
+        match self {
+            Self::Fast => Some("eevee"),
+            Self::Studio => None,
+        }
+    }
+}
+
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct BatchEntry {
     pub parts: Vec<String>,
     pub out: String,
     pub rotate: (f64, f64, f64),
+    /// None omits the key, which is what leaves the script on its default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub res: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub samples: Option<u32>,
+}
+
+impl BatchEntry {
+    pub fn new(parts: Vec<String>, out: String, rotate: (f64, f64, f64), quality: PreviewQuality) -> Self {
+        let (res, samples) = match quality.manifest_overrides() {
+            Some((res, samples)) => (Some(res), Some(samples)),
+            None => (None, None),
+        };
+        Self { parts, out, rotate, res, samples }
+    }
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
@@ -608,10 +660,14 @@ pub fn build_batch_render_command(
     blender: &BlenderInfo,
     script: &Path,
     manifest_path: &Path,
+    quality: PreviewQuality,
 ) -> Command {
     let mut cmd = render_script_invocation(blender, script);
     cmd.arg("--batch").arg(manifest_path);
     cmd.arg("--look").arg("flat");
+    if let Some(engine) = quality.engine_flag() {
+        cmd.arg("--engine").arg(engine);
+    }
     cmd
 }
 
@@ -754,6 +810,7 @@ mod tests {
             &blender,
             Path::new("/tmp/render_mini.py"),
             Path::new("/tmp/manifest.json"),
+            PreviewQuality::Studio,
         );
         let args: Vec<String> = cmd
             .as_std()
@@ -819,17 +876,80 @@ mod tests {
     #[test]
     fn batch_manifest_serializes_the_script_contract() {
         let manifest = BatchManifest {
-            entries: vec![BatchEntry {
-                parts: vec!["/lib/a.stl".into()],
-                out: "/tmp/0.png".into(),
-                rotate: (90.0, 0.0, 0.0),
-            }],
+            entries: vec![BatchEntry::new(
+                vec!["/lib/a.stl".into()],
+                "/tmp/0.png".into(),
+                (90.0, 0.0, 0.0),
+                PreviewQuality::Studio,
+            )],
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["entries"][0]["parts"][0], "/lib/a.stl");
         assert_eq!(value["entries"][0]["out"], "/tmp/0.png");
         assert_eq!(value["entries"][0]["rotate"][0], 90.0);
+    }
+
+    /// Studio must stay byte-identical to the pre-preset behaviour: the
+    /// script only applies keys that are PRESENT, so an emitted
+    /// `"res": null` would not fall back — it would crash the entry.
+    #[test]
+    fn studio_entries_omit_the_override_keys_entirely() {
+        let manifest = BatchManifest {
+            entries: vec![BatchEntry::new(
+                vec!["/lib/a.stl".into()],
+                "/tmp/0.png".into(),
+                (90.0, 0.0, 0.0),
+                PreviewQuality::Studio,
+            )],
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
+        let entry = value["entries"][0].as_object().unwrap();
+        assert!(!entry.contains_key("res"), "studio must not pin res");
+        assert!(!entry.contains_key("samples"), "studio must not pin samples");
+    }
+
+    #[test]
+    fn fast_entries_carry_thumbnail_settings() {
+        let manifest = BatchManifest {
+            entries: vec![BatchEntry::new(
+                vec!["/lib/a.stl".into()],
+                "/tmp/0.png".into(),
+                (90.0, 0.0, 0.0),
+                PreviewQuality::Fast,
+            )],
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
+        assert_eq!(value["entries"][0]["res"], FAST_PREVIEW_RES);
+        assert_eq!(value["entries"][0]["samples"], FAST_PREVIEW_SAMPLES);
+    }
+
+    /// The studio command is the one users have been rendering with; a
+    /// stray --engine on it would silently change the locked look.
+    #[test]
+    fn only_the_fast_preset_passes_an_engine_flag() {
+        let blender = BlenderInfo {
+            path: "/usr/bin/blender".into(),
+            version: "Blender 5.1.2".into(),
+        };
+        let args_for = |quality| {
+            let cmd = build_batch_render_command(
+                &blender,
+                Path::new("/tmp/render_mini.py"),
+                Path::new("/tmp/manifest.json"),
+                quality,
+            );
+            cmd.as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<String>>()
+        };
+        let studio = args_for(PreviewQuality::Studio);
+        assert!(!studio.iter().any(|a| a == "--engine"));
+        let fast = args_for(PreviewQuality::Fast);
+        assert!(fast.windows(2).any(|w| w[0] == "--engine" && w[1] == "eevee"));
     }
 
     #[test]

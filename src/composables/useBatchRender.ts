@@ -5,6 +5,7 @@ import {
   type BatchRenderTarget,
   commands,
   events,
+  type PreviewQuality,
 } from "../bindings";
 
 /**
@@ -87,9 +88,12 @@ export function useBatchRender() {
       : null,
   );
 
-  const startBatch = async (targets: BatchRenderTarget[]) => {
+  const startBatch = async (
+    targets: BatchRenderTarget[],
+    quality: PreviewQuality,
+  ) => {
     batchStatus.value = null;
-    const result = await commands.startBatchRender(targets);
+    const result = await commands.startBatchRender(targets, quality);
     if (result.status === "ok") batchJobId.value = result.data;
     return result;
   };

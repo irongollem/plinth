@@ -19,7 +19,7 @@ use crate::models::events::{
     BatchRenderModelStatus, BatchRenderProgressStatus, BatchRenderStartedStatus, BatchRenderStatus,
 };
 use crate::render::commands::ACTIVE_RENDERS;
-use crate::render::engine::{self, BatchEntry, BatchLine, BatchManifest};
+use crate::render::engine::{self, BatchEntry, BatchLine, BatchManifest, PreviewQuality};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::ops::ControlFlow;
@@ -73,6 +73,7 @@ fn parse_rotation(rotation: Option<&str>) -> (f64, f64, f64) {
 pub async fn start_batch_render(
     app_handle: AppHandle,
     targets: Vec<BatchRenderTarget>,
+    quality: PreviewQuality,
 ) -> Result<String, AppError> {
     // Invalid targets are dropped, not fatal: a file deleted since the
     // candidate list was built shouldn't kill a 500-model sweep.
@@ -117,13 +118,16 @@ pub async fn start_batch_render(
         entries: targets
             .iter()
             .enumerate()
-            .map(|(index, target)| BatchEntry {
-                parts: target.parts.clone(),
-                out: scratch
-                    .join(format!("{}.png", index))
-                    .to_string_lossy()
-                    .into_owned(),
-                rotate: parse_rotation(target.rotation.as_deref()),
+            .map(|(index, target)| {
+                BatchEntry::new(
+                    target.parts.clone(),
+                    scratch
+                        .join(format!("{}.png", index))
+                        .to_string_lossy()
+                        .into_owned(),
+                    parse_rotation(target.rotation.as_deref()),
+                    quality,
+                )
             })
             .collect(),
     };
@@ -151,6 +155,7 @@ pub async fn start_batch_render(
             manifest_path,
             scratch,
             cancel_token,
+            quality,
         )
         .await;
     });
@@ -174,6 +179,7 @@ async fn run_batch_job(
     manifest_path: std::path::PathBuf,
     scratch: std::path::PathBuf,
     cancel_token: Arc<Notify>,
+    quality: PreviewQuality,
 ) {
     let started = std::time::Instant::now();
     let total_models = targets.len() as u32;
@@ -191,6 +197,7 @@ async fn run_batch_job(
         &cancel_token,
         &mut succeeded,
         &mut failed,
+        quality,
     )
     .await;
 
@@ -265,8 +272,9 @@ async fn run_batch_child(
     cancel_token: &Notify,
     succeeded: &mut u32,
     failed: &mut u32,
+    quality: PreviewQuality,
 ) -> Result<(), AppError> {
-    let cmd = engine::build_batch_render_command(blender, script, manifest_path);
+    let cmd = engine::build_batch_render_command(blender, script, manifest_path, quality);
 
     let total_models = targets.len() as u32;
     let mut current_index: u32 = 0;
