@@ -82,29 +82,11 @@ async importRelease(packagePath: string, libraryDir: string, components: string[
 /**
  * Diff a `release.3pk` against the library without touching anything: per
  * component, is it new, changed, unchanged, packed at rest, or missing its
- * archive — and, regardless of that state, how much of it this library
- * already owns SOMEWHERE by checksum. Feeds the selective-import dialog
- * shown before an import runs.
+ * archive? Feeds the selective-import dialog shown before an import runs.
  */
 async inspectReleasePackage(packagePath: string, libraryDir: string) : Promise<Result<PackageInspection, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("inspect_release_package", { packagePath, libraryDir }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * "Import what you own": for each named component, extract the sibling
- * archive the normal way when it checks out, otherwise materialize
- * whatever this library already holds by checksum — including a component
- * whose archive isn't present next to the .3pk at all. A partial result
- * still keeps normal catalog rows for what landed; nothing is invented for
- * what didn't, and re-running after the rest turns up completes it.
- */
-async recompileReleaseFromLibrary(packagePath: string, libraryDir: string, components: string[] | null) : Promise<Result<RecompileOutcome, AppError>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("recompile_release_from_library", { packagePath, libraryDir, components }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -484,9 +466,21 @@ async getCatalogModelFiles(dirPath: string, variantKey: string | null) : Promise
     else return { status: "error", error: e  as any };
 }
 },
-async getModelGeometry(dirPath: string) : Promise<Result<ModelFileGeometry[], AppError>> {
+async getModelGeometry(dirPath: string) : Promise<Result<ModelGeometryDetail, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_model_geometry", { dirPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Permanently hide a model's base-size suggestion — see
+ * db::model_base_suggestion for when one appears in the first place.
+ */
+async dismissBaseSuggestion(dirPath: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dismiss_base_suggestion", { dirPath }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -935,9 +929,9 @@ async cleanupEphemeralFiles(paths: string[]) : Promise<Result<BatchOutcome, AppE
     else return { status: "error", error: e  as any };
 }
 },
-async startBatchRender(targets: BatchRenderTarget[]) : Promise<Result<string, AppError>> {
+async startBatchRender(targets: BatchRenderTarget[], quality: PreviewQuality) : Promise<Result<string, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_batch_render", { targets }) };
+    return { status: "ok", data: await TAURI_INVOKE("start_batch_render", { targets, quality }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1347,6 +1341,12 @@ export type BaseCutValidatingStatus = { job_id: string }
  */
 export type BaseCutValidationReport = { non_manifold_edges?: number; dims_mm?: [number, number, number]; verts?: number; warning?: string | null }
 /**
+ * A base-size suggestion derived from mined geometry: every mined file in
+ * the model that detected a base agreed on shape and mm (see
+ * db::model_base_suggestion). "round" | "square"; mm rounded to 1 decimal.
+ */
+export type BaseSuggestion = { shape: string; mm: number }
+/**
  * Outcome of a batch that may partially succeed — the counts and the
  * per-item errors travel together so the UI can report both.
  */
@@ -1594,13 +1594,7 @@ model_names: string[];
 /**
  * Why the component can't be imported, for Packed/MissingArchive.
  */
-detail: string | null; 
-/**
- * How many of `file_count` this library already owns SOMEWHERE, by
- * checksum — independent of `state`: even a MissingArchive component's
- * checksums are known from the manifest itself.
- */
-files_owned: number; missing_bytes: number; missing: MissingFile[] }
+detail: string | null }
 export type CompressionStatus = { Started: StartedStatus } | { Progress: ProgressStatus } | { Completed: CompletedStatus } | { Failed: FailedStatus } | { Cancelled: CancelledStatus }
 export type CompressionType = "SevenZip" | "Zip"
 /**
@@ -1720,7 +1714,13 @@ export type GeometryProgressStatus = { job_id: string; processed: number; total:
  * parameters, and search_catalog_groups (app_handle, query, tags,
  * designer, sort, limit, offset) was already six away from that ceiling.
  */
-export type GeometryRange = { height_min_mm: number | null; height_max_mm: number | null; volume_min_mm3: number | null; volume_max_mm3: number | null }
+export type GeometryRange = { height_min_mm: number | null; height_max_mm: number | null; volume_min_mm3: number | null; volume_max_mm3: number | null; 
+/**
+ * "round" | "square"; anything else (including unset) matches either
+ * when `base_mm` is set. Filters on CURATED base only — see
+ * db::search's push_base_where/push_base_having.
+ */
+base_shape: string | null; base_mm: number | null }
 export type GeometryStartedStatus = { job_id: string }
 export type GeometryStatus = { Started: GeometryStartedStatus } | { Progress: GeometryProgressStatus } | { Completed: GeometryCompletedStatus } | { Failed: GeometryFailedStatus } | { Cancelled: GeometryCancelledStatus }
 /**
@@ -1960,13 +1960,16 @@ thumbnail_url: string | null;
 image_url: string | null }
 export type MinihoardStatus = { Line: MinihoardLine } | { Finished: MinihoardFinished }
 /**
- * One manifest file this library doesn't own anywhere by checksum.
- */
-export type MissingFile = { name: string; size_bytes: number }
-/**
  * x/y/z are bbox extents; open_edges None means skipped, not clean.
  */
 export type ModelFileGeometry = { file_name: string; tri_count: number; x_mm: number; y_mm: number; z_mm: number; volume_mm3: number; open_edges: number | null }
+/**
+ * What the drawer's geometry section needs in one round trip: the per-file
+ * listing plus any model-level base suggestion (None when files disagree,
+ * nothing detected, the model is already curated, or the suggestion was
+ * dismissed).
+ */
+export type ModelGeometryDetail = { files: ModelFileGeometry[]; base_suggestion: BaseSuggestion | null }
 export type ModelLocation = { Local: string } | { External: string }
 /**
  * The user-editable metadata for one model, saved together from the drawer.
@@ -2111,6 +2114,18 @@ hollow: boolean; wall_mm: number; top_mm: number;
  */
 magnet_clearance_mm: number }
 export type PlinthRepairSummary = { repaired: number; unchanged: number; warnings: string[] }
+/**
+ * How much render one catalog preview is worth.
+ */
+export type PreviewQuality = 
+/**
+ * Rasterized at thumbnail settings, for sweeping a whole library.
+ */
+"Fast" | 
+/**
+ * The locked look at full settings.
+ */
+"Studio"
 export type ProgressStatus = { job_id: string; processed_files: number; total_files: number; processed_size_kb: number; total_size_kb: number; percent_size: number; percent_files: number; current_file: string }
 export type ProvisionCancelledStatus = { job_id: string }
 export type ProvisionCompletedStatus = { job_id: string; info: BlenderInfo }
@@ -2130,22 +2145,6 @@ export type ProvisionStartedStatus = { job_id: string;
  * The pinned Blender being installed, e.g. "5.1.2".
  */
 version: string }
-export type RecompileOutcome = { release_name: string; designer: string; dest_dir: string; components: RecompiledComponent[]; 
-/**
- * Components a library donor couldn't help either (e.g. packed at
- * rest).
- */
-errors: string[]; warnings: string[] }
-/**
- * One component's outcome from `recompile_release`.
- */
-export type RecompiledComponent = { name: string; 
-/**
- * True when every manifest file for this component landed on disk —
- * via the archive or via library donors. `files_landed` can be > 0
- * even when this is false: "not complete" isn't "nothing happened".
- */
-complete: boolean; files_landed: number; files_missing: number; missing_bytes: number }
 export type Release = { name: string; designer: string; description: string; date: string; version: string; model_references: ModelReference[]; groups: string[]; release_dir: string; images: string[]; other_files: string[] }
 /**
  * A WIP release sitting in the scratch dir, not yet packed — surfaced so

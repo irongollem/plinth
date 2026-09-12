@@ -19,6 +19,18 @@
         <span class="loading loading-spinner loading-sm"></span>
       </div>
       <template v-else>
+        <!-- Without this the Render button starts a sweep that dies on the
+             first launch and lands as an error toast -->
+        <div v-if="renderBlocked" class="alert alert-warning text-[12px] py-2">
+          <span>
+            {{
+              verdict === "TooOld"
+                ? `Blender ${blenderInfo?.version ?? ""} predates the 4.2 minimum.`
+                : "Previews are rendered by Blender, and none was found."
+            }}
+          </span>
+          <button class="btn btn-xs" @click="openDialog">Set up</button>
+        </div>
         <div class="font-mono text-[11.5px] flex flex-col gap-1">
           <span>
             {{ batchMissing.length }} model{{
@@ -47,6 +59,38 @@
             </span>
           </label>
         </div>
+        <div class="flex flex-col gap-1">
+          <label class="flex items-start gap-2 cursor-pointer">
+            <input
+              v-model="batchQuality"
+              type="radio"
+              value="Fast"
+              class="radio radio-xs mt-0.5"
+            />
+            <span class="text-[11.5px]">
+              <span class="font-mono">Fast</span>
+              <span class="text-base-content/50">
+                — rasterized at thumbnail size. Minutes, not hours, across a
+                whole library.
+              </span>
+            </span>
+          </label>
+          <label class="flex items-start gap-2 cursor-pointer">
+            <input
+              v-model="batchQuality"
+              type="radio"
+              value="Studio"
+              class="radio radio-xs mt-0.5"
+            />
+            <span class="text-[11.5px]">
+              <span class="font-mono">Studio</span>
+              <span class="text-base-content/50">
+                — the full locked look, same as the render studio. Slow enough
+                to leave running.
+              </span>
+            </span>
+          </label>
+        </div>
         <div class="flex items-center gap-2">
           <span class="flex-1"></span>
           <button
@@ -60,8 +104,9 @@
             type="button"
             class="btn btn-sm btn-primary"
             :disabled="
-              !batchMissing.length &&
-              !(batchRerenderExisting && batchExisting.length)
+              renderBlocked ||
+              (!batchMissing.length &&
+                !(batchRerenderExisting && batchExisting.length))
             "
             @click="startBatchRender"
           >
@@ -80,6 +125,7 @@
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
 import ModalView from "../ModalView.vue";
+import { useBlenderProvision } from "../../composables/useBlenderProvision";
 import { useCatalogStore } from "../../stores/catalogStore";
 
 const store = useCatalogStore();
@@ -91,6 +137,9 @@ const {
   batchPackedSkipped,
   batchExisting,
   batchRerenderExisting,
+  batchQuality,
 } = storeToRefs(store);
 const { startBatchRender } = store;
+const { blenderInfo, verdict, renderBlocked, openDialog } =
+  useBlenderProvision();
 </script>

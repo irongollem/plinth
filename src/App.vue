@@ -59,7 +59,7 @@ const currentTabComponent = computed(() => {
   </div>
 
   <ToastContainer />
-  <!-- Outside the KeepAlive so first-run setup overlays every tab -->
+  <!-- Outside the KeepAlive so setup overlays whichever tab asked for it -->
   <BlenderSetupDialog />
   <ImportPackageModal
     :inspection="pendingImport?.inspection ?? null"

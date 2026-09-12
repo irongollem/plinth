@@ -152,11 +152,11 @@
 
 <script setup lang="ts">
 import { computed, reactive, watch } from "vue";
+import type { ComponentState } from "../bindings";
 import type {
-  ComponentState,
   ComponentStatus,
   PackageInspection,
-} from "../bindings";
+} from "../composables/use3DPackageHandler";
 import { formatFileSize } from "../utils/format";
 
 const props = defineProps<{
