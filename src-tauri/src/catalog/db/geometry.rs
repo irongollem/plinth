@@ -52,22 +52,37 @@ pub fn store_hash(conn: &Connection, path: &str, hash: &str) -> Result<(), AppEr
     Ok(())
 }
 
+/// Every place bare-hex blake3 `hash` is currently indexed in the library.
+/// Loose rows come first because they can be copied directly; packed rows
+/// require an ephemeral extract. Returning all candidates matters because
+/// the catalog is an index, not an authority: one row can be stale while a
+/// second row for the same bytes is still perfectly usable.
+pub fn find_owners(
+    conn: &Connection,
+    hash: &str,
+) -> Result<Vec<(String, Option<String>)>, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Ownership lookup failed: {}", e));
+    let mut stmt = conn
+        .prepare(
+            "SELECT path, archive_path FROM files WHERE content_hash = ?1
+             ORDER BY archive_path IS NOT NULL, path COLLATE NOCASE",
+        )
+        .map_err(map_err)?;
+    stmt.query_map([hash], |row| Ok((row.get(0)?, row.get(1)?)))
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(map_err)
+}
+
 /// Where a bare-hex blake3 `hash` already lives in the library, if
-/// anywhere — the "do we already own these bytes" primitive a release
-/// manifest completeness diff and a donor-based recompile both need.
-/// content_hash already covers packed-at-rest files (the scanner seeds it
-/// from pack sidecars), so this never has to unpack anything. Prefers a
-/// loose row over a packed one: a loose donor materializes with a
-/// hardlink/copy, a packed one needs an ephemeral extract first.
-pub fn find_owner(conn: &Connection, hash: &str) -> Result<Option<(String, Option<String>)>, AppError> {
-    conn.query_row(
-        "SELECT path, archive_path FROM files WHERE content_hash = ?1
-         ORDER BY archive_path IS NOT NULL LIMIT 1",
-        [hash],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
-    .optional()
-    .map_err(|e| AppError::ConfigError(format!("Ownership lookup failed: {}", e)))
+/// anywhere — the cheap "do we already own these bytes" primitive used by
+/// completeness checks. Materialization must use `find_owners` instead so
+/// it can recover when this first indexed candidate has gone stale.
+pub fn find_owner(
+    conn: &Connection,
+    hash: &str,
+) -> Result<Option<(String, Option<String>)>, AppError> {
+    Ok(find_owners(conn, hash)?.into_iter().next())
 }
 
 /// Loose (unpacked) STL files a geometry mining pass should consider —
@@ -269,6 +284,7 @@ mod tests {
         let mut conn = test_conn();
 
         assert!(find_owner(&conn, "deadbeef").unwrap().is_none());
+        assert!(find_owners(&conn, "deadbeef").unwrap().is_empty());
 
         let mut packed = file_row("/lib/newt/body.stl", "/lib/newt", 2048);
         packed.archive_path = Some("/lib/newt/model.plinthpack".into());
@@ -281,13 +297,21 @@ mod tests {
         assert_eq!(archive.as_deref(), Some("/lib/newt/model.plinthpack"));
 
         // A loose twin under a scattered, differently-named path arrives —
-        // find_owner now prefers it, since it materializes without an
-        // ephemeral extract first.
+        // find_owner still gives the cheap first candidate, while find_owners
+        // preserves the packed fallback for callers that need to verify and
+        // continue after a stale row.
         let mut loose = file_row("/lib/freebies/renamed_body.stl", "/lib/freebies", 2048);
         loose.content_hash = Some("deadbeef".into());
         replace_catalog(&mut conn, "/lib/freebies", &[loose], &[], &[], &[], &[]).unwrap();
         let (path, archive) = find_owner(&conn, "deadbeef").unwrap().unwrap();
         assert_eq!(path, "/lib/freebies/renamed_body.stl");
         assert!(archive.is_none());
+
+        let owners = find_owners(&conn, "deadbeef").unwrap();
+        assert_eq!(owners.len(), 2);
+        assert_eq!(owners[0].0, "/lib/freebies/renamed_body.stl");
+        assert!(owners[0].1.is_none());
+        assert_eq!(owners[1].0, "/lib/newt/body.stl");
+        assert_eq!(owners[1].1.as_deref(), Some("/lib/newt/model.plinthpack"));
     }
 }
