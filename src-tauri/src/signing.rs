@@ -1,7 +1,7 @@
 //! Creator identity for signed `.3pk` manifests (docs/3PK.md `manifest.sig`,
 //! issue #6). v1 is local-only: one Ed25519 keypair per install, generated
-//! on demand from Settings and reused silently by the release builder — no
-//! cloud, no registry, no key revocation (all tracked as #8 follow-ups).
+//! automatically the first time Plinth packs a release (and surfaced in
+//! Settings) — no cloud, registry, or revocation yet (#8 follow-ups).
 //! OS keychain storage is a later hardening step; the app data dir matches
 //! the current threat model (same disk the unpacked STLs already live on).
 
@@ -57,10 +57,10 @@ pub fn key_path(app_handle: &AppHandle) -> Result<PathBuf, AppError> {
     Ok(app_handle.path().app_data_dir()?.join(KEY_FILE_NAME))
 }
 
-/// blake3 of the raw public key bytes, first 16 hex chars. Grouping this
-/// into fours for display is a UI concern, not part of the value itself.
+/// Full BLAKE3 fingerprint of the raw public key bytes. The UI may group
+/// or abbreviate it for display, but identity always uses the full value.
 fn fingerprint(public_key: &[u8]) -> String {
-    blake3::hash(public_key).to_hex()[..16].to_string()
+    blake3::hash(public_key).to_hex().to_string()
 }
 
 #[cfg(unix)]
