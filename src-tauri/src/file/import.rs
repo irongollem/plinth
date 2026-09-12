@@ -27,6 +27,12 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
+/// Immutable copy of the exact signed source pair. The release-root
+/// manifest.json is Plinth's mutable local-state manifest after a selective
+/// import/update, so a creator signature must never sit next to it unless it
+/// actually covers those bytes.
+const PROVENANCE_DIR: &str = ".plinth-provenance";
+
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
 pub struct ImportOutcome {
     pub release_name: String,
@@ -344,9 +350,10 @@ pub fn inspect_package(
     })
 }
 
-/// Extract everything in `release.3pk` EXCEPT manifest.json — the manifest is
-/// written last from what actually imported, so a component that failed this
-/// run still reads as pending on the next inspect instead of "unchanged".
+/// Extract release-level payload except the manifest pair. The release-root
+/// manifest.json is written last from what actually imported, while the
+/// creator's source manifest/signature pair is preserved separately by
+/// `preserve_source_provenance`.
 fn extract_release_payload(package_path: &Path, dest: &Path) -> Result<(), AppError> {
     let file = std::fs::File::open(package_path)
         .map_err(|e| AppError::IoError(format!("Cannot open {}: {}", package_path.display(), e)))?;
@@ -360,7 +367,7 @@ fn extract_release_payload(package_path: &Path, dest: &Path) -> Result<(), AppEr
         let Some(rel) = entry.enclosed_name().map(|p| p.to_owned()) else {
             continue;
         };
-        if rel == Path::new("manifest.json") {
+        if rel == Path::new("manifest.json") || rel == Path::new("manifest.sig") {
             continue;
         }
         let out = dest.join(rel);
@@ -378,6 +385,42 @@ fn extract_release_payload(package_path: &Path, dest: &Path) -> Result<(), AppEr
         std::io::copy(&mut entry, &mut out_file)
             .map_err(|e| AppError::IoError(format!("Failed to write {}: {}", out.display(), e)))?;
     }
+    Ok(())
+}
+
+/// Preserve the exact source manifest/signature bytes as an immutable pair.
+/// A selective import or failed component can make the root manifest differ
+/// from what the creator signed, so the signature lives only with the source
+/// bytes it authenticates. Unsigned incoming packages clear old provenance,
+/// and the old buggy root-level signature is removed on every run.
+fn preserve_source_provenance(package_path: &Path, dest: &Path) -> Result<(), AppError> {
+    std::fs::remove_file(dest.join("manifest.sig")).ok();
+
+    let mut archive = open_package(package_path)?;
+    let manifest_bytes = manifest_text(&mut archive)?.into_bytes();
+    let sig_bytes = match archive.by_name("manifest.sig") {
+        Ok(mut entry) => {
+            let mut bytes = Vec::new();
+            entry
+                .read_to_end(&mut bytes)
+                .map_err(|e| AppError::IoError(format!("Failed to read manifest.sig: {}", e)))?;
+            Some(bytes)
+        }
+        Err(_) => None,
+    };
+
+    let provenance = dest.join(PROVENANCE_DIR);
+    let Some(sig_bytes) = sig_bytes else {
+        std::fs::remove_dir_all(&provenance).ok();
+        return Ok(());
+    };
+
+    std::fs::create_dir_all(&provenance)
+        .map_err(|e| AppError::IoError(format!("Failed to create provenance dir: {}", e)))?;
+    std::fs::write(provenance.join("manifest.json"), manifest_bytes)
+        .map_err(|e| AppError::IoError(format!("Failed to preserve source manifest: {}", e)))?;
+    std::fs::write(provenance.join("manifest.sig"), sig_bytes)
+        .map_err(|e| AppError::IoError(format!("Failed to preserve source signature: {}", e)))?;
     Ok(())
 }
 
@@ -570,8 +613,10 @@ pub fn import_release(
     std::fs::create_dir_all(&dest)
         .map_err(|e| AppError::IoError(format!("Failed to create release dir: {}", e)))?;
 
-    // Release-level payload (images, release.json — the manifest comes last)
+    // Release-level payload and immutable signed-source provenance. The
+    // mutable local manifest is written last below.
     extract_release_payload(package_path, &dest)?;
+    preserve_source_provenance(package_path, &dest)?;
 
     let selected = |name: &str| {
         selection
@@ -806,6 +851,7 @@ pub fn recompile_release(
     std::fs::create_dir_all(&dest)
         .map_err(|e| AppError::IoError(format!("Failed to create release dir: {}", e)))?;
     extract_release_payload(package_path, &dest)?;
+    preserve_source_provenance(package_path, &dest)?;
 
     let selected = |name: &str| {
         selection
@@ -1909,25 +1955,58 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// import copies manifest.sig into the release dir alongside
-    /// manifest.json (via extract_release_payload's "everything except
-    /// manifest.json" rule), so a later local re-inspect/re-pack can still
-    /// see the provenance the original import verified.
     #[test]
-    fn import_keeps_manifest_sig_next_to_the_local_manifest() {
-        let dir = temp("sig_import_copy");
+    fn import_keeps_signed_source_pair_separate_from_local_state_manifest() {
+        let dir = temp("sig_import_provenance");
         let (staged, library) = signed_release_fixture(&dir);
+
+        // Two signed components, but import only one. This guarantees the
+        // release-root local manifest is rewritten and therefore is NOT the
+        // byte sequence covered by the creator's signature.
+        let goblin = staged.join("goblin");
+        std::fs::create_dir_all(&goblin).unwrap();
+        std::fs::write(goblin.join("body.stl"), b"goblin-body-bytes").unwrap();
+        write_model_json(&goblin, "goblin", &["body.stl"]);
+
         let key = signing::ensure_key(&dir.join("key.json")).unwrap();
         let out = dir.join("packed");
-        pack_maybe_signed(&staged, &["knight"], &out, Some(&key));
+        pack_maybe_signed(&staged, &["knight", "goblin"], &out, Some(&key));
         std::fs::create_dir_all(&library).unwrap();
 
-        let outcome = import_release(&out.join("release.3pk"), &library, None).unwrap();
+        let source_manifest = std::fs::read(staged.join("manifest.json")).unwrap();
+        let source_sig = std::fs::read(staged.join("manifest.sig")).unwrap();
+        let outcome = import_release(
+            &out.join("release.3pk"),
+            &library,
+            Some(vec!["knight".into()]),
+        )
+        .unwrap();
         let release_dir = Path::new(&outcome.dest_dir);
-        assert_eq!(
-            std::fs::read(release_dir.join("manifest.sig")).unwrap(),
-            std::fs::read(staged.join("manifest.sig")).unwrap()
+
+        assert!(
+            !release_dir.join("manifest.sig").exists(),
+            "a source signature must never sit beside the mutable local manifest"
         );
+        let provenance = release_dir.join(PROVENANCE_DIR);
+        assert_eq!(
+            std::fs::read(provenance.join("manifest.json")).unwrap(),
+            source_manifest
+        );
+        assert_eq!(
+            std::fs::read(provenance.join("manifest.sig")).unwrap(),
+            source_sig
+        );
+        assert_ne!(
+            std::fs::read(release_dir.join("manifest.json")).unwrap(),
+            std::fs::read(provenance.join("manifest.json")).unwrap(),
+            "selective import must keep local state distinct from signed source bytes"
+        );
+
+        let sig_text = String::from_utf8(source_sig).unwrap();
+        assert!(matches!(
+            signing::classify_signature(&sig_text, &source_manifest),
+            SignatureStatus::Valid { .. }
+        ));
 
         std::fs::remove_dir_all(&dir).ok();
     }
