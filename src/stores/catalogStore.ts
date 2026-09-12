@@ -15,6 +15,7 @@ import {
   type GroupOrigin,
   type ModelFileGeometry,
   type NormalizePlan,
+  type PreviewQuality,
   type RenderCandidate,
   type TagCount,
   commands,
@@ -1305,6 +1306,7 @@ export const useCatalogStore = defineStore("catalog", () => {
   const batchCandidates = ref<RenderCandidate[]>([]);
   const batchRerenderExisting = ref(false);
   const batchLoading = ref(false);
+  const batchQuality = ref<PreviewQuality>("Fast");
 
   const batchMissing = computed(() =>
     batchCandidates.value.filter((c) => !c.has_preview && !c.packed),
@@ -1321,6 +1323,7 @@ export const useCatalogStore = defineStore("catalog", () => {
     batchLoading.value = true;
     showBatchRender.value = true;
     batchRerenderExisting.value = false;
+    batchQuality.value = "Fast";
     batchCandidates.value = [];
     const result = await commands.getRenderCandidates(
       groupNames.length ? null : designerFilter.value || null,
@@ -1348,6 +1351,7 @@ export const useCatalogStore = defineStore("catalog", () => {
         parts: c.parts,
         rotation: c.rotation,
       })),
+      batchQuality.value,
     );
     if (result.status !== "ok") {
       toastStore.reportError("Failed to start batch render", result.error);
@@ -2826,6 +2830,7 @@ export const useCatalogStore = defineStore("catalog", () => {
     showBatchRender,
     batchCandidates,
     batchRerenderExisting,
+    batchQuality,
     batchLoading,
     batchMissing,
     batchExisting,

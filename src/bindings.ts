@@ -929,9 +929,9 @@ async cleanupEphemeralFiles(paths: string[]) : Promise<Result<BatchOutcome, AppE
     else return { status: "error", error: e  as any };
 }
 },
-async startBatchRender(targets: BatchRenderTarget[]) : Promise<Result<string, AppError>> {
+async startBatchRender(targets: BatchRenderTarget[], quality: PreviewQuality) : Promise<Result<string, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_batch_render", { targets }) };
+    return { status: "ok", data: await TAURI_INVOKE("start_batch_render", { targets, quality }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2114,6 +2114,18 @@ hollow: boolean; wall_mm: number; top_mm: number;
  */
 magnet_clearance_mm: number }
 export type PlinthRepairSummary = { repaired: number; unchanged: number; warnings: string[] }
+/**
+ * How much render one catalog preview is worth.
+ */
+export type PreviewQuality = 
+/**
+ * Rasterized at thumbnail settings, for sweeping a whole library.
+ */
+"Fast" | 
+/**
+ * The locked look at full settings.
+ */
+"Studio"
 export type ProgressStatus = { job_id: string; processed_files: number; total_files: number; processed_size_kb: number; total_size_kb: number; percent_size: number; percent_files: number; current_file: string }
 export type ProvisionCancelledStatus = { job_id: string }
 export type ProvisionCompletedStatus = { job_id: string; info: BlenderInfo }
