@@ -1,0 +1,139 @@
+name: Finalize signing branch once
+
+on:
+  push:
+    branches:
+      - claude/issue-6-signed-manifests
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/issue-6-signed-manifests
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Make creator signing automatic and strengthen key identity
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f"Expected text not found in {path}: {old[:100]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace(
+              "src-tauri/src/signing.rs",
+              "//! issue #6). v1 is local-only: one Ed25519 keypair per install, generated\n//! on demand from Settings and reused silently by the release builder — no\n//! cloud, no registry, no key revocation (all tracked as #8 follow-ups).",
+              "//! issue #6). v1 is local-only: one Ed25519 keypair per install, generated\n//! automatically the first time Plinth packs a release (and surfaced in\n//! Settings) — no cloud, registry, or revocation yet (#8 follow-ups).",
+          )
+
+          replace(
+              "src-tauri/src/signing.rs",
+              "/// blake3 of the raw public key bytes, first 16 hex chars. Grouping this\n/// into fours for display is a UI concern, not part of the value itself.\nfn fingerprint(public_key: &[u8]) -> String {\n    blake3::hash(public_key).to_hex()[..16].to_string()\n}",
+              "/// Full BLAKE3 fingerprint of the raw public key bytes. The UI may group\n/// or abbreviate it for display, but identity always uses the full value.\nfn fingerprint(public_key: &[u8]) -> String {\n    blake3::hash(public_key).to_hex().to_string()\n}",
+          )
+
+          replace(
+              "src-tauri/src/file/compression_jobs.rs",
+              "        // No key = unsigned pack, silently fine — signing is opt-in via\n        // Settings' ensure_signing_key, never a gate on packing.\n        if let Some(signing_key) = crate::signing::load_key(signing_key_path)? {\n            let signature = crate::signing::sign_manifest(&signing_key, &manifest_bytes);\n            let signature_path = release_dir_path.join(\"manifest.sig\");\n            fs::write(&signature_path, serde_json::to_string_pretty(&signature)?)\n                .map_err(|e| AppError::IoError(format!(\"Failed to write manifest.sig: {}\", e)))?;\n            files_for_3pk.push(signature_path);\n        }",
+              "        // Signing is automatic for creators: the first pack creates this\n        // install's Ed25519 identity, later packs silently reuse it. Accounts\n        // (#8) can later add recovery/rotation without making artists manage\n        // cryptographic key files themselves.\n        let signing_key = crate::signing::ensure_key(signing_key_path)?;\n        let signature = crate::signing::sign_manifest(&signing_key, &manifest_bytes);\n        let signature_path = release_dir_path.join(\"manifest.sig\");\n        fs::write(&signature_path, serde_json::to_string_pretty(&signature)?)\n            .map_err(|e| AppError::IoError(format!(\"Failed to write manifest.sig: {}\", e)))?;\n        files_for_3pk.push(signature_path);",
+          )
+
+          replace(
+              "src/views/Settings.vue",
+              "          Every release you pack is signed with this key when it's present —\n          customers can verify a release really came from you. Publish the\n          fingerprint on your MMF/Patreon/store page so they have something to\n          compare it against.",
+              "          Plinth creates this signing identity automatically and uses it for\n          every release you pack. The fingerprint lets someone compare this\n          key with one you publish elsewhere; account-backed creator identity,\n          recovery, and key rotation come later.",
+          )
+
+          replace(
+              "docs/3PK.md",
+              "## Signing (optional, additive)\n\nA creator MAY sign a release. When a local signing key exists at pack\ntime, the packer writes `manifest.sig` — a detached JSON signature — next\nto `manifest.json` inside `release.3pk`:",
+              "## Signing (additive)\n\nPlinth signs creator-packed releases automatically. The first pack on an\ninstall creates a local Ed25519 signing key; later packs silently reuse it.\nThe packer writes `manifest.sig` — a detached JSON signature — next to\n`manifest.json` inside `release.3pk`:",
+          )
+
+          replace(
+              "docs/3PK.md",
+              '  "key_fingerprint": "<first 16 hex chars of blake3(public_key)>",',
+              '  "key_fingerprint": "<full blake3(public_key) hex>",',
+          )
+
+          replace(
+              "docs/3PK.md",
+              "anything the same way the packer did. No key = no `manifest.sig`; every\nreader, old or new, treats that as a normal unsigned pack — nothing about\n`Manifest::is_readable` or the `version` field changes.",
+              "anything the same way the packer did. Unsigned packs remain valid and\nreadable for compatibility with older Plinth versions and other writers —\nnothing about `Manifest::is_readable` or the `version` field changes.",
+          )
+
+          replace(
+              "docs/3PK.md",
+              "Signing keys are local-only in v1: one Ed25519 keypair generated on\ndemand from Settings per install, stored in the app data dir, never\nuploaded anywhere. There is no CA, no revocation, and no cross-device\nidentity yet (see Out of scope below).",
+              "Signing keys are local-only in v1: one Ed25519 keypair generated\nautomatically per install, stored in the app data dir, never uploaded\nanywhere. Settings merely exposes its fingerprint; artists do not need to\ncreate or manage the key. There is no CA, recovery, revocation, or\ncross-device identity yet (see Out of scope below).",
+          )
+
+          replace(
+              "docs/3PK.md",
+              "4. Zips `manifest.json` + release images + licence into `release.3pk`,\n   signing `manifest.json`'s exact bytes into a sibling `manifest.sig`\n   first when a local signing key exists (see Signing above).",
+              "4. Ensures this install has a signing key, signs `manifest.json`'s exact\n   bytes into a sibling `manifest.sig`, then zips the manifest + signature +\n   release images + licence into `release.3pk` (see Signing above).",
+          )
+
+          replace(
+              "docs/3PK.md",
+              "Finally the manifest is written into the release dir recording **what is\nactually on disk**: new entries for components that imported, the\nprevious entry for ones that failed or were deselected. A partially\nfailed update therefore still reads as \"changed\" on the next inspect —\nupdate detection stays truthful across partial runs. `manifest.sig`, when\npresent, lands in the release dir alongside it (part of the release-level\npayload, like `release.json` and the images) so the provenance the import\nverified stays with the local copy.",
+              "Finally the manifest is written into the release dir recording **what is\nactually on disk**: new entries for components that imported, the previous\nentry for ones that failed or were deselected. A partially failed update\ntherefore still reads as \"changed\" on the next inspect — update detection\nstays truthful across partial runs. Because that local manifest may differ\nfrom the creator-signed source after a selective import, Plinth stores the\noriginal signed `manifest.json` + `manifest.sig` together under\n`.plinth-provenance/` instead of placing a stale signature beside mutable\nlocal state.",
+          )
+          PY
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run Rust tests and regenerate Specta bindings
+        run: cargo test --verbose
+        working-directory: src-tauri
+
+      - name: Frontend gates
+        run: |
+          bun run format:check
+          bun run lint
+          bun run build
+          bun run test:frontend
+
+      - name: Commit finalized signing branch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm .github/workflows/finalize-signing-once.yml
+          git add -A
+          git commit -m "Make creator signing automatic and strengthen key identity"
+          git push origin HEAD:claude/issue-6-signed-manifests
