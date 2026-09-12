@@ -160,35 +160,40 @@ pub fn classify_signature(sig_json: &str, manifest_bytes: &[u8]) -> SignatureSta
             reason: format!("unsupported signature algorithm '{}'", sig.algo),
         };
     }
-    if verify_manifest(manifest_bytes, &sig) {
-        SignatureStatus::Valid {
-            key_fingerprint: sig.key_fingerprint,
-        }
-    } else {
-        SignatureStatus::Invalid {
+
+    let Some(verified_fingerprint) = verify_manifest(manifest_bytes, &sig) else {
+        return SignatureStatus::Invalid {
             reason: "signature does not match the manifest — it may be tampered, or signed by a different key".into(),
-        }
+        };
+    };
+
+    // key_fingerprint is package-authored metadata, so it cannot be the
+    // identity value we show after verification. Bind it to the exact public
+    // key that successfully verified the signature; otherwise an attacker
+    // could sign with key A while writing trusted creator B's fingerprint.
+    if sig.key_fingerprint != verified_fingerprint {
+        return SignatureStatus::Invalid {
+            reason: "key fingerprint does not match the embedded signing key".into(),
+        };
+    }
+
+    SignatureStatus::Valid {
+        key_fingerprint: verified_fingerprint,
     }
 }
 
-fn verify_manifest(manifest_bytes: &[u8], sig: &ManifestSignature) -> bool {
-    let Ok(key_bytes) = STANDARD.decode(&sig.public_key) else {
-        return false;
-    };
-    let Ok(key_bytes): Result<[u8; 32], _> = key_bytes.try_into() else {
-        return false;
-    };
-    let Ok(verifying) = VerifyingKey::from_bytes(&key_bytes) else {
-        return false;
-    };
-    let Ok(sig_bytes) = STANDARD.decode(&sig.signature) else {
-        return false;
-    };
-    let Ok(sig_bytes): Result<[u8; 64], _> = sig_bytes.try_into() else {
-        return false;
-    };
+/// Verify the signature and, on success, return the fingerprint derived from
+/// the exact public key that performed that verification. Callers must never
+/// substitute the serialized key_fingerprint field for this value.
+fn verify_manifest(manifest_bytes: &[u8], sig: &ManifestSignature) -> Option<String> {
+    let key_bytes = STANDARD.decode(&sig.public_key).ok()?;
+    let key_bytes: [u8; 32] = key_bytes.try_into().ok()?;
+    let verifying = VerifyingKey::from_bytes(&key_bytes).ok()?;
+    let sig_bytes = STANDARD.decode(&sig.signature).ok()?;
+    let sig_bytes: [u8; 64] = sig_bytes.try_into().ok()?;
     let signature = Signature::from_bytes(&sig_bytes);
-    verifying.verify(manifest_bytes, &signature).is_ok()
+    verifying.verify(manifest_bytes, &signature).ok()?;
+    Some(fingerprint(verifying.as_bytes()))
 }
 
 /// Get-or-create the creator's signing key and hand back what Settings can
@@ -292,6 +297,28 @@ mod tests {
         let sig_json = serde_json::to_string(&sig).unwrap();
         let status = classify_signature(&sig_json, manifest_bytes);
         assert!(matches!(status, SignatureStatus::Invalid { .. }));
+        std::fs::remove_dir_all(path_a.parent().unwrap()).ok();
+        std::fs::remove_dir_all(path_b.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn classify_rejects_a_spoofed_fingerprint_even_with_a_valid_signature() {
+        let path_a = temp_key_path("fingerprint_a");
+        let path_b = temp_key_path("fingerprint_b");
+        let key_a = ensure_key(&path_a).unwrap();
+        let key_b = ensure_key(&path_b).unwrap();
+        let manifest_bytes = b"authentic manifest bytes";
+
+        // The signature and embedded public key are genuinely A's, but the
+        // attacker labels them with trusted creator B's fingerprint. This is
+        // the exact spoof the UI must never render as "Verified".
+        let mut sig = sign_manifest(&key_a, manifest_bytes);
+        sig.key_fingerprint = key_info(&key_b).key_fingerprint;
+        let sig_json = serde_json::to_string(&sig).unwrap();
+
+        let status = classify_signature(&sig_json, manifest_bytes);
+        assert!(matches!(status, SignatureStatus::Invalid { .. }));
+
         std::fs::remove_dir_all(path_a.parent().unwrap()).ok();
         std::fs::remove_dir_all(path_b.parent().unwrap()).ok();
     }
