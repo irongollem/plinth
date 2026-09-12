@@ -804,10 +804,10 @@
           </button>
         </div>
         <p class="text-[10.5px] text-base-content/40">
-          Every release you pack is signed with this key when it's present —
-          customers can verify a release really came from you. Publish the
-          fingerprint on your MMF/Patreon/store page so they have something to
-          compare it against.
+          Plinth creates this signing identity automatically and uses it for
+          every release you pack. The fingerprint lets someone compare this key
+          with one you publish elsewhere; account-backed creator identity,
+          recovery, and key rotation come later.
         </p>
       </div>
 

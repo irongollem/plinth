@@ -242,15 +242,16 @@ async fn run_compression_tasks(
             .map_err(|e| AppError::IoError(format!("Failed to write manifest: {}", e)))?;
         files_for_3pk.push(manifest_path);
 
-        // No key = unsigned pack, silently fine — signing is opt-in via
-        // Settings' ensure_signing_key, never a gate on packing.
-        if let Some(signing_key) = crate::signing::load_key(signing_key_path)? {
-            let signature = crate::signing::sign_manifest(&signing_key, &manifest_bytes);
-            let signature_path = release_dir_path.join("manifest.sig");
-            fs::write(&signature_path, serde_json::to_string_pretty(&signature)?)
-                .map_err(|e| AppError::IoError(format!("Failed to write manifest.sig: {}", e)))?;
-            files_for_3pk.push(signature_path);
-        }
+        // Signing is automatic for creators: the first pack creates this
+        // install's Ed25519 identity, later packs silently reuse it. Accounts
+        // (#8) can later add recovery/rotation without making artists manage
+        // cryptographic key files themselves.
+        let signing_key = crate::signing::ensure_key(signing_key_path)?;
+        let signature = crate::signing::sign_manifest(&signing_key, &manifest_bytes);
+        let signature_path = release_dir_path.join("manifest.sig");
+        fs::write(&signature_path, serde_json::to_string_pretty(&signature)?)
+            .map_err(|e| AppError::IoError(format!("Failed to write manifest.sig: {}", e)))?;
+        files_for_3pk.push(signature_path);
     }
 
     // Stage 3 — release.3pk (manifest + images + jsons) and the legacy

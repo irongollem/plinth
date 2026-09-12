@@ -154,26 +154,27 @@ those bytes five times helps no one. The rules:
 Non-dedup readers/writers interoperate: a v1 archive without elision is
 just the degenerate case where every checksum is stored under every name.
 
-## Signing (optional, additive)
+## Signing (additive)
 
-A creator MAY sign a release. When a local signing key exists at pack
-time, the packer writes `manifest.sig` — a detached JSON signature — next
-to `manifest.json` inside `release.3pk`:
+Plinth signs creator-packed releases automatically. The first pack on an
+install creates a local Ed25519 signing key; later packs silently reuse it.
+The packer writes `manifest.sig` — a detached JSON signature — next to
+`manifest.json` inside `release.3pk`:
 
 ```jsonc
 {
   "algo": "ed25519",
   "public_key": "<base64>",
-  "key_fingerprint": "<first 16 hex chars of blake3(public_key)>",
+  "key_fingerprint": "<full blake3(public_key) hex>",
   "signature": "<base64, over the exact manifest.json bytes as packed>",
 }
 ```
 
 The signature covers the raw bytes written to `manifest.json`, not the
 parsed JSON value, so verification never depends on re-serializing
-anything the same way the packer did. No key = no `manifest.sig`; every
-reader, old or new, treats that as a normal unsigned pack — nothing about
-`Manifest::is_readable` or the `version` field changes.
+anything the same way the packer did. Unsigned packs remain valid and
+readable for compatibility with older Plinth versions and other writers —
+nothing about `Manifest::is_readable` or the `version` field changes.
 
 On inspect, a reader that finds `manifest.sig` verifies it against the
 exact bytes read back for `manifest.json` and reports one of three
@@ -187,10 +188,11 @@ states:
   does not block import — v1 has no key registry or trust pinning, so the
   user decides.
 
-Signing keys are local-only in v1: one Ed25519 keypair generated on
-demand from Settings per install, stored in the app data dir, never
-uploaded anywhere. There is no CA, no revocation, and no cross-device
-identity yet (see Out of scope below).
+Signing keys are local-only in v1: one Ed25519 keypair generated
+automatically per install, stored in the app data dir, never uploaded
+anywhere. Settings merely exposes its fingerprint; artists do not need to
+create or manage the key. There is no CA, recovery, revocation, or
+cross-device identity yet (see Out of scope below).
 
 ## Write path (packer)
 
@@ -206,9 +208,9 @@ metadata. Packing then:
    plans zero moves for it.
 3. Emits `manifest.json` from the staged metadata **including
    `file_variants`** for any split folders, plus release-level info.
-4. Zips `manifest.json` + release images + licence into `release.3pk`,
-   signing `manifest.json`'s exact bytes into a sibling `manifest.sig`
-   first when a local signing key exists (see Signing above).
+4. Ensures this install has a signing key, signs `manifest.json`'s exact
+   bytes into a sibling `manifest.sig`, then zips the manifest + signature +
+   release images + licence into `release.3pk` (see Signing above).
 
 Compression is ZIP in v1 (the only writer today); TAR+Zstd is a tracked
 upgrade and only changes component `archive` extensions + the reader's
@@ -247,13 +249,14 @@ files. The confirmed import then, per selected component:
    added themselves were never in a manifest and survive.
 
 Finally the manifest is written into the release dir recording **what is
-actually on disk**: new entries for components that imported, the
-previous entry for ones that failed or were deselected. A partially
-failed update therefore still reads as "changed" on the next inspect —
-update detection stays truthful across partial runs. `manifest.sig`, when
-present, lands in the release dir alongside it (part of the release-level
-payload, like `release.json` and the images) so the provenance the import
-verified stays with the local copy.
+actually on disk**: new entries for components that imported, the previous
+entry for ones that failed or were deselected. A partially failed update
+therefore still reads as "changed" on the next inspect — update detection
+stays truthful across partial runs. Because that local manifest may differ
+from the creator-signed source after a selective import, Plinth stores the
+original signed `manifest.json` + `manifest.sig` together under
+`.plinth-provenance/` instead of placing a stale signature beside mutable
+local state.
 
 A catalog scan afterwards restores the packed curation from the
 `model.json` sidecars. Legacy `release.json` / `model.json` sidecars
