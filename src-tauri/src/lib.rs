@@ -10,6 +10,7 @@ mod models;
 mod process;
 mod render;
 mod settings;
+mod signing;
 
 use basecutter::commands::{cancel_base_cut, export_cuts_to_catalog, repair_plinth_base_exports, start_base_cut};
 use basecutter::cutters::{get_cutter_library, get_plinth_defaults};
@@ -45,6 +46,7 @@ use content_filter::{
 use file::commands::{
     add_models, cancel_compression, create_release, finalize_release, import_release,
     inspect_release_package, list_release_drafts, load_release_draft, open_with_default_app,
+    recompile_release_from_library,
 };
 use minihoard::{
     cancel_minihoard, cancel_minihoard_download, detect_minihoard, minihoard_list,
@@ -95,10 +97,12 @@ fn create_specta_builder() -> Builder {
             open_with_default_app,
             import_release,
             inspect_release_package,
+            recompile_release_from_library,
             list_release_drafts,
             load_release_draft,
             settings::get_settings,
             settings::set_settings,
+            signing::ensure_signing_key,
             get_nsfw_access_state,
             unlock_nsfw,
             lock_nsfw,

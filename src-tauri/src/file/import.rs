@@ -13,15 +13,25 @@
 //! contract unpack_model honors) and deleting files the new version
 //! dropped.
 
+use crate::catalog::db;
 use crate::catalog::layout;
-use crate::catalog::pack::{edited_aside_path, PACK_SIDECAR_NAME};
+use crate::catalog::pack::{self, edited_aside_path, PACK_SIDECAR_NAME};
 use crate::error::AppError;
 use crate::manifest::{self, Component, Manifest, ManifestFile};
+use crate::signing::{self, SignatureStatus};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
+
+/// Immutable copy of the exact signed source pair. The release-root
+/// manifest.json is Plinth's mutable local-state manifest after a selective
+/// import/update, so a creator signature must never sit next to it unless it
+/// actually covers those bytes.
+const PROVENANCE_DIR: &str = ".plinth-provenance";
 
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
 pub struct ImportOutcome {
@@ -56,6 +66,13 @@ pub enum ComponentState {
     MissingArchive,
 }
 
+/// One manifest file this library doesn't own anywhere by checksum.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct MissingFile {
+    pub name: String,
+    pub size_bytes: f64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
 pub struct ComponentStatus {
     pub name: String,
@@ -68,6 +85,12 @@ pub struct ComponentStatus {
     pub model_names: Vec<String>,
     /// Why the component can't be imported, for Packed/MissingArchive.
     pub detail: Option<String>,
+    /// How many of `file_count` this library already owns SOMEWHERE, by
+    /// checksum — independent of `state`: even a MissingArchive component's
+    /// checksums are known from the manifest itself.
+    pub files_owned: u32,
+    pub missing_bytes: f64,
+    pub missing: Vec<MissingFile>,
 }
 
 /// What opening a `release.3pk` would do — feeds the selective-import dialog
@@ -85,14 +108,17 @@ pub struct PackageInspection {
     /// readable manifest.json) — importing is refused rather than guessed at.
     pub blocked: Option<String>,
     pub components: Vec<ComponentStatus>,
+    pub signature: SignatureStatus,
 }
 
-/// Read `manifest.json` from inside a `release.3pk`.
-pub fn read_manifest(package_path: &Path) -> Result<Manifest, AppError> {
+fn open_package(package_path: &Path) -> Result<zip::ZipArchive<std::fs::File>, AppError> {
     let file = std::fs::File::open(package_path)
         .map_err(|e| AppError::IoError(format!("Cannot open {}: {}", package_path.display(), e)))?;
-    let mut archive = zip::ZipArchive::new(file)
-        .map_err(|e| AppError::InvalidInput(format!("Not a readable package: {}", e)))?;
+    zip::ZipArchive::new(file)
+        .map_err(|e| AppError::InvalidInput(format!("Not a readable package: {}", e)))
+}
+
+fn manifest_text(archive: &mut zip::ZipArchive<std::fs::File>) -> Result<String, AppError> {
     let mut entry = archive.by_name("manifest.json").map_err(|_| {
         AppError::InvalidInput(
             "No manifest.json inside — this package predates the 3pk manifest".into(),
@@ -102,7 +128,11 @@ pub fn read_manifest(package_path: &Path) -> Result<Manifest, AppError> {
     entry
         .read_to_string(&mut text)
         .map_err(|e| AppError::IoError(format!("Failed to read manifest: {}", e)))?;
-    let manifest = Manifest::from_json(&text)?;
+    Ok(text)
+}
+
+fn parse_manifest(text: &str) -> Result<Manifest, AppError> {
+    let manifest = Manifest::from_json(text)?;
     if !manifest.is_readable() {
         return Err(AppError::InvalidInput(format!(
             "This package uses 3pk format v{} — this app reads v{}",
@@ -111,6 +141,35 @@ pub fn read_manifest(package_path: &Path) -> Result<Manifest, AppError> {
         )));
     }
     Ok(manifest)
+}
+
+/// Read `manifest.json` from inside a `release.3pk`.
+pub fn read_manifest(package_path: &Path) -> Result<Manifest, AppError> {
+    let mut archive = open_package(package_path)?;
+    let text = manifest_text(&mut archive)?;
+    parse_manifest(&text)
+}
+
+/// Same as `read_manifest`, plus how `manifest.sig` (if present) checks out
+/// against the exact bytes just read — inspect is the only place a
+/// signature is classified, since it's the pre-import decision point.
+fn read_manifest_with_signature(package_path: &Path) -> Result<(Manifest, SignatureStatus), AppError> {
+    let mut archive = open_package(package_path)?;
+    let text = manifest_text(&mut archive)?;
+    let manifest = parse_manifest(&text)?;
+    let signature = match archive.by_name("manifest.sig") {
+        Err(_) => SignatureStatus::Unsigned,
+        Ok(mut entry) => {
+            let mut sig_text = String::new();
+            match entry.read_to_string(&mut sig_text) {
+                Ok(_) => signing::classify_signature(&sig_text, text.as_bytes()),
+                Err(_) => SignatureStatus::Invalid {
+                    reason: "manifest.sig could not be read".into(),
+                },
+            }
+        }
+    };
+    Ok((manifest, signature))
 }
 
 /// The manifest a previous import left in the release dir, if any. Unreadable
@@ -166,12 +225,38 @@ fn component_file_count(component: &Component) -> u32 {
     component.models.iter().map(|m| m.files.len() as u32).sum()
 }
 
+/// Diff one component's manifest files against library-wide ownership —
+/// `find_owner` already covers packed-at-rest donors, so this never has to
+/// unpack anything. Independent of the component's archive-based `state`:
+/// even a MissingArchive component's checksums are known from the manifest.
+fn component_completeness(
+    conn: &Connection,
+    component: &Component,
+) -> Result<(u32, f64, Vec<MissingFile>), AppError> {
+    let mut owned = 0u32;
+    let mut missing_bytes = 0f64;
+    let mut missing = Vec::new();
+    for file in component.models.iter().flat_map(|m| &m.files) {
+        if db::find_owner(conn, pack::bare_hash(&file.checksum))?.is_some() {
+            owned += 1;
+        } else {
+            missing_bytes += file.size_bytes as f64;
+            missing.push(MissingFile {
+                name: file.name.clone(),
+                size_bytes: file.size_bytes as f64,
+            });
+        }
+    }
+    Ok((owned, missing_bytes, missing))
+}
+
 /// Diff an incoming `release.3pk` against the library without touching disk.
 pub fn inspect_package(
     package_path: &Path,
     library_dir: &Path,
+    conn: &Connection,
 ) -> Result<PackageInspection, AppError> {
-    let manifest = read_manifest(package_path)?;
+    let (manifest, signature) = read_manifest_with_signature(package_path)?;
     let package_dir = package_path
         .parent()
         .ok_or_else(|| AppError::InvalidInput("Package has no parent directory".into()))?;
@@ -195,61 +280,62 @@ pub fn inspect_package(
         .map(|m| m.components.iter().map(|c| (c.name.as_str(), c)).collect())
         .unwrap_or_default();
 
-    let components = manifest
-        .components
-        .iter()
-        .map(|component| {
-            let component_dest = dest.join(layout::sanitize_segment(&component.name));
-            // component.archive is attacker-authorable manifest text; reject
-            // before it ever becomes a path so a value like "../../secrets"
-            // or "C:evil.zip" can't be opened/hashed/extracted from outside
-            // package_dir. Reported through the same MissingArchive state a
-            // legitimate absent sibling gets — the outcome for the UI is
-            // identical ("can't import this component").
-            let (state, detail) = if safe_relative(&component.archive).is_none() {
-                (
-                    ComponentState::MissingArchive,
-                    Some(format!(
-                        "'{}' is not a safe archive path — refusing to import",
-                        component.archive
-                    )),
-                )
-            } else if !package_dir.join(&component.archive).is_file() {
-                (
-                    ComponentState::MissingArchive,
-                    Some(format!(
-                        "'{}' was not found next to the .3pk",
-                        component.archive
-                    )),
-                )
-            } else if local.is_some() && contains_pack_sidecar(&component_dest) {
-                (
-                    ComponentState::Packed,
-                    Some("packed at rest — unpack it in the catalog first".into()),
-                )
-            } else {
-                match old_by_name.get(component.name.as_str()) {
-                    None => (ComponentState::New, None),
-                    Some(old) if old.checksum == component.checksum => {
-                        (ComponentState::Unchanged, None)
-                    }
-                    Some(_) => (ComponentState::Changed, None),
+    let mut components = Vec::with_capacity(manifest.components.len());
+    for component in &manifest.components {
+        let component_dest = dest.join(layout::sanitize_segment(&component.name));
+        // component.archive is attacker-authorable manifest text; reject
+        // before it ever becomes a path so a value like "../../secrets"
+        // or "C:evil.zip" can't be opened/hashed/extracted from outside
+        // package_dir. Reported through the same MissingArchive state a
+        // legitimate absent sibling gets — the outcome for the UI is
+        // identical ("can't import this component").
+        let (state, detail) = if safe_relative(&component.archive).is_none() {
+            (
+                ComponentState::MissingArchive,
+                Some(format!(
+                    "'{}' is not a safe archive path — refusing to import",
+                    component.archive
+                )),
+            )
+        } else if !package_dir.join(&component.archive).is_file() {
+            (
+                ComponentState::MissingArchive,
+                Some(format!(
+                    "'{}' was not found next to the .3pk",
+                    component.archive
+                )),
+            )
+        } else if local.is_some() && contains_pack_sidecar(&component_dest) {
+            (
+                ComponentState::Packed,
+                Some("packed at rest — unpack it in the catalog first".into()),
+            )
+        } else {
+            match old_by_name.get(component.name.as_str()) {
+                None => (ComponentState::New, None),
+                Some(old) if old.checksum == component.checksum => {
+                    (ComponentState::Unchanged, None)
                 }
-            };
-            ComponentStatus {
-                name: component.name.clone(),
-                state,
-                size_bytes: component.size_bytes as f64,
-                file_count: component_file_count(component),
-                model_names: component
-                    .models
-                    .iter()
-                    .map(|m| m.custom_name.clone().unwrap_or_else(|| m.name.clone()))
-                    .collect(),
-                detail,
+                Some(_) => (ComponentState::Changed, None),
             }
-        })
-        .collect();
+        };
+        let (files_owned, missing_bytes, missing) = component_completeness(conn, component)?;
+        components.push(ComponentStatus {
+            name: component.name.clone(),
+            state,
+            size_bytes: component.size_bytes as f64,
+            file_count: component_file_count(component),
+            model_names: component
+                .models
+                .iter()
+                .map(|m| m.custom_name.clone().unwrap_or_else(|| m.name.clone()))
+                .collect(),
+            detail,
+            files_owned,
+            missing_bytes,
+            missing,
+        });
+    }
 
     Ok(PackageInspection {
         release_name: manifest.release.name,
@@ -260,12 +346,14 @@ pub fn inspect_package(
         is_update: local.is_some(),
         blocked,
         components,
+        signature,
     })
 }
 
-/// Extract everything in `release.3pk` EXCEPT manifest.json — the manifest is
-/// written last from what actually imported, so a component that failed this
-/// run still reads as pending on the next inspect instead of "unchanged".
+/// Extract release-level payload except the manifest pair. The release-root
+/// manifest.json is written last from what actually imported, while the
+/// creator's source manifest/signature pair is preserved separately by
+/// `preserve_source_provenance`.
 fn extract_release_payload(package_path: &Path, dest: &Path) -> Result<(), AppError> {
     let file = std::fs::File::open(package_path)
         .map_err(|e| AppError::IoError(format!("Cannot open {}: {}", package_path.display(), e)))?;
@@ -279,7 +367,7 @@ fn extract_release_payload(package_path: &Path, dest: &Path) -> Result<(), AppEr
         let Some(rel) = entry.enclosed_name().map(|p| p.to_owned()) else {
             continue;
         };
-        if rel == Path::new("manifest.json") {
+        if rel == Path::new("manifest.json") || rel == Path::new("manifest.sig") {
             continue;
         }
         let out = dest.join(rel);
@@ -297,6 +385,42 @@ fn extract_release_payload(package_path: &Path, dest: &Path) -> Result<(), AppEr
         std::io::copy(&mut entry, &mut out_file)
             .map_err(|e| AppError::IoError(format!("Failed to write {}: {}", out.display(), e)))?;
     }
+    Ok(())
+}
+
+/// Preserve the exact source manifest/signature bytes as an immutable pair.
+/// A selective import or failed component can make the root manifest differ
+/// from what the creator signed, so the signature lives only with the source
+/// bytes it authenticates. Unsigned incoming packages clear old provenance,
+/// and the old buggy root-level signature is removed on every run.
+fn preserve_source_provenance(package_path: &Path, dest: &Path) -> Result<(), AppError> {
+    std::fs::remove_file(dest.join("manifest.sig")).ok();
+
+    let mut archive = open_package(package_path)?;
+    let manifest_bytes = manifest_text(&mut archive)?.into_bytes();
+    let sig_bytes = match archive.by_name("manifest.sig") {
+        Ok(mut entry) => {
+            let mut bytes = Vec::new();
+            entry
+                .read_to_end(&mut bytes)
+                .map_err(|e| AppError::IoError(format!("Failed to read manifest.sig: {}", e)))?;
+            Some(bytes)
+        }
+        Err(_) => None,
+    };
+
+    let provenance = dest.join(PROVENANCE_DIR);
+    let Some(sig_bytes) = sig_bytes else {
+        std::fs::remove_dir_all(&provenance).ok();
+        return Ok(());
+    };
+
+    std::fs::create_dir_all(&provenance)
+        .map_err(|e| AppError::IoError(format!("Failed to create provenance dir: {}", e)))?;
+    std::fs::write(provenance.join("manifest.json"), manifest_bytes)
+        .map_err(|e| AppError::IoError(format!("Failed to preserve source manifest: {}", e)))?;
+    std::fs::write(provenance.join("manifest.sig"), sig_bytes)
+        .map_err(|e| AppError::IoError(format!("Failed to preserve source signature: {}", e)))?;
     Ok(())
 }
 
@@ -368,6 +492,89 @@ fn remove_stale_files(component_dest: &Path, old: &Component, new_files: &[Manif
     }
 }
 
+/// Distinguishes a component import failure `recompile_release` can route
+/// around from one it can't: a bad/missing/unsafe archive just means the
+/// component needs its bytes from somewhere else (the library), but a
+/// packed-at-rest component already exists on disk, just compressed —
+/// writing donor files next to it would corrupt that state, not complete it.
+enum ImportFailure {
+    Blocked(String),
+    Retryable(String),
+}
+
+impl std::fmt::Display for ImportFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Blocked(m) | Self::Retryable(m) => write!(f, "{}", m),
+        }
+    }
+}
+
+impl From<AppError> for ImportFailure {
+    fn from(e: AppError) -> Self {
+        Self::Retryable(e.to_string())
+    }
+}
+
+/// The normal per-component import: verify the sibling archive's checksum,
+/// extract it (rematerializing any dedup-elided names), preserve local
+/// edits and drop stale files against `old` when this is an update. Shared
+/// by `import_release` and `recompile_release`, which only reaches for
+/// library donors when this fails.
+fn import_component(
+    package_dir: &Path,
+    component: &Component,
+    component_dest: &Path,
+    old: Option<&Component>,
+    updating: bool,
+    warnings: &mut Vec<String>,
+) -> Result<u32, ImportFailure> {
+    if updating && contains_pack_sidecar(component_dest) {
+        return Err(ImportFailure::Blocked(
+            "packed at rest — unpack it in the catalog first, then update".into(),
+        ));
+    }
+    // Same guard as inspect_package: an attacker-authored archive name must
+    // not resolve outside package_dir before we open it.
+    if safe_relative(&component.archive).is_none() {
+        return Err(ImportFailure::Retryable(format!(
+            "archive '{}' is not a safe path — refusing to import",
+            component.archive
+        )));
+    }
+    let archive_path = package_dir.join(&component.archive);
+    if !archive_path.is_file() {
+        return Err(ImportFailure::Retryable(format!(
+            "archive '{}' is missing",
+            component.archive
+        )));
+    }
+    // The checksum is the integrity promise of the format — a truncated
+    // download or bit-rot surfaces here, not as broken STLs later
+    let actual = manifest::hash_file(&archive_path)?;
+    if actual != component.checksum {
+        return Err(ImportFailure::Retryable(
+            "checksum mismatch — the archive is corrupted or was modified".into(),
+        ));
+    }
+    let manifest_files: Vec<ManifestFile> = component
+        .models
+        .iter()
+        .flat_map(|m| m.files.iter().cloned())
+        .collect();
+    if let Some(old) = old {
+        warnings.extend(preserve_local_edits(component_dest, old, &manifest_files)?);
+    }
+    // sanitize_segment (in component_dest): idempotent for our own packages
+    // and stops a hostile component name ("../x") from landing outside the
+    // release dir
+    manifest::extract_component_archive(&archive_path, component_dest, &manifest_files)?;
+    if let Some(old) = old {
+        remove_stale_files(component_dest, old, &manifest_files);
+    }
+    Ok(manifest_files.len() as u32)
+}
+
 /// Import (or update) a packed release. `selection` limits the run to the
 /// named components — None imports everything, the pre-dialog behavior.
 pub fn import_release(
@@ -406,8 +613,10 @@ pub fn import_release(
     std::fs::create_dir_all(&dest)
         .map_err(|e| AppError::IoError(format!("Failed to create release dir: {}", e)))?;
 
-    // Release-level payload (images, release.json — the manifest comes last)
+    // Release-level payload and immutable signed-source provenance. The
+    // mutable local manifest is written last below.
     extract_release_payload(package_path, &dest)?;
+    preserve_source_provenance(package_path, &dest)?;
 
     let selected = |name: &str| {
         selection
@@ -427,46 +636,7 @@ pub fn import_release(
         let old = old_by_name.get(component.name.as_str()).copied();
         // Errors stay per-component strings (shown verbatim in the UI); the
         // rest of the release still imports.
-        let result = (|| -> Result<u32, String> {
-            if updating && contains_pack_sidecar(&component_dest) {
-                return Err("packed at rest — unpack it in the catalog first, then update".into());
-            }
-            // Same guard as inspect_package: an attacker-authored archive
-            // name must not resolve outside package_dir before we open it.
-            if safe_relative(&component.archive).is_none() {
-                return Err(format!(
-                    "archive '{}' is not a safe path — refusing to import",
-                    component.archive
-                ));
-            }
-            let archive_path = package_dir.join(&component.archive);
-            if !archive_path.is_file() {
-                return Err(format!("archive '{}' is missing", component.archive));
-            }
-            // The checksum is the integrity promise of the format — a truncated
-            // download or bit-rot surfaces here, not as broken STLs later
-            let actual = manifest::hash_file(&archive_path)?;
-            if actual != component.checksum {
-                return Err("checksum mismatch — the archive is corrupted or was modified".into());
-            }
-            let manifest_files: Vec<ManifestFile> = component
-                .models
-                .iter()
-                .flat_map(|m| m.files.iter().cloned())
-                .collect();
-            if let Some(old) = old {
-                warnings.extend(preserve_local_edits(&component_dest, old, &manifest_files)?);
-            }
-            // sanitize_segment (in component_dest): idempotent for our own
-            // packages and stops a hostile component name ("../x") from
-            // landing outside the release dir
-            manifest::extract_component_archive(&archive_path, &component_dest, &manifest_files)?;
-            if let Some(old) = old {
-                remove_stale_files(&component_dest, old, &manifest_files);
-            }
-            Ok(manifest_files.len() as u32)
-        })();
-        match result {
+        match import_component(package_dir, component, &component_dest, old, updating, &mut warnings) {
             Ok(count) => {
                 succeeded.insert(component.name.as_str());
                 components += 1;
@@ -519,6 +689,269 @@ pub fn import_release(
     })
 }
 
+/// Bytes at `path` hash to `checksum` (manifest `blake3:<hex>` form).
+fn file_matches(path: &Path, checksum: &str) -> bool {
+    manifest::hash_file(path)
+        .map(|h| h == checksum)
+        .unwrap_or(false)
+}
+
+/// Copy ONE owned file into place, extracting an ephemeral copy first when
+/// the candidate is packed at rest. Every indexed candidate is verified in
+/// turn because the catalog can be stale: a missing/corrupt first donor must
+/// not hide another valid copy. Imported files are deliberately copied, not
+/// hardlinked, so later edits to either library path cannot mutate the other.
+fn materialize_donor(conn: &Connection, checksum: &str, target: &Path) -> Result<bool, AppError> {
+    let donors = db::find_owners(conn, pack::bare_hash(checksum))?;
+    if donors.is_empty() {
+        return Ok(false);
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AppError::IoError(format!("Failed to create dirs: {}", e)))?;
+    }
+
+    for (donor_path, donor_archive) in donors {
+        if let Some(archive_path) = &donor_archive {
+            let Some(model_dir) = Path::new(archive_path).parent() else {
+                continue;
+            };
+            let cancel = AtomicBool::new(false);
+            let wanted = [donor_path.clone()];
+            if pack::extract_paths_ephemeral(model_dir, &wanted, &cancel, |_| true).is_err() {
+                continue;
+            }
+        }
+
+        let copied = std::fs::copy(Path::new(&donor_path), target).is_ok();
+        if donor_archive.is_some() {
+            pack::cleanup_ephemeral(std::slice::from_ref(&donor_path));
+        }
+
+        if copied && file_matches(target, checksum) {
+            return Ok(true);
+        }
+
+        // std::fs::copy can leave a partial/truncated destination when it
+        // fails mid-copy. A stale candidate should leave no trace before the
+        // next owner is attempted.
+        std::fs::remove_file(target).ok();
+    }
+
+    Ok(false)
+}
+
+/// Materialize the manifest files the library already owns into
+/// `component_dest`, independent of whether the release's own archive is
+/// present — the "recompile a partial set" counterpart to
+/// `import_component`'s archive-based path, reached when that one can't
+/// run. Draws donors from anywhere in the catalog by content_hash, not just
+/// this component's own archive; a file with no owner anywhere is left
+/// missing rather than erroring the whole component out. Files a previous,
+/// interrupted run already landed count as owned without re-fetching a
+/// donor, so a rerun after acquiring the rest resumes for free.
+fn materialize_owned_files(
+    conn: &Connection,
+    component_dest: &Path,
+    files: &[ManifestFile],
+) -> Result<(u32, u32, f64), AppError> {
+    std::fs::create_dir_all(component_dest)
+        .map_err(|e| AppError::IoError(format!("Failed to create {}: {}", component_dest.display(), e)))?;
+    let mut landed = 0u32;
+    let mut missing = 0u32;
+    let mut missing_bytes = 0f64;
+    for file in files {
+        let Some(rel) = safe_relative(&file.name) else {
+            missing += 1;
+            missing_bytes += file.size_bytes as f64;
+            continue;
+        };
+        let target = component_dest.join(rel);
+        if target.is_file() {
+            if file_matches(&target, &file.checksum) {
+                landed += 1;
+                continue;
+            }
+            // Stale bytes from an older version at this path — the donor
+            // lookup below may still supply the current release's bytes.
+            std::fs::remove_file(&target).ok();
+        }
+        if materialize_donor(conn, &file.checksum, &target)? {
+            landed += 1;
+        } else {
+            missing += 1;
+            missing_bytes += file.size_bytes as f64;
+        }
+    }
+    Ok((landed, missing, missing_bytes))
+}
+
+/// One component's outcome from `recompile_release`.
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct RecompiledComponent {
+    pub name: String,
+    /// True when every manifest file for this component landed on disk —
+    /// via the archive or via library donors. `files_landed` can be > 0
+    /// even when this is false: "not complete" isn't "nothing happened".
+    pub complete: bool,
+    pub files_landed: u32,
+    pub files_missing: u32,
+    pub missing_bytes: f64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Type)]
+pub struct RecompileOutcome {
+    pub release_name: String,
+    pub designer: String,
+    pub dest_dir: String,
+    pub components: Vec<RecompiledComponent>,
+    /// Components a library donor couldn't help either (e.g. packed at
+    /// rest).
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// "Import what you own": for each selected component, extract the normal
+/// way when its sibling archive checks out (`import_component`), otherwise
+/// materialize whatever the library already holds by checksum
+/// (`materialize_owned_files`) — including a component whose archive isn't
+/// present next to the .3pk at all. Mirrors `import_release`'s manifest
+/// bookkeeping: only a fully-landed component is recorded under its new
+/// checksum, so a partial one keeps reading as New/Changed — and therefore
+/// selectable again — until the rest turns up.
+pub fn recompile_release(
+    conn: &Connection,
+    package_path: &Path,
+    library_dir: &Path,
+    selection: Option<Vec<String>>,
+) -> Result<RecompileOutcome, AppError> {
+    let manifest = read_manifest(package_path)?;
+    let package_dir = package_path
+        .parent()
+        .ok_or_else(|| AppError::InvalidInput("Package has no parent directory".into()))?;
+    let dest = layout::release_dir(
+        library_dir,
+        &manifest.release.designer,
+        &manifest.release.name,
+        Some(&manifest.release.date),
+    );
+    let local = read_local_manifest(&dest);
+    if dest.exists() && local.is_none() {
+        return Err(AppError::InvalidInput(format!(
+            "'{}' already exists — remove it first to re-import",
+            dest.display()
+        )));
+    }
+    let updating = local.is_some();
+    let old_components: Vec<Component> = local.map(|m| m.components).unwrap_or_default();
+    let old_by_name: HashMap<&str, &Component> = old_components
+        .iter()
+        .map(|c| (c.name.as_str(), c))
+        .collect();
+    std::fs::create_dir_all(&dest)
+        .map_err(|e| AppError::IoError(format!("Failed to create release dir: {}", e)))?;
+    extract_release_payload(package_path, &dest)?;
+    preserve_source_provenance(package_path, &dest)?;
+
+    let selected = |name: &str| {
+        selection
+            .as_ref()
+            .is_none_or(|s| s.iter().any(|n| n == name))
+    };
+    let mut succeeded: HashSet<&str> = HashSet::new();
+    let mut components_out: Vec<RecompiledComponent> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    for component in &manifest.components {
+        if !selected(&component.name) {
+            continue;
+        }
+        let component_dest = dest.join(layout::sanitize_segment(&component.name));
+        let old = old_by_name.get(component.name.as_str()).copied();
+        match import_component(package_dir, component, &component_dest, old, updating, &mut warnings) {
+            Ok(count) => {
+                succeeded.insert(component.name.as_str());
+                components_out.push(RecompiledComponent {
+                    name: component.name.clone(),
+                    complete: true,
+                    files_landed: count,
+                    files_missing: 0,
+                    missing_bytes: 0.0,
+                });
+            }
+            Err(ImportFailure::Blocked(message)) => {
+                errors.push(format!("{}: {}", component.name, message));
+            }
+            Err(ImportFailure::Retryable(_)) => {
+                let manifest_files: Vec<ManifestFile> = component
+                    .models
+                    .iter()
+                    .flat_map(|m| m.files.iter().cloned())
+                    .collect();
+                let (landed, missing, missing_bytes) =
+                    materialize_owned_files(conn, &component_dest, &manifest_files)?;
+                let complete = missing == 0;
+                if complete {
+                    succeeded.insert(component.name.as_str());
+                } else {
+                    warnings.push(format!(
+                        "{}: {} of {} files recompiled from your library, {} still missing",
+                        component.name,
+                        landed,
+                        manifest_files.len(),
+                        missing
+                    ));
+                }
+                components_out.push(RecompiledComponent {
+                    name: component.name.clone(),
+                    complete,
+                    files_landed: landed,
+                    files_missing: missing,
+                    missing_bytes,
+                });
+            }
+        }
+    }
+
+    // Same truthful-manifest bookkeeping as import_release: only a
+    // component that landed COMPLETE gets its new checksum recorded.
+    let new_names: HashSet<&str> = manifest
+        .components
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    let mut merged: Vec<Component> = manifest
+        .components
+        .iter()
+        .filter_map(|c| {
+            if succeeded.contains(c.name.as_str()) {
+                Some(c.clone())
+            } else {
+                old_by_name.get(c.name.as_str()).map(|old| (*old).clone())
+            }
+        })
+        .collect();
+    merged.extend(
+        old_components
+            .iter()
+            .filter(|old| !new_names.contains(old.name.as_str()))
+            .cloned(),
+    );
+    let mut final_manifest = manifest.clone();
+    final_manifest.components = merged;
+    std::fs::write(dest.join("manifest.json"), final_manifest.to_json()?)
+        .map_err(|e| AppError::IoError(format!("Failed to write manifest: {}", e)))?;
+
+    Ok(RecompileOutcome {
+        release_name: manifest.release.name.clone(),
+        designer: manifest.release.designer.clone(),
+        dest_dir: dest.to_string_lossy().into_owned(),
+        components: components_out,
+        errors,
+        warnings,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,6 +964,12 @@ mod tests {
             std::env::temp_dir().join(format!("stlpack_import_{}_{}", tag, std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         dir
+    }
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        db::test_init(&conn);
+        conn
     }
 
     fn write_release_json(staged: &Path) {
@@ -574,8 +1013,17 @@ mod tests {
     }
 
     /// Pack `staged` (release.json + one dir per component) the way finalize
-    /// does: component zips + a release.3pk holding manifest.json.
-    fn pack(staged: &Path, component_names: &[&str], out: &Path) -> Manifest {
+    /// does: component zips + a release.3pk holding manifest.json, signed
+    /// the same way compression_jobs' pack stage does when a key is given —
+    /// signing the exact bytes written to manifest.json, never a
+    /// re-serialized copy, so the round trip pins the same invariant the
+    /// real pack/verify sites share.
+    fn pack_maybe_signed(
+        staged: &Path,
+        component_names: &[&str],
+        out: &Path,
+        signing_key: Option<&ed25519_dalek::SigningKey>,
+    ) -> Manifest {
         std::fs::create_dir_all(out).unwrap();
         let mut packed = Vec::new();
         for name in component_names {
@@ -593,9 +1041,20 @@ mod tests {
             });
         }
         let manifest = build_manifest(staged, &packed, "0.1.0").unwrap();
-        std::fs::write(staged.join("manifest.json"), manifest.to_json().unwrap()).unwrap();
+        let manifest_bytes = manifest.to_json().unwrap().into_bytes();
+        std::fs::write(staged.join("manifest.json"), &manifest_bytes).unwrap();
+        let mut container_files = vec![staged.join("manifest.json"), staged.join("release.json")];
+        if let Some(key) = signing_key {
+            let sig = signing::sign_manifest(key, &manifest_bytes);
+            std::fs::write(
+                staged.join("manifest.sig"),
+                serde_json::to_string_pretty(&sig).unwrap(),
+            )
+            .unwrap();
+            container_files.push(staged.join("manifest.sig"));
+        }
         compress_files(
-            &[staged.join("manifest.json"), staged.join("release.json")],
+            &container_files,
             std::fs::File::create(out.join("release.3pk")).unwrap(),
             None::<fn(u32) -> bool>,
         )
@@ -603,10 +1062,45 @@ mod tests {
         manifest
     }
 
+    fn pack(staged: &Path, component_names: &[&str], out: &Path) -> Manifest {
+        pack_maybe_signed(staged, component_names, out, None)
+    }
+
+    /// Rewrites one entry's bytes in an already-built zip, leaving every
+    /// other entry untouched — simulates an attacker tampering with a
+    /// package after it left the signer's hands.
+    fn replace_zip_entry(zip_path: &Path, entry_name: &str, new_bytes: &[u8]) {
+        let file = std::fs::File::open(zip_path).unwrap();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let mut entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(archive.len());
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i).unwrap();
+            let name = entry.name().to_string();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            entries.push((name, bytes));
+        }
+        drop(archive);
+        for (name, bytes) in entries.iter_mut() {
+            if name == entry_name {
+                *bytes = new_bytes.to_vec();
+            }
+        }
+        let out_file = std::fs::File::create(zip_path).unwrap();
+        let mut writer = zip::ZipWriter::new(out_file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in entries {
+            writer.start_file(&name, options).unwrap();
+            std::io::Write::write_all(&mut writer, &bytes).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
     /// Pack a release with the real writer, then import it elsewhere and
     /// check the tree + curation sidecar arrived intact — the full loop.
     #[test]
     fn packed_release_imports_verified_and_complete() {
+        let conn = test_conn();
         let dir = temp("roundtrip");
         let staged = dir.join("staged");
         let component = staged.join("knight");
@@ -662,7 +1156,7 @@ mod tests {
         assert!(outcome.errors[0].contains("checksum mismatch"));
         // …and the failed component is NOT recorded as present, so the next
         // inspect still offers it
-        let inspection = inspect_package(&out.join("release.3pk"), &library).unwrap();
+        let inspection = inspect_package(&out.join("release.3pk"), &library, &conn).unwrap();
         assert_eq!(inspection.components[0].state, ComponentState::New);
 
         std::fs::remove_dir_all(&dir).ok();
@@ -670,6 +1164,7 @@ mod tests {
 
     #[test]
     fn inspect_diffs_components_against_the_local_manifest() {
+        let conn = test_conn();
         let dir = temp("inspect");
         let staged = dir.join("staged");
         for (name, bytes) in [("knight", &b"knight-v1"[..]), ("goblin", &b"goblin-v1"[..])] {
@@ -685,7 +1180,7 @@ mod tests {
         std::fs::create_dir_all(&library).unwrap();
 
         // Not imported yet: everything is new
-        let inspection = inspect_package(&out1.join("release.3pk"), &library).unwrap();
+        let inspection = inspect_package(&out1.join("release.3pk"), &library, &conn).unwrap();
         assert!(!inspection.is_update);
         assert!(inspection.blocked.is_none());
         assert!(inspection
@@ -696,7 +1191,7 @@ mod tests {
         import_release(&out1.join("release.3pk"), &library, None).unwrap();
 
         // Imported and untouched: everything is unchanged
-        let inspection = inspect_package(&out1.join("release.3pk"), &library).unwrap();
+        let inspection = inspect_package(&out1.join("release.3pk"), &library, &conn).unwrap();
         assert!(inspection.is_update);
         assert!(inspection
             .components
@@ -707,7 +1202,7 @@ mod tests {
         std::fs::write(staged.join("knight/body.stl"), b"knight-v2").unwrap();
         let out2 = dir.join("out2");
         pack(&staged, &["knight", "goblin"], &out2);
-        let inspection = inspect_package(&out2.join("release.3pk"), &library).unwrap();
+        let inspection = inspect_package(&out2.join("release.3pk"), &library, &conn).unwrap();
         let state = |name: &str| {
             inspection
                 .components
@@ -721,7 +1216,7 @@ mod tests {
 
         // A component archive missing next to the .3pk can't import
         std::fs::remove_file(out2.join("goblin.zip")).unwrap();
-        let inspection = inspect_package(&out2.join("release.3pk"), &library).unwrap();
+        let inspection = inspect_package(&out2.join("release.3pk"), &library, &conn).unwrap();
         let goblin = inspection
             .components
             .iter()
@@ -733,7 +1228,7 @@ mod tests {
         // A locally packed-at-rest component refuses updates until unpacked
         let knight_dir = Path::new(&inspection.dest_dir).join("knight");
         std::fs::write(knight_dir.join(PACK_SIDECAR_NAME), b"{}").unwrap();
-        let inspection = inspect_package(&out2.join("release.3pk"), &library).unwrap();
+        let inspection = inspect_package(&out2.join("release.3pk"), &library, &conn).unwrap();
         let knight = inspection
             .components
             .iter()
@@ -752,8 +1247,139 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn owned_file(path: &str, dir: &str, size_bytes: i64, hash: &str) -> crate::catalog::FileRow {
+        crate::catalog::FileRow {
+            path: path.into(),
+            dir_path: dir.into(),
+            file_name: path.rsplit('/').next().unwrap().into(),
+            extension: "stl".into(),
+            size_bytes,
+            content_hash: Some(hash.into()),
+            ..Default::default()
+        }
+    }
+
+    /// The completeness diff is checksum-only and runs regardless of a
+    /// component's archive state: knight is fully owned under names the
+    /// manifest never uses, orc is partially owned including a
+    /// packed-at-rest donor's sidecar hash, and goblin is owned nowhere.
+    #[test]
+    fn completeness_diffs_manifest_checksums_against_library_wide_ownership() {
+        let mut conn = test_conn();
+        let dir = temp("completeness");
+        let staged = dir.join("staged");
+
+        let knight = staged.join("knight");
+        std::fs::create_dir_all(&knight).unwrap();
+        std::fs::write(knight.join("body.stl"), b"knight-body-bytes").unwrap();
+        std::fs::write(knight.join("base.stl"), b"knight-base-bytes").unwrap();
+        write_model_json(&knight, "knight", &["body.stl", "base.stl"]);
+
+        let orc = staged.join("orc");
+        std::fs::create_dir_all(&orc).unwrap();
+        std::fs::write(orc.join("orc_body.stl"), b"orc-body-bytes").unwrap();
+        std::fs::write(orc.join("orc_head.stl"), b"orc-head-bytes").unwrap();
+        write_model_json(&orc, "orc", &["orc_body.stl", "orc_head.stl"]);
+
+        let goblin = staged.join("goblin");
+        std::fs::create_dir_all(&goblin).unwrap();
+        std::fs::write(goblin.join("gob.stl"), b"goblin-bytes").unwrap();
+        write_model_json(&goblin, "goblin", &["gob.stl"]);
+
+        write_release_json(&staged);
+        let out = dir.join("packed");
+        let manifest = pack(&staged, &["knight", "orc", "goblin"], &out);
+        let checksum = |component: &str, file: &str| -> String {
+            manifest
+                .components
+                .iter()
+                .find(|c| c.name == component)
+                .unwrap()
+                .models[0]
+                .files
+                .iter()
+                .find(|f| f.name == file)
+                .unwrap()
+                .checksum
+                .clone()
+        };
+        let file_size = |component: &str, file: &str| -> f64 {
+            manifest
+                .components
+                .iter()
+                .find(|c| c.name == component)
+                .unwrap()
+                .models[0]
+                .files
+                .iter()
+                .find(|f| f.name == file)
+                .unwrap()
+                .size_bytes as f64
+        };
+
+        // knight's two files sit somewhere else entirely, under different
+        // names — checksum is identity, names aren't.
+        let knight_body = pack::bare_hash(&checksum("knight", "body.stl")).to_string();
+        let knight_base = pack::bare_hash(&checksum("knight", "base.stl")).to_string();
+        // orc_body is owned only as a packed model's sidecar-hashed entry —
+        // no unpack needed to match it; orc_head is owned nowhere.
+        let orc_body = pack::bare_hash(&checksum("orc", "orc_body.stl")).to_string();
+        let mut orc_donor = owned_file(
+            "/library/vault/orc_body_twin.stl",
+            "/library/vault",
+            17,
+            &orc_body,
+        );
+        orc_donor.archive_path = Some("/library/vault/model.plinthpack".into());
+
+        let rows = vec![
+            owned_file(
+                "/library/scattered/renamed_body.stl",
+                "/library/scattered",
+                17,
+                &knight_body,
+            ),
+            owned_file(
+                "/library/other/an_old_download.stl",
+                "/library/other",
+                17,
+                &knight_base,
+            ),
+            orc_donor,
+        ];
+        db::replace_catalog(&mut conn, "/library", &rows, &[], &[], &[], &[]).unwrap();
+
+        let inspection = inspect_package(&out.join("release.3pk"), &dir.join("dest"), &conn).unwrap();
+        let component = |name: &str| {
+            inspection
+                .components
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap()
+        };
+
+        let knight = component("knight");
+        assert_eq!(knight.files_owned, 2);
+        assert_eq!(knight.missing_bytes, 0.0);
+        assert!(knight.missing.is_empty());
+
+        let orc = component("orc");
+        assert_eq!(orc.files_owned, 1);
+        assert_eq!(orc.missing.len(), 1);
+        assert_eq!(orc.missing[0].name, "orc_head.stl");
+        assert_eq!(orc.missing_bytes, file_size("orc", "orc_head.stl"));
+
+        let goblin = component("goblin");
+        assert_eq!(goblin.files_owned, 0);
+        assert_eq!(goblin.missing.len(), 1);
+        assert_eq!(goblin.missing_bytes, file_size("goblin", "gob.stl"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn update_replaces_selected_components_and_preserves_local_edits() {
+        let conn = test_conn();
         let dir = temp("update");
         let staged = dir.join("staged");
         let knight = staged.join("knight");
@@ -825,7 +1451,7 @@ mod tests {
         );
 
         // The written manifest reflects the disk: everything reads unchanged now
-        let inspection = inspect_package(&out2.join("release.3pk"), &library).unwrap();
+        let inspection = inspect_package(&out2.join("release.3pk"), &library, &conn).unwrap();
         assert!(inspection
             .components
             .iter()
@@ -836,6 +1462,7 @@ mod tests {
 
     #[test]
     fn a_failed_component_update_stays_marked_changed() {
+        let conn = test_conn();
         let dir = temp("failedupdate");
         let staged = dir.join("staged");
         let knight = staged.join("knight");
@@ -864,7 +1491,7 @@ mod tests {
             std::fs::read(release_dir.join("knight/body.stl")).unwrap(),
             b"body-v1"
         );
-        let inspection = inspect_package(&out2.join("release.3pk"), &library).unwrap();
+        let inspection = inspect_package(&out2.join("release.3pk"), &library, &conn).unwrap();
         assert_eq!(inspection.components[0].state, ComponentState::Changed);
 
         std::fs::remove_dir_all(&dir).ok();
@@ -876,6 +1503,7 @@ mod tests {
     /// never meant to touch.
     #[test]
     fn refuses_a_malicious_component_archive_path() {
+        let conn = test_conn();
         let dir = temp("evilarchive");
         let out = dir.join("out");
         std::fs::create_dir_all(&out).unwrap();
@@ -915,7 +1543,7 @@ mod tests {
         let library = dir.join("library");
         std::fs::create_dir_all(&library).unwrap();
 
-        let inspection = inspect_package(&out.join("release.3pk"), &library).unwrap();
+        let inspection = inspect_package(&out.join("release.3pk"), &library, &conn).unwrap();
         assert_eq!(
             inspection.components[0].state,
             ComponentState::MissingArchive
@@ -938,6 +1566,447 @@ mod tests {
             !release_dir.join("comp").exists(),
             "nothing extracted from the escaped archive"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The scenario the whole feature exists for: no sibling archive next
+    /// to the .3pk at all. Recompile still materializes what the library
+    /// owns — one file scattered under an unrelated name, one owned only
+    /// as a packed-at-rest donor (a real pack.json + model.plinthpack on
+    /// disk, ephemerally extracted) — leaves the unowned file untouched,
+    /// and then completes for free once that file is acquired and indexed.
+    #[test]
+    fn recompiles_a_partial_component_when_its_archive_is_entirely_missing_and_resumes_for_free() {
+        let mut conn = test_conn();
+        let dir = temp("recompile_missing_archive");
+        let staged = dir.join("staged");
+        let relic = staged.join("relic");
+        std::fs::create_dir_all(&relic).unwrap();
+        std::fs::write(relic.join("relic_a.stl"), b"relic-a-bytes").unwrap();
+        std::fs::write(relic.join("relic_b.stl"), b"relic-b-bytes").unwrap();
+        std::fs::write(relic.join("relic_c.stl"), b"relic-c-bytes").unwrap();
+        write_model_json(&relic, "relic", &["relic_a.stl", "relic_b.stl", "relic_c.stl"]);
+        write_release_json(&staged);
+        let out = dir.join("packed");
+        let manifest = pack(&staged, &["relic"], &out);
+        let checksum = |file: &str| -> String {
+            manifest.components[0]
+                .models[0]
+                .files
+                .iter()
+                .find(|f| f.name == file)
+                .unwrap()
+                .checksum
+                .clone()
+        };
+        let size = |file: &str| -> f64 {
+            manifest.components[0]
+                .models[0]
+                .files
+                .iter()
+                .find(|f| f.name == file)
+                .unwrap()
+                .size_bytes as f64
+        };
+
+        // relic_a is owned loose, under a name/dir the manifest never uses —
+        // a real file on disk, since materializing it means copying real
+        // bytes, not just matching a DB row.
+        let scattered_dir = dir.join("library/scattered");
+        std::fs::create_dir_all(&scattered_dir).unwrap();
+        std::fs::write(scattered_dir.join("some_other_name.stl"), b"relic-a-bytes").unwrap();
+        let scattered = owned_file(
+            &scattered_dir.join("some_other_name.stl").to_string_lossy(),
+            &scattered_dir.to_string_lossy(),
+            13,
+            pack::bare_hash(&checksum("relic_a.stl")),
+        );
+
+        // relic_b is owned only inside a REAL packed model on disk — a
+        // genuine pack.json + model.plinthpack, so the donor path exercises
+        // extract_paths_ephemeral for real, not just a DB row.
+        let donor_model = dir.join("library/vault/relic_b_donor");
+        std::fs::create_dir_all(&donor_model).unwrap();
+        std::fs::write(donor_model.join("twin.stl"), b"relic-b-bytes").unwrap();
+        let cancel = AtomicBool::new(false);
+        pack::pack_model("test", &donor_model, None, &cancel, |_, _| true).unwrap();
+        let mut packed_donor = owned_file(
+            &pack::entry_disk_path(&donor_model, "twin.stl").to_string_lossy(),
+            &donor_model.to_string_lossy(),
+            13,
+            pack::bare_hash(&checksum("relic_b.stl")),
+        );
+        packed_donor.archive_path =
+            Some(donor_model.join(pack::PACK_ARCHIVE_NAME).to_string_lossy().into_owned());
+
+        let library_root = dir.join("library").to_string_lossy().into_owned();
+        db::replace_catalog(
+            &mut conn,
+            &library_root,
+            &[scattered, packed_donor],
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        // The sibling archive is gone: MissingArchive, exactly the
+        // "a freebie imported into a different folder" scenario.
+        std::fs::remove_file(out.join("relic.zip")).unwrap();
+
+        let library = dir.join("dest_library");
+        std::fs::create_dir_all(&library).unwrap();
+        let outcome = recompile_release(&conn, &out.join("release.3pk"), &library, None).unwrap();
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        assert_eq!(outcome.components.len(), 1);
+        let relic_out = &outcome.components[0];
+        assert!(!relic_out.complete);
+        assert_eq!(relic_out.files_landed, 2);
+        assert_eq!(relic_out.files_missing, 1);
+        assert_eq!(relic_out.missing_bytes, size("relic_c.stl"));
+
+        let component_dir = Path::new(&outcome.dest_dir).join("relic");
+        assert_eq!(
+            std::fs::read(component_dir.join("relic_a.stl")).unwrap(),
+            b"relic-a-bytes",
+            "donor materialized under the manifest's own name"
+        );
+        assert_eq!(
+            std::fs::read(component_dir.join("relic_b.stl")).unwrap(),
+            b"relic-b-bytes",
+            "packed donor extracted ephemerally, then copied into place"
+        );
+        assert!(
+            !component_dir.join("relic_c.stl").exists(),
+            "no donor anywhere — no placeholder, no trace on disk"
+        );
+
+        // The copied target must be independent from the source donor. If
+        // this were a hardlink, rewriting the imported path would silently
+        // mutate the user's existing library file too.
+        std::fs::write(component_dir.join("relic_a.stl"), b"edited-import").unwrap();
+        assert_eq!(
+            std::fs::read(scattered_dir.join("some_other_name.stl")).unwrap(),
+            b"relic-a-bytes",
+            "recompiled files must not alias their donor inode"
+        );
+        std::fs::write(component_dir.join("relic_a.stl"), b"relic-a-bytes").unwrap();
+
+        // The sibling archive is still absent, so state stays MissingArchive
+        // — but completeness is checksum-only and reports the partial
+        // landing regardless: never silently "unchanged" with a file gone.
+        let inspection = inspect_package(&out.join("release.3pk"), &library, &conn).unwrap();
+        assert_eq!(inspection.components[0].state, ComponentState::MissingArchive);
+        assert_eq!(inspection.components[0].files_owned, 2);
+
+        // The last file turns up somewhere else and gets indexed —
+        // recompiling again completes the set for free, no re-fetch of
+        // what already landed.
+        let found_dir = dir.join("library/found");
+        std::fs::create_dir_all(&found_dir).unwrap();
+        std::fs::write(found_dir.join("relic_c_finally.stl"), b"relic-c-bytes").unwrap();
+        let found = owned_file(
+            &found_dir.join("relic_c_finally.stl").to_string_lossy(),
+            &found_dir.to_string_lossy(),
+            13,
+            pack::bare_hash(&checksum("relic_c.stl")),
+        );
+        let found_root = found_dir.to_string_lossy().into_owned();
+        db::replace_catalog(&mut conn, &found_root, &[found], &[], &[], &[], &[]).unwrap();
+
+        let outcome = recompile_release(&conn, &out.join("release.3pk"), &library, None).unwrap();
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        let relic_out = &outcome.components[0];
+        assert!(relic_out.complete);
+        assert_eq!(relic_out.files_landed, 3);
+        assert_eq!(relic_out.files_missing, 0);
+        assert_eq!(
+            std::fs::read(component_dir.join("relic_c.stl")).unwrap(),
+            b"relic-c-bytes"
+        );
+
+        // The sibling archive itself never came back — state is still
+        // MissingArchive, an orthogonal question from ownership — but the
+        // checksum diff now shows the set complete, 0 bytes missing.
+        let inspection = inspect_package(&out.join("release.3pk"), &library, &conn).unwrap();
+        assert_eq!(inspection.components[0].state, ComponentState::MissingArchive);
+        assert_eq!(inspection.components[0].files_owned, 3);
+        assert!(inspection.components[0].missing.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn materialize_donor_skips_a_stale_owner_and_uses_the_next_verified_copy() {
+        let mut conn = test_conn();
+        let dir = temp("stale_donor");
+        let donor_dir = dir.join("donors");
+        std::fs::create_dir_all(&donor_dir).unwrap();
+
+        let stale = donor_dir.join("a_stale.stl");
+        let valid = donor_dir.join("z_valid.stl");
+        std::fs::write(&stale, b"wrong bytes").unwrap();
+        std::fs::write(&valid, b"right bytes").unwrap();
+        let checksum = manifest::hash_file(&valid).unwrap();
+        let bare = pack::bare_hash(&checksum).to_string();
+
+        let rows = vec![
+            owned_file(
+                &stale.to_string_lossy(),
+                &donor_dir.to_string_lossy(),
+                11,
+                &bare,
+            ),
+            owned_file(
+                &valid.to_string_lossy(),
+                &donor_dir.to_string_lossy(),
+                11,
+                &bare,
+            ),
+        ];
+        db::replace_catalog(
+            &mut conn,
+            &donor_dir.to_string_lossy(),
+            &rows,
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let target = dir.join("target.stl");
+        assert!(materialize_donor(&conn, &checksum, &target).unwrap());
+        assert_eq!(std::fs::read(&target).unwrap(), b"right bytes");
+
+        std::fs::write(&target, b"changed target").unwrap();
+        assert_eq!(
+            std::fs::read(&valid).unwrap(),
+            b"right bytes",
+            "materialized target must be an independent copy"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A component already packed at rest is never a donor-fallback
+    /// candidate: the directory already holds it, just compressed, so
+    /// recompile must refuse rather than write loose donor files next to
+    /// the archive.
+    #[test]
+    fn recompile_refuses_a_packed_at_rest_component_instead_of_writing_donors_into_it() {
+        let conn = test_conn();
+        let dir = temp("recompile_packed");
+        let staged = dir.join("staged");
+        let relic = staged.join("relic");
+        std::fs::create_dir_all(&relic).unwrap();
+        std::fs::write(relic.join("relic_a.stl"), b"relic-a-bytes").unwrap();
+        write_model_json(&relic, "relic", &["relic_a.stl"]);
+        write_release_json(&staged);
+        let out = dir.join("packed");
+        pack(&staged, &["relic"], &out);
+
+        let library = dir.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        import_release(&out.join("release.3pk"), &library, None).unwrap();
+
+        // The user packed the imported component at rest before a v2 shows
+        // up (checksum changed, so the archive path would otherwise fail
+        // and normally fall back to library donors).
+        let component_dir = library.join("DTL/2026-05 Knights/relic");
+        std::fs::write(component_dir.join(PACK_SIDECAR_NAME), b"{}").unwrap();
+        std::fs::write(staged.join("relic/relic_a.stl"), b"relic-a-bytes-v2").unwrap();
+        let out2 = dir.join("packed2");
+        pack(&staged, &["relic"], &out2);
+
+        let outcome = recompile_release(&conn, &out2.join("release.3pk"), &library, None).unwrap();
+        assert!(outcome.components.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(outcome.errors[0].contains("packed at rest"), "{:?}", outcome.errors);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn signed_release_fixture(dir: &Path) -> (PathBuf, PathBuf) {
+        let staged = dir.join("staged");
+        let component = staged.join("knight");
+        std::fs::create_dir_all(&component).unwrap();
+        std::fs::write(component.join("body.stl"), b"knight-body-bytes").unwrap();
+        write_model_json(&component, "knight", &["body.stl"]);
+        write_release_json(&staged);
+        (staged, dir.join("library"))
+    }
+
+    #[test]
+    fn inspect_reports_unsigned_when_there_is_no_manifest_sig() {
+        let conn = test_conn();
+        let dir = temp("sig_unsigned");
+        let (staged, library) = signed_release_fixture(&dir);
+        let out = dir.join("packed");
+        pack(&staged, &["knight"], &out);
+        std::fs::create_dir_all(&library).unwrap();
+
+        let inspection = inspect_package(&out.join("release.3pk"), &library, &conn).unwrap();
+        assert_eq!(inspection.signature, SignatureStatus::Unsigned);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn inspect_reports_valid_after_a_signed_pack_round_trips() {
+        let conn = test_conn();
+        let dir = temp("sig_valid");
+        let (staged, library) = signed_release_fixture(&dir);
+        let key = signing::ensure_key(&dir.join("key.json")).unwrap();
+        let expected_fingerprint = signing::key_info(&key).key_fingerprint;
+        let out = dir.join("packed");
+        pack_maybe_signed(&staged, &["knight"], &out, Some(&key));
+        std::fs::create_dir_all(&library).unwrap();
+
+        let inspection = inspect_package(&out.join("release.3pk"), &library, &conn).unwrap();
+        assert_eq!(
+            inspection.signature,
+            SignatureStatus::Valid {
+                key_fingerprint: expected_fingerprint
+            }
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn inspect_reports_invalid_when_the_packed_manifest_is_tampered() {
+        let conn = test_conn();
+        let dir = temp("sig_tampered");
+        let (staged, library) = signed_release_fixture(&dir);
+        let key = signing::ensure_key(&dir.join("key.json")).unwrap();
+        let out = dir.join("packed");
+        pack_maybe_signed(&staged, &["knight"], &out, Some(&key));
+        std::fs::create_dir_all(&library).unwrap();
+
+        // Flip one byte of the manifest.json the archive actually holds —
+        // the signature was over the untampered bytes, so it must now fail.
+        // Edited inside a string VALUE ("Knights" -> "KnightS"), not a key
+        // or arbitrary byte: an arbitrary flip can land outside valid UTF-8
+        // (failing at the read step) or inside a required key (failing
+        // manifest parsing) before signature classification is ever reached.
+        let manifest_text = std::fs::read_to_string(staged.join("manifest.json")).unwrap();
+        let tampered_text = manifest_text.replacen("Knights", "KnightS", 1);
+        assert_ne!(tampered_text, manifest_text, "fixture must contain the substring to tamper");
+        replace_zip_entry(
+            &out.join("release.3pk"),
+            "manifest.json",
+            tampered_text.as_bytes(),
+        );
+
+        let inspection = inspect_package(&out.join("release.3pk"), &library, &conn).unwrap();
+        assert!(matches!(inspection.signature, SignatureStatus::Invalid { .. }));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn inspect_reports_invalid_when_the_signature_claims_a_key_that_did_not_produce_it() {
+        let conn = test_conn();
+        let dir = temp("sig_wrong_key");
+        let (staged, library) = signed_release_fixture(&dir);
+        let key_a = signing::ensure_key(&dir.join("key_a.json")).unwrap();
+        let key_b = signing::ensure_key(&dir.join("key_b.json")).unwrap();
+        let out = dir.join("packed");
+        pack_maybe_signed(&staged, &["knight"], &out, Some(&key_a));
+        std::fs::create_dir_all(&library).unwrap();
+
+        // key_a's real signature bytes, relabeled as key_b's — a forged
+        // attribution, not just corrupted bytes.
+        let sig_text = std::fs::read_to_string(staged.join("manifest.sig")).unwrap();
+        let mut sig: signing::ManifestSignature = serde_json::from_str(&sig_text).unwrap();
+        let key_b_info = signing::key_info(&key_b);
+        sig.public_key = key_b_info.public_key;
+        sig.key_fingerprint = key_b_info.key_fingerprint;
+        replace_zip_entry(
+            &out.join("release.3pk"),
+            "manifest.sig",
+            serde_json::to_string_pretty(&sig).unwrap().as_bytes(),
+        );
+
+        let inspection = inspect_package(&out.join("release.3pk"), &library, &conn).unwrap();
+        assert!(matches!(inspection.signature, SignatureStatus::Invalid { .. }));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn inspect_reports_invalid_when_manifest_sig_is_malformed_json() {
+        let conn = test_conn();
+        let dir = temp("sig_malformed");
+        let (staged, library) = signed_release_fixture(&dir);
+        let key = signing::ensure_key(&dir.join("key.json")).unwrap();
+        let out = dir.join("packed");
+        pack_maybe_signed(&staged, &["knight"], &out, Some(&key));
+        std::fs::create_dir_all(&library).unwrap();
+
+        replace_zip_entry(&out.join("release.3pk"), "manifest.sig", b"{ not json");
+
+        let inspection = inspect_package(&out.join("release.3pk"), &library, &conn).unwrap();
+        assert!(matches!(inspection.signature, SignatureStatus::Invalid { .. }));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn import_keeps_signed_source_pair_separate_from_local_state_manifest() {
+        let dir = temp("sig_import_provenance");
+        let (staged, library) = signed_release_fixture(&dir);
+
+        // Two signed components, but import only one. This guarantees the
+        // release-root local manifest is rewritten and therefore is NOT the
+        // byte sequence covered by the creator's signature.
+        let goblin = staged.join("goblin");
+        std::fs::create_dir_all(&goblin).unwrap();
+        std::fs::write(goblin.join("body.stl"), b"goblin-body-bytes").unwrap();
+        write_model_json(&goblin, "goblin", &["body.stl"]);
+
+        let key = signing::ensure_key(&dir.join("key.json")).unwrap();
+        let out = dir.join("packed");
+        pack_maybe_signed(&staged, &["knight", "goblin"], &out, Some(&key));
+        std::fs::create_dir_all(&library).unwrap();
+
+        let source_manifest = std::fs::read(staged.join("manifest.json")).unwrap();
+        let source_sig = std::fs::read(staged.join("manifest.sig")).unwrap();
+        let outcome = import_release(
+            &out.join("release.3pk"),
+            &library,
+            Some(vec!["knight".into()]),
+        )
+        .unwrap();
+        let release_dir = Path::new(&outcome.dest_dir);
+
+        assert!(
+            !release_dir.join("manifest.sig").exists(),
+            "a source signature must never sit beside the mutable local manifest"
+        );
+        let provenance = release_dir.join(PROVENANCE_DIR);
+        assert_eq!(
+            std::fs::read(provenance.join("manifest.json")).unwrap(),
+            source_manifest
+        );
+        assert_eq!(
+            std::fs::read(provenance.join("manifest.sig")).unwrap(),
+            source_sig
+        );
+        assert_ne!(
+            std::fs::read(release_dir.join("manifest.json")).unwrap(),
+            std::fs::read(provenance.join("manifest.json")).unwrap(),
+            "selective import must keep local state distinct from signed source bytes"
+        );
+
+        let sig_text = String::from_utf8(source_sig).unwrap();
+        assert!(matches!(
+            signing::classify_signature(&sig_text, &source_manifest),
+            SignatureStatus::Valid { .. }
+        ));
 
         std::fs::remove_dir_all(&dir).ok();
     }

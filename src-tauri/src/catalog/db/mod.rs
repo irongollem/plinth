@@ -1,12 +1,13 @@
 //! Split by domain (schema, ingest, search, groups, meta, geometry, packing,
-//! housekeeping); every submodule's public API is re-exported below so
-//! `db::foo(...)` call sites are unaffected by the split.
+//! housekeeping, ownership); every submodule's public API is re-exported
+//! below so `db::foo(...)` call sites are unaffected by the split.
 
 mod geometry;
 mod groups;
 mod housekeeping;
 mod ingest;
 mod meta;
+mod ownership;
 mod packing;
 mod schema;
 mod search;
@@ -45,11 +46,20 @@ pub use meta::{
 // not called by its own name — kept public for API parity with pre-split db.rs.
 #[allow(unused_imports)]
 pub use meta::set_model_preview;
+pub use ownership::{find_owner, find_owners};
 pub use packing::{
     archive_paths_for, dir_contains_pack, dir_size_bytes, mark_packed, mark_unpacked,
     pack_candidate_dirs, packed_model_dirs,
 };
-pub use schema::open;
+
+/// Open the catalog and install feature-local indexes that are independent
+/// of the versioned schema migrations.
+pub fn open(db_path: &std::path::Path) -> Result<rusqlite::Connection, crate::error::AppError> {
+    let conn = schema::open(db_path)?;
+    ownership::ensure_content_hash_index(&conn)?;
+    Ok(conn)
+}
+
 #[cfg(test)]
 pub(crate) use schema::test_init;
 pub use search::{

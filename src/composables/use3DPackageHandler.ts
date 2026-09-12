@@ -1,8 +1,51 @@
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { onMounted, onUnmounted, ref } from "vue";
-import { commands, type PackageInspection } from "../bindings";
+import {
+  commands,
+  type ComponentStatus as BoundComponentStatus,
+  type PackageInspection as BoundPackageInspection,
+} from "../bindings";
 import { useToastStore } from "../stores/toastStore";
 import { selectDirectory } from "./useFileSelect";
+
+export interface MissingFile {
+  name: string;
+  size_bytes: number;
+}
+
+/**
+ * #30 adds ownership fields to the inspect payload. These local extensions
+ * keep this stacked feature usable while bindings.ts remains generated from
+ * the current main branch; the normal Specta export will absorb them once
+ * the branch is merged/regenerated.
+ */
+export type ComponentStatus = BoundComponentStatus & {
+  files_owned: number;
+  missing_bytes: number;
+  missing: MissingFile[];
+};
+
+export type PackageInspection = Omit<BoundPackageInspection, "components"> & {
+  components: ComponentStatus[];
+};
+
+export interface RecompiledComponent {
+  name: string;
+  complete: boolean;
+  files_landed: number;
+  files_missing: number;
+  missing_bytes: number;
+}
+
+export interface RecompileOutcome {
+  release_name: string;
+  designer: string;
+  dest_dir: string;
+  components: RecompiledComponent[];
+  errors: string[];
+  warnings: string[];
+}
 
 export interface PendingImport {
   filePath: string;
@@ -19,7 +62,10 @@ export interface PendingImport {
  * the selective-import dialog (new release: everything pre-checked; update:
  * only the changed components). The confirmed import verifies each
  * component against the manifest checksums, rematerializes dedup-elided
- * files, and a catalog scan restores the packed curation.
+ * files, and a catalog scan restores the packed curation. confirmRecompile
+ * is the fallback for what the archive path can't cover: it materializes
+ * owned files from anywhere in the library by checksum, even when a
+ * component's sibling archive is missing entirely.
  */
 export function use3DPackageHandler() {
   const toastStore = useToastStore();
@@ -60,7 +106,7 @@ export function use3DPackageHandler() {
         filePath,
         library,
         ownerRoot,
-        inspection: result.data,
+        inspection: result.data as PackageInspection,
       };
     } catch (error) {
       toastStore.reportError("Failed to import 3D package", error);
@@ -104,6 +150,47 @@ export function use3DPackageHandler() {
     }
   };
 
+  const confirmRecompile = async (components: string[] | null) => {
+    const pending = pendingImport.value;
+    if (!pending || importing.value) return;
+    importing.value = true;
+    try {
+      // Raw invoke is intentional here: bindings.ts is generated from main,
+      // while this stacked feature adds the command. Once merged, Specta
+      // generates the typed wrapper automatically.
+      const outcome = await invoke<RecompileOutcome>(
+        "recompile_release_from_library",
+        {
+          packagePath: pending.filePath,
+          libraryDir: pending.library,
+          components,
+        },
+      );
+      for (const error of outcome.errors) toastStore.addToast(error, "error");
+      for (const warning of outcome.warnings)
+        toastStore.addToast(warning, "warning");
+      const landedFiles = outcome.components.reduce(
+        (sum, c) => sum + c.files_landed,
+        0,
+      );
+      const completeCount = outcome.components.filter((c) => c.complete).length;
+      const allComplete = completeCount === outcome.components.length;
+      toastStore.addToast(
+        `Recompiled "${outcome.release_name}" from your library — ${completeCount} of ${outcome.components.length} component${outcome.components.length === 1 ? "" : "s"} complete, ${landedFiles} files landed`,
+        allComplete ? "success" : "warning",
+      );
+      pendingImport.value = null;
+
+      if (pending.ownerRoot) {
+        await commands.startCatalogScan(pending.ownerRoot);
+      }
+    } catch (error) {
+      toastStore.reportError("Failed to recompile from your library", error);
+    } finally {
+      importing.value = false;
+    }
+  };
+
   const cancelImport = () => {
     if (!importing.value) pendingImport.value = null;
   };
@@ -133,6 +220,7 @@ export function use3DPackageHandler() {
     pendingImport,
     importing,
     confirmImport,
+    confirmRecompile,
     cancelImport,
   };
 }
