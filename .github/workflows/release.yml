@@ -5,12 +5,6 @@ on:
     tags:
       - "v*"
       - "[0-9]+.[0-9]+.[0-9]+*" # matches the existing un-prefixed tag style (0.1.0-beta.2)
-  workflow_dispatch:
-    inputs:
-      release_ref:
-        description: "Existing tag to build and attach to the release"
-        required: true
-        type: string
 
 permissions:
   contents: write
@@ -43,8 +37,6 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.ref }}
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -83,7 +75,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.ref_name }}
+          tagName: ${{ github.ref_name }}
           releaseName: "Plinth v__VERSION__"
           releaseBody: "See the assets below to download and install."
           releaseDraft: true
