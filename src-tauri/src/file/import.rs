@@ -613,40 +613,49 @@ fn file_matches(path: &Path, checksum: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Copy/hardlink ONE owned file into place, extracting an ephemeral copy
-/// first when its only known donor is packed at rest (cleaned up right
-/// after). Verifies the result against `checksum` before reporting success
-/// and removes it on mismatch — the index can go stale between a scan and
-/// this call, and a silent bad copy would be worse than an honest "still
-/// missing".
+/// Copy ONE owned file into place, extracting an ephemeral copy first when
+/// the candidate is packed at rest. Every indexed candidate is verified in
+/// turn because the catalog can be stale: a missing/corrupt first donor must
+/// not hide another valid copy. Imported files are deliberately copied, not
+/// hardlinked, so later edits to either library path cannot mutate the other.
 fn materialize_donor(conn: &Connection, checksum: &str, target: &Path) -> Result<bool, AppError> {
-    let Some((donor_path, donor_archive)) = db::find_owner(conn, pack::bare_hash(checksum))? else {
+    let donors = db::find_owners(conn, pack::bare_hash(checksum))?;
+    if donors.is_empty() {
         return Ok(false);
-    };
+    }
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| AppError::IoError(format!("Failed to create dirs: {}", e)))?;
     }
-    if let Some(archive_path) = &donor_archive {
-        let Some(model_dir) = Path::new(archive_path).parent() else {
-            return Ok(false);
-        };
-        let cancel = AtomicBool::new(false);
-        let wanted = [donor_path.clone()];
-        if pack::extract_paths_ephemeral(model_dir, &wanted, &cancel, |_| true).is_err() {
-            return Ok(false);
+
+    for (donor_path, donor_archive) in donors {
+        if let Some(archive_path) = &donor_archive {
+            let Some(model_dir) = Path::new(archive_path).parent() else {
+                continue;
+            };
+            let cancel = AtomicBool::new(false);
+            let wanted = [donor_path.clone()];
+            if pack::extract_paths_ephemeral(model_dir, &wanted, &cancel, |_| true).is_err() {
+                continue;
+            }
         }
-    }
-    let source = Path::new(&donor_path);
-    let copied = std::fs::hard_link(source, target).is_ok() || std::fs::copy(source, target).is_ok();
-    if donor_archive.is_some() {
-        pack::cleanup_ephemeral(std::slice::from_ref(&donor_path));
-    }
-    let ok = copied && file_matches(target, checksum);
-    if copied && !ok {
+
+        let copied = std::fs::copy(Path::new(&donor_path), target).is_ok();
+        if donor_archive.is_some() {
+            pack::cleanup_ephemeral(std::slice::from_ref(&donor_path));
+        }
+
+        if copied && file_matches(target, checksum) {
+            return Ok(true);
+        }
+
+        // std::fs::copy can leave a partial/truncated destination when it
+        // fails mid-copy. A stale candidate should leave no trace before the
+        // next owner is attempted.
         std::fs::remove_file(target).ok();
     }
-    Ok(ok)
+
+    Ok(false)
 }
 
 /// Materialize the manifest files the library already owns into
@@ -1464,8 +1473,8 @@ mod tests {
         };
 
         // relic_a is owned loose, under a name/dir the manifest never uses —
-        // a real file on disk, since materializing it means hard-linking or
-        // copying real bytes, not just matching a DB row.
+        // a real file on disk, since materializing it means copying real
+        // bytes, not just matching a DB row.
         let scattered_dir = dir.join("library/scattered");
         std::fs::create_dir_all(&scattered_dir).unwrap();
         std::fs::write(scattered_dir.join("some_other_name.stl"), b"relic-a-bytes").unwrap();
@@ -1536,6 +1545,17 @@ mod tests {
             "no donor anywhere — no placeholder, no trace on disk"
         );
 
+        // The copied target must be independent from the source donor. If
+        // this were a hardlink, rewriting the imported path would silently
+        // mutate the user's existing library file too.
+        std::fs::write(component_dir.join("relic_a.stl"), b"edited-import").unwrap();
+        assert_eq!(
+            std::fs::read(scattered_dir.join("some_other_name.stl")).unwrap(),
+            b"relic-a-bytes",
+            "recompiled files must not alias their donor inode"
+        );
+        std::fs::write(component_dir.join("relic_a.stl"), b"relic-a-bytes").unwrap();
+
         // The sibling archive is still absent, so state stays MissingArchive
         // — but completeness is checksum-only and reports the partial
         // landing regardless: never silently "unchanged" with a file gone.
@@ -1576,6 +1596,59 @@ mod tests {
         assert_eq!(inspection.components[0].state, ComponentState::MissingArchive);
         assert_eq!(inspection.components[0].files_owned, 3);
         assert!(inspection.components[0].missing.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn materialize_donor_skips_a_stale_owner_and_uses_the_next_verified_copy() {
+        let mut conn = test_conn();
+        let dir = temp("stale_donor");
+        let donor_dir = dir.join("donors");
+        std::fs::create_dir_all(&donor_dir).unwrap();
+
+        let stale = donor_dir.join("a_stale.stl");
+        let valid = donor_dir.join("z_valid.stl");
+        std::fs::write(&stale, b"wrong bytes").unwrap();
+        std::fs::write(&valid, b"right bytes").unwrap();
+        let checksum = manifest::hash_file(&valid).unwrap();
+        let bare = pack::bare_hash(&checksum).to_string();
+
+        let rows = vec![
+            owned_file(
+                &stale.to_string_lossy(),
+                &donor_dir.to_string_lossy(),
+                11,
+                &bare,
+            ),
+            owned_file(
+                &valid.to_string_lossy(),
+                &donor_dir.to_string_lossy(),
+                11,
+                &bare,
+            ),
+        ];
+        db::replace_catalog(
+            &mut conn,
+            &donor_dir.to_string_lossy(),
+            &rows,
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let target = dir.join("target.stl");
+        assert!(materialize_donor(&conn, &checksum, &target).unwrap());
+        assert_eq!(std::fs::read(&target).unwrap(), b"right bytes");
+
+        std::fs::write(&target, b"changed target").unwrap();
+        assert_eq!(
+            std::fs::read(&valid).unwrap(),
+            b"right bytes",
+            "materialized target must be an independent copy"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
