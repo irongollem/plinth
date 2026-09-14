@@ -1,5 +1,7 @@
 use crate::error::AppError;
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+use specta::Type;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
@@ -11,6 +13,12 @@ use super::geometry;
 use super::DuplicateGroup;
 
 const PARTIAL_HASH_BYTES: usize = 128 * 1024;
+/// Sizes fetched from the index per page, and entries buffered before a
+/// checkpoint flush. Together they cap what the scan holds at once, so
+/// peak memory follows these constants rather than the catalog's size.
+const SIZE_PAGE: u32 = 512;
+const CHECKPOINT_BATCH: usize = 512;
+const PROGRESS_STRIDE: u32 = 50;
 
 /// Opaque physical-file identity: "device:inode" on Unix, volume:index on
 /// Windows. Two paths sharing it are one file on disk (hardlinks), which is
@@ -32,91 +40,242 @@ pub fn file_identity(path: &Path) -> Option<String> {
     })
 }
 
+/// What a duplicate scan is spending its time on. Reported because the
+/// three kinds of work differ by orders of magnitude: answering from the
+/// index costs nothing, a prefix read costs 128 KiB, and a full read costs
+/// the whole file — a progress bar that calls all three "hashing" tells
+/// the user nothing about how long the rest will take.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, Type)]
+pub enum DupPhase {
+    #[default]
+    Checking,
+    PrefixHashing,
+    FullHashing,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DupProgress {
+    pub processed: u32,
+    pub total: u32,
+    /// Candidates settled from stored hashes, without a disk read.
+    pub cached: u32,
+    pub prefix_hashed: u32,
+    pub full_hashed: u32,
+    pub phase: DupPhase,
+}
+
+/// A candidate in its prefix bucket. `confirmed` means the index already
+/// holds its full hash, so stage 3 has nothing left to read for it.
+struct Bucketed {
+    path: String,
+    confirmed: bool,
+}
+
 /// Staged duplicate detection: same-size candidates come from the index,
 /// partial (first 128 KiB) BLAKE3 hashes weed out most collisions, then
 /// full-file hashes confirm and are persisted so re-runs are cheap.
 ///
-/// Every candidate's physical identity is refreshed along the way (a stat,
-/// nearly free next to hashing) since merges and external swaps can change
-/// identity without touching content. Stage 3's full `.stl` reads double as
-/// geometry mining — one pass over the same bytes, capped by `edge_cap`.
+/// Both stages checkpoint as they go — prefix hashes, and the physical
+/// identity every candidate is stat'ed for along the way. An interrupted
+/// scan therefore resumes from the index instead of rereading what it had
+/// already read, which on a network library is the difference between
+/// minutes and hours.
+///
+/// Stage 3's full `.stl` reads double as geometry mining — one pass over
+/// the same bytes, capped by `edge_cap`.
 pub fn find_duplicates(
     conn: &Connection,
     cancel: &AtomicBool,
     edge_cap: u32,
-    mut on_progress: impl FnMut(u32, u32),
+    on_progress: impl FnMut(DupProgress),
 ) -> Result<Vec<DuplicateGroup>, AppError> {
-    let candidates = db::duplicate_size_candidates(conn)?;
-    let total_candidates: u32 = candidates.iter().map(|(_, paths)| paths.len() as u32).sum();
-    let mut processed: u32 = 0;
-    let mut identities: Vec<(String, String)> = Vec::new();
+    let total = db::duplicate_candidate_count(conn)?;
+    let mut scan = Scan {
+        conn,
+        cancel,
+        edge_cap,
+        progress: DupProgress {
+            total,
+            ..Default::default()
+        },
+        on_progress,
+        prefixes: Vec::new(),
+        identities: Vec::new(),
+    };
+    scan.run()?;
+    db::duplicate_groups(conn)
+}
 
-    for (size, paths) in candidates {
-        if cancel.load(Ordering::SeqCst) {
-            return Err(AppError::UserCancelled("Duplicate scan cancelled".into()));
+struct Scan<'a, F: FnMut(DupProgress)> {
+    conn: &'a Connection,
+    cancel: &'a AtomicBool,
+    edge_cap: u32,
+    progress: DupProgress,
+    on_progress: F,
+    prefixes: Vec<db::PrefixHashRow>,
+    identities: Vec<(String, String)>,
+}
+
+impl<F: FnMut(DupProgress)> Scan<'_, F> {
+    fn run(&mut self) -> Result<(), AppError> {
+        let mut after = 0i64;
+        loop {
+            if self.cancelled() {
+                return Err(self.stop());
+            }
+            let sizes = db::duplicate_candidate_sizes(self.conn, after, SIZE_PAGE)?;
+            let Some(&last) = sizes.last() else { break };
+            after = last;
+            for size in sizes {
+                for (prefix, bucket) in self.bucket_by_prefix(size)? {
+                    // one candidate at this prefix: nothing to collide with
+                    if bucket.len() > 1 {
+                        self.confirm(&prefix, bucket, size)?;
+                    }
+                }
+                self.checkpoint()?;
+            }
         }
+        self.flush()?;
+        self.progress.processed = self.progress.total;
+        self.progress.phase = DupPhase::Checking;
+        self.emit();
+        Ok(())
+    }
 
-        // Files small enough that the partial hash IS the full hash skip
-        // straight to stage 3
-        let needs_two_stages = size as usize > PARTIAL_HASH_BYTES;
+    /// Stage 2 for one size: every candidate lands in a bucket keyed by the
+    /// hash of its first 128 KiB, read only when neither this scan nor an
+    /// earlier one already has that prefix.
+    ///
+    /// Files whose full hash is already stored are bucketed too, on the
+    /// same key. Leaving them out would hide a duplicate whose partner had
+    /// been hashed by an earlier run: the unhashed one would sit alone in
+    /// its bucket and never be confirmed.
+    fn bucket_by_prefix(&mut self, size: i64) -> Result<HashMap<String, Vec<Bucketed>>, AppError> {
+        let mut buckets: HashMap<String, Vec<Bucketed>> = HashMap::new();
+        for candidate in db::duplicate_candidates_for_size(self.conn, size)? {
+            if self.cancelled() {
+                return Err(self.stop());
+            }
+            self.progress.processed += 1;
+            // merges and external swaps change a file's identity without
+            // touching its content, so every candidate's is refreshed
+            if let Some(identity) = file_identity(Path::new(&candidate.path)) {
+                self.identities.push((candidate.path.clone(), identity));
+            }
+            let confirmed = candidate.content_hash.is_some();
+            let prefix = match candidate.prefix_hash {
+                Some(prefix) => {
+                    self.progress.cached += 1;
+                    self.progress.phase = DupPhase::Checking;
+                    prefix
+                }
+                None => {
+                    self.progress.phase = DupPhase::PrefixHashing;
+                    match hash_file(Path::new(&candidate.path), Some(PARTIAL_HASH_BYTES)) {
+                        Ok(prefix) => {
+                            self.progress.prefix_hashed += 1;
+                            self.prefixes.push(db::PrefixHashRow {
+                                path: candidate.path.clone(),
+                                prefix_hash: prefix.clone(),
+                                size_bytes: size,
+                                modified_at: candidate.modified_at,
+                            });
+                            prefix
+                        }
+                        Err(_) => continue, // unreadable file: not a duplicate candidate
+                    }
+                }
+            };
+            buckets.entry(prefix).or_default().push(Bucketed {
+                path: candidate.path,
+                confirmed,
+            });
+            self.tick();
+            self.checkpoint()?;
+        }
+        Ok(buckets)
+    }
 
-        // Stage 2: group by partial hash
-        let mut partial_groups: HashMap<String, Vec<String>> = HashMap::new();
-        for path in paths {
-            processed += 1;
-            if processed.is_multiple_of(50) {
-                on_progress(processed, total_candidates);
-            }
-            if cancel.load(Ordering::SeqCst) {
-                return Err(AppError::UserCancelled("Duplicate scan cancelled".into()));
-            }
-            if let Some(identity) = file_identity(Path::new(&path)) {
-                identities.push((path.clone(), identity));
-            }
-            // A stored full hash makes both stages unnecessary
-            if db::known_hash(conn, &path).is_some() {
-                partial_groups.entry("known".into()).or_default().push(path);
+    /// Stage 3: more than one candidate shares this prefix, so each member
+    /// the index can't already vouch for is hashed in full.
+    fn confirm(&mut self, prefix: &str, bucket: Vec<Bucketed>, size: i64) -> Result<(), AppError> {
+        let beyond_prefix = size as usize > PARTIAL_HASH_BYTES;
+        for candidate in bucket {
+            if candidate.confirmed {
                 continue;
             }
-            match hash_file(Path::new(&path), Some(PARTIAL_HASH_BYTES)) {
-                Ok(partial) => partial_groups.entry(partial).or_default().push(path),
-                Err(_) => continue, // unreadable file: not a duplicate candidate
+            if self.cancelled() {
+                return Err(self.stop());
             }
-        }
-
-        // Stage 3: full hash where partials collide (or trust stored hashes)
-        for (key, group) in partial_groups {
-            let confirmable = key == "known" || group.len() > 1;
-            if !confirmable {
+            let path = Path::new(&candidate.path);
+            let stl = is_stl(path);
+            if stl || beyond_prefix {
+                self.progress.phase = DupPhase::FullHashing;
+                self.progress.full_hashed += 1;
+                self.emit();
+            }
+            if stl {
+                hash_and_mine(self.conn, &candidate.path, self.edge_cap)?;
                 continue;
             }
-            for path in group {
-                if db::known_hash(conn, &path).is_some() {
-                    continue;
+            let hash = if beyond_prefix {
+                match hash_file(path, None) {
+                    Ok(hash) => hash,
+                    Err(_) => continue,
                 }
-                if cancel.load(Ordering::SeqCst) {
-                    return Err(AppError::UserCancelled("Duplicate scan cancelled".into()));
-                }
-                if is_stl(Path::new(&path)) {
-                    hash_and_mine(conn, &path, edge_cap)?;
-                    continue;
-                }
-                let full = if needs_two_stages {
-                    hash_file(Path::new(&path), None)
-                } else {
-                    // partial covered the whole file; rehash cheaply anyway
-                    hash_file(Path::new(&path), Some(PARTIAL_HASH_BYTES))
-                };
-                if let Ok(hash) = full {
-                    db::store_hash(conn, &path, &hash)?;
-                }
-            }
+            } else {
+                // the file ends inside the prefix, so that IS its full hash
+                self.progress.cached += 1;
+                prefix.to_string()
+            };
+            db::store_hash(self.conn, &candidate.path, &hash)?;
+        }
+        Ok(())
+    }
+
+    /// Persist what's buffered. An interrupted scan keeps everything a
+    /// flush has already committed, so this is also the granularity a
+    /// resumed scan restarts at.
+    fn flush(&mut self) -> Result<(), AppError> {
+        if self.prefixes.is_empty() && self.identities.is_empty() {
+            return Ok(());
+        }
+        db::store_dup_checkpoint(self.conn, &self.prefixes, &self.identities)?;
+        self.prefixes.clear();
+        self.identities.clear();
+        Ok(())
+    }
+
+    fn checkpoint(&mut self) -> Result<(), AppError> {
+        if self.prefixes.len() >= CHECKPOINT_BATCH || self.identities.len() >= CHECKPOINT_BATCH {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    /// A cancelled scan still owes the user the reads it already made; a
+    /// failure to persist them is what the caller hears about instead.
+    fn stop(&mut self) -> AppError {
+        match self.flush() {
+            Ok(()) => AppError::UserCancelled("Duplicate scan cancelled".into()),
+            Err(e) => e,
         }
     }
-    on_progress(total_candidates, total_candidates);
-    db::store_identities(conn, &identities)?;
 
-    db::duplicate_groups(conn)
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+
+    fn emit(&mut self) {
+        (self.on_progress)(self.progress);
+    }
+
+    fn tick(&mut self) {
+        if self.progress.processed.is_multiple_of(PROGRESS_STRIDE) {
+            self.emit();
+        }
+    }
 }
 
 /// Replace each duplicate path with a hardlink to `keep`, so every name
@@ -307,7 +466,7 @@ mod tests {
         db::replace_catalog(&mut conn, &dir.to_string_lossy(), &rows, &models, &[], &[], &[]).unwrap();
 
         let cancel = AtomicBool::new(false);
-        let groups = find_duplicates(&conn, &cancel, EDGE_STATS_MAX_TRIS, |_, _| {}).unwrap();
+        let groups = find_duplicates(&conn, &cancel, EDGE_STATS_MAX_TRIS, |_| {}).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].paths.len(), 2);
         // a and b are separate files on disk: both copies are real
@@ -349,7 +508,7 @@ mod tests {
         db::replace_catalog(&mut conn, &dir.to_string_lossy(), &rows, &[], &[], &[], &[]).unwrap();
 
         let cancel = AtomicBool::new(false);
-        let groups = find_duplicates(&conn, &cancel, EDGE_STATS_MAX_TRIS, |_, _| {}).unwrap();
+        let groups = find_duplicates(&conn, &cancel, EDGE_STATS_MAX_TRIS, |_| {}).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].paths.len(), 3);
         // Three names, but a+b share one inode: only c is a reclaimable copy
@@ -397,6 +556,149 @@ mod tests {
         assert!(again_errors.is_empty());
 
         assert!(supports_links(&keep));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    fn candidate_row(path: &Path, dir: &Path, size: i64) -> FileRow {
+        FileRow {
+            path: path.to_string_lossy().into_owned(),
+            dir_path: dir.to_string_lossy().into_owned(),
+            file_name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            extension: "bin".into(),
+            size_bytes: size,
+            modified_at: 1,
+            ..Default::default()
+        }
+    }
+
+    /// Two identical pairs, each file well past the 128 KiB prefix so both
+    /// stages are real work, in a catalog that lives on disk and can be
+    /// closed and reopened like the app's own.
+    fn two_pairs(name: &str) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
+        let dir = std::env::temp_dir().join(format!("plinth_{}_{}", name, std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).unwrap();
+        let size = PARTIAL_HASH_BYTES + 20_000;
+        let paths: Vec<std::path::PathBuf> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|n| dir.join(format!("{}.bin", n)))
+            .collect();
+        // a == b and c == d; the two pairs differ inside the first 128 KiB
+        for (path, fill) in paths.iter().zip([b'a', b'a', b'c', b'c']) {
+            fs::write(path, vec![fill; size]).unwrap();
+        }
+        let mut conn = db::open(&dir.join("catalog.db")).unwrap();
+        let rows: Vec<FileRow> = paths
+            .iter()
+            .map(|p| candidate_row(p, &dir, size as i64))
+            .collect();
+        db::replace_catalog(&mut conn, &dir.to_string_lossy(), &rows, &[], &[], &[], &[]).unwrap();
+        (dir, paths)
+    }
+
+    fn reopen(dir: &Path) -> Connection {
+        db::open(&dir.join("catalog.db")).unwrap()
+    }
+
+    #[test]
+    fn cancelled_scan_keeps_its_reads_and_resumes_without_repeating_them() {
+        let (dir, _paths) = two_pairs("dup_resume");
+
+        // Cancel the moment the first full-file read starts: stage 2 has
+        // read every prefix by then, which is exactly the work a restart
+        // must not repeat.
+        let cancel = AtomicBool::new(false);
+        let mut first_pass = DupProgress::default();
+        let conn = reopen(&dir);
+        let interrupted = find_duplicates(&conn, &cancel, EDGE_STATS_MAX_TRIS, |progress| {
+            first_pass = progress;
+            if progress.phase == DupPhase::FullHashing {
+                cancel.store(true, Ordering::SeqCst);
+            }
+        });
+        assert!(matches!(interrupted, Err(AppError::UserCancelled(_))));
+        assert_eq!(first_pass.prefix_hashed, 4);
+        drop(conn);
+
+        // Reopening is the reboot: the prefixes and the identities stat'ed
+        // alongside them were committed before the scan gave up.
+        let conn = reopen(&dir);
+        let stored_prefixes: u32 = conn
+            .query_row("SELECT COUNT(*) FROM file_prefix_hashes", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored_prefixes, 4);
+        let identities: u32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE file_identity IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(identities, 4);
+
+        let cancel = AtomicBool::new(false);
+        let mut resumed = DupProgress::default();
+        let groups = find_duplicates(&conn, &cancel, EDGE_STATS_MAX_TRIS, |progress| {
+            resumed = progress;
+        })
+        .unwrap();
+
+        // Not one prefix reread: every candidate came back from the index
+        assert_eq!(resumed.prefix_hashed, 0);
+        assert_eq!(resumed.cached, 4);
+        assert_eq!(groups.len(), 2);
+        assert!(groups.iter().all(|g| g.paths.len() == 2));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_changed_file_gets_its_prefix_reread() {
+        let (dir, paths) = two_pairs("dup_invalidate");
+        let cancel = AtomicBool::new(false);
+        let conn = reopen(&dir);
+        find_duplicates(&conn, &cancel, EDGE_STATS_MAX_TRIS, |_| {}).unwrap();
+
+        // What a rescan does when a file's bytes changed under it: new
+        // mtime, and the stale hash dropped. The cached prefix is keyed on
+        // that mtime, so it stops matching too.
+        conn.execute(
+            "UPDATE files SET modified_at = 2, content_hash = NULL WHERE path = ?1",
+            [paths[0].to_string_lossy()],
+        )
+        .unwrap();
+
+        let mut second_pass = DupProgress::default();
+        find_duplicates(&conn, &cancel, EDGE_STATS_MAX_TRIS, |progress| {
+            second_pass = progress;
+        })
+        .unwrap();
+        assert_eq!(second_pass.prefix_hashed, 1);
+        assert_eq!(second_pass.cached, 3);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn confirms_a_candidate_whose_only_partner_was_hashed_by_an_earlier_run() {
+        let (dir, paths) = two_pairs("dup_half_hashed");
+        let conn = reopen(&dir);
+        // The state a pack sidecar or a half-finished run leaves: one file
+        // of the pair carries a full hash and nothing else does. Bucketing
+        // only the unhashed files would leave b alone in its bucket, and
+        // the pair would never be found.
+        let hash = hash_file(&paths[0], None).unwrap();
+        db::store_hash(&conn, &paths[0].to_string_lossy(), &hash).unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let groups = find_duplicates(&conn, &cancel, EDGE_STATS_MAX_TRIS, |_| {}).unwrap();
+
+        let pair = groups
+            .iter()
+            .find(|g| g.hash == hash)
+            .expect("the half-hashed pair is still a duplicate group");
+        assert_eq!(pair.paths.len(), 2);
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -462,7 +764,7 @@ mod tests {
             .unwrap();
 
         let cancel = AtomicBool::new(false);
-        let groups = find_duplicates(&conn, &cancel, EDGE_STATS_MAX_TRIS, |_, _| {}).unwrap();
+        let groups = find_duplicates(&conn, &cancel, EDGE_STATS_MAX_TRIS, |_| {}).unwrap();
         assert_eq!(groups.len(), 1);
 
         let hash =
@@ -520,7 +822,7 @@ mod tests {
             .unwrap();
 
         let cancel = AtomicBool::new(false);
-        let groups = find_duplicates(&conn, &cancel, EDGE_STATS_MAX_TRIS, |_, _| {}).unwrap();
+        let groups = find_duplicates(&conn, &cancel, EDGE_STATS_MAX_TRIS, |_| {}).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].paths.len(), 2);
 

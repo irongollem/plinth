@@ -15,9 +15,10 @@ mod search;
 mod test_util;
 
 pub use geometry::{
-    duplicate_groups, duplicate_size_candidates, geometry_satisfies, known_hash,
-    model_base_suggestion, model_geometry, store_file_geometry, store_hash, store_identities,
-    store_merge_results, stl_geometry_candidates,
+    duplicate_candidate_count, duplicate_candidate_sizes, duplicate_candidates_for_size,
+    duplicate_groups, geometry_satisfies, model_base_suggestion, model_geometry,
+    store_dup_checkpoint, store_file_geometry, store_hash, store_merge_results,
+    stl_geometry_candidates, PrefixHashRow,
 };
 pub use groups::{
     add_group_tag, add_tag, clear_file_variants, combine_groups, detach_group_source,
@@ -60,6 +61,8 @@ pub fn open(db_path: &std::path::Path) -> Result<rusqlite::Connection, crate::er
     Ok(conn)
 }
 
+#[cfg(test)]
+pub(crate) use geometry::known_hash;
 #[cfg(test)]
 pub(crate) use schema::test_init;
 pub use search::{
