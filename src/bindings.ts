@@ -1674,6 +1674,14 @@ export type DeleteSummary = { dir_count: number; file_count: number; total_bytes
  * catalog filter dropdown.
  */
 export type DesignerCount = { designer: string; model_count: number }
+/**
+ * What a duplicate scan is spending its time on. Reported because the
+ * three kinds of work differ by orders of magnitude: answering from the
+ * index costs nothing, a prefix read costs 128 KiB, and a full read costs
+ * the whole file — a progress bar that calls all three "hashing" tells
+ * the user nothing about how long the rest will take.
+ */
+export type DupPhase = "Checking" | "PrefixHashing" | "FullHashing"
 export type DuplicateCancelledStatus = { job_id: string }
 export type DuplicateCompletedStatus = { job_id: string; group_count: number; wasted_bytes: number }
 export type DuplicateFailedStatus = { job_id: string; error: string }
@@ -1690,7 +1698,11 @@ distinct_copies: number;
  * deleted until the model is unpacked; the UI greys them with a hint.
  */
 packed_paths?: string[] }
-export type DuplicateProgressStatus = { job_id: string; processed: number; total: number }
+export type DuplicateProgressStatus = { job_id: string; processed: number; total: number; 
+/**
+ * Candidates settled from stored hashes, without a disk read.
+ */
+cached: number; prefix_hashed: number; full_hashed: number; phase: DupPhase }
 export type DuplicateStartedStatus = { job_id: string }
 export type DuplicateStatus = { Started: DuplicateStartedStatus } | { Progress: DuplicateProgressStatus } | { Completed: DuplicateCompletedStatus } | { Failed: DuplicateFailedStatus } | { Cancelled: DuplicateCancelledStatus }
 /**
