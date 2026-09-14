@@ -347,6 +347,24 @@ async startCatalogScan(root: string) : Promise<Result<string, AppError>> {
 }
 },
 /**
+ * The same scan, for follow-up work nobody asked for directly: an import
+ * landing in a catalog folder, a Base Cutter export. Refusing those would
+ * drop the refresh silently, so they wait out the running job instead — a
+ * several-hour dedupe must survive a routine reindex queueing behind it.
+ * 
+ * Returns as soon as the request is accepted, not when the scan runs: the
+ * wait can be hours, and the caller learns the scan started from the
+ * ordinary ScanStatus stream like any other.
+ */
+async queueCatalogScan(root: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("queue_catalog_scan", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * The configured catalog folders with their indexed footprint. Folders the
  * user added but never scanned report zero counts and no last_scan.
  */
@@ -1669,8 +1687,9 @@ export type DeleteOutcome = { succeeded: number; hard_deleted: number; errors: s
  */
 export type DeleteSummary = { dir_count: number; file_count: number; total_bytes: number }
 /**
- * One designer and how many logical models (groups) carry that name —
- * feeds the catalog's designer filter dropdown.
+ * One designer and how many logical models (groups) carry that name. An
+ * empty designer represents the first-class unidentified bucket in the
+ * catalog filter dropdown.
  */
 export type DesignerCount = { designer: string; model_count: number }
 export type DuplicateCancelledStatus = { job_id: string }

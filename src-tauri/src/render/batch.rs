@@ -17,18 +17,6 @@ use std::sync::Arc;
 use tauri::AppHandle;
 use tauri_specta::Event;
 use tokio::sync::Notify;
-use uuid::Uuid;
-
-/// Batch job ids carry this prefix in ACTIVE_RENDERS, so
-/// batch_render_active() can recognize them.
-const BATCH_PREFIX: &str = "batch-render:";
-
-pub fn batch_render_active() -> bool {
-    ACTIVE_RENDERS
-        .lock()
-        .map(|jobs| jobs.keys().any(|id| id.starts_with(BATCH_PREFIX)))
-        .unwrap_or(false)
-}
 
 /// One model of the batch, as the frontend selected it (a RenderCandidate
 /// the user confirmed). rotation is the stored "x,y,z" or null → 90,0,0.
@@ -78,28 +66,16 @@ pub async fn start_batch_render(
             "No renderable models in the selection".to_string(),
         ));
     }
-    // A scan rewrites the models rows we update per finished model; a pack
-    // job deletes the loose STLs Blender is about to read.
-    if catalog::commands::job_active("scan:") {
-        return Err(AppError::InvalidInput(
-            "A catalog scan is running — render previews when it finishes".to_string(),
-        ));
-    }
-    if catalog::commands::job_active("pack:") {
-        return Err(AppError::InvalidInput(
-            "A pack job is running — render previews when it finishes".to_string(),
-        ));
-    }
-    if batch_render_active() {
-        return Err(AppError::InvalidInput(
-            "A batch render is already running".to_string(),
-        ));
-    }
+    // A scan rewrites the models rows this batch updates per finished
+    // model, and a pack job deletes the loose STLs Blender is about to
+    // read. The permit lives until this function returns, so every early
+    // `?` below releases the catalog on its way out.
+    let _permit = catalog::jobs::claim(catalog::jobs::JobKind::BatchRender)?;
 
     let blender = engine::detect_blender_cached().await?;
     let script = engine::materialize_render_script(&app_handle)?;
 
-    let job_id = format!("{}{}", BATCH_PREFIX, Uuid::new_v4());
+    let job_id = _permit.id().to_string();
     let scratch = engine::batch_scratch_dir(&app_handle, &job_id)?;
     let manifest = BatchManifest {
         entries: targets

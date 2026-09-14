@@ -25,6 +25,7 @@ import { useCatalogJobs } from "../composables/useCatalogJobs";
 import { useFileSelect } from "../composables/useFileSelect";
 import { usePackStatus } from "../composables/usePackStatus";
 import { formatFileSize } from "../utils/format";
+import { openDirectoryPath } from "../utils/openDirectory";
 import { useReleasesStore } from "./releasesStore";
 import { useToastStore } from "./toastStore";
 
@@ -140,7 +141,7 @@ export const useCatalogStore = defineStore("catalog", () => {
     geoProgress,
     geoSummary,
     geoCompletedCount,
-    startGeometryScan,
+    startGeometryScan: runGeometryScan,
     cancelGeometryScan,
   } = useCatalogJobs();
   const {
@@ -1612,6 +1613,14 @@ export const useCatalogStore = defineStore("catalog", () => {
     }
   };
 
+  const openDirectory = async (path: string) => {
+    try {
+      await openDirectoryPath(path);
+    } catch (error) {
+      toastStore.reportError("Failed to open directory", error);
+    }
+  };
+
   /* ---- normalizer: make the disk match the curated catalog ---- */
   // null = still checking (or not checked yet) — the drawer button shows a
   // disabled "checking…" state rather than flashing dirty-then-clean.
@@ -2606,6 +2615,15 @@ export const useCatalogStore = defineStore("catalog", () => {
     }
   });
 
+  const startGeometryScan = async () => {
+    const result = await runGeometryScan();
+    if (result.status === "error") {
+      // the coordinator refuses by name ("A duplicate scan is running — …")
+      toastStore.reportError("Couldn't start the geometry scan", result.error);
+    }
+    return result;
+  };
+
   watch(geoCompletedCount, async () => {
     const summary = geoSummary.value;
     if (summary) {
@@ -2851,6 +2869,7 @@ export const useCatalogStore = defineStore("catalog", () => {
     sendToSlicer,
     revealFromPrintModal,
     reveal,
+    openDirectory,
     renderSelected,
     // batch selection / combine / move
     checkedGroups,
