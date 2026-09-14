@@ -1,12 +1,22 @@
 use crate::error::AppError;
+use once_cell::sync::Lazy;
 use rusqlite::Connection;
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use super::ingest::rebuild_fts;
 
 const SCHEMA_VERSION: i64 = 7;
 
-/// Open (and if needed initialize) the catalog database.
+/// Databases this process has already brought up to date. Schema work is
+/// DDL, which takes SQLite's write lock — running it from every open put
+/// every search and every stats refresh in line behind whatever job was
+/// writing, for a result that cannot change while the process lives.
+static INITIALIZED: Lazy<Mutex<HashSet<PathBuf>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+/// Open (and on this process's first open of it, initialize) the catalog
+/// database.
 pub fn open(db_path: &Path) -> Result<Connection, AppError> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
@@ -17,7 +27,16 @@ pub fn open(db_path: &Path) -> Result<Connection, AppError> {
     // WAL lets the scanner write while searches read
     conn.pragma_update(None, "journal_mode", "WAL").ok();
     conn.busy_timeout(std::time::Duration::from_secs(10)).ok();
-    init_schema(&conn)?;
+
+    // Held across init so a second connection opening concurrently waits
+    // for the first to finish rather than racing it through the ALTERs.
+    let mut initialized = INITIALIZED
+        .lock()
+        .map_err(|e| AppError::ConfigError(format!("Schema registry unavailable: {}", e)))?;
+    if !initialized.contains(db_path) {
+        init_schema(&conn)?;
+        initialized.insert(db_path.to_path_buf());
+    }
     Ok(conn)
 }
 
