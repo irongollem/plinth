@@ -204,6 +204,21 @@ pub(super) fn init_schema(conn: &Connection) -> Result<(), AppError> {
             designer TEXT PRIMARY KEY COLLATE NOCASE
         );
 
+        -- The duplicate scanner's stage-2 checkpoint: the BLAKE3 of a
+        -- candidate's first 128 KiB. Persisted because an interrupted scan
+        -- would otherwise reread every candidate prefix from scratch —
+        -- tens of gigabytes on a large library, most of it work already
+        -- done. size_bytes/modified_at are the INDEXED values at hashing
+        -- time, so a row whose file has since changed simply stops
+        -- matching and is reread instead of trusted.
+        CREATE TABLE IF NOT EXISTS file_prefix_hashes (
+            path        TEXT PRIMARY KEY,
+            prefix_hash TEXT NOT NULL,
+            size_bytes  INTEGER NOT NULL,
+            modified_at INTEGER NOT NULL,
+            hashed_at   INTEGER NOT NULL
+        );
+
         -- Keyed by BARE blake3 hex (the dup scanner's format), so bytes
         -- mined once are never re-parsed under another path or name.
         CREATE TABLE IF NOT EXISTS file_geometry (

@@ -25,6 +25,7 @@ import { useCatalogJobs } from "../composables/useCatalogJobs";
 import { useFileSelect } from "../composables/useFileSelect";
 import { usePackStatus } from "../composables/usePackStatus";
 import { formatFileSize } from "../utils/format";
+import { openDirectoryPath } from "../utils/openDirectory";
 import { useReleasesStore } from "./releasesStore";
 import { useToastStore } from "./toastStore";
 
@@ -133,8 +134,10 @@ export const useCatalogStore = defineStore("catalog", () => {
     cancelScan,
     isFindingDuplicates,
     dupProgress,
+    dupError,
     dupCompletedCount,
-    startDuplicateScan,
+    dupCancelledCount,
+    startDuplicateScan: runDuplicateScan,
     cancelDuplicateScan,
     isMiningGeometry,
     geoProgress,
@@ -1612,6 +1615,14 @@ export const useCatalogStore = defineStore("catalog", () => {
     }
   };
 
+  const openDirectory = async (path: string) => {
+    try {
+      await openDirectoryPath(path);
+    } catch (error) {
+      toastStore.reportError("Failed to open directory", error);
+    }
+  };
+
   /* ---- normalizer: make the disk match the curated catalog ---- */
   // null = still checking (or not checked yet) — the drawer button shows a
   // disabled "checking…" state rather than flashing dirty-then-clean.
@@ -2587,6 +2598,25 @@ export const useCatalogStore = defineStore("catalog", () => {
     }
   });
 
+  const startDuplicateScan = async () => {
+    const result = await runDuplicateScan();
+    if (result.status === "error") {
+      toastStore.reportError("Couldn't start the duplicate scan", result.error);
+    }
+    return result;
+  };
+
+  watch(dupError, (error) => {
+    if (error) toastStore.reportError("Duplicate scan failed", error);
+  });
+
+  watch(dupCancelledCount, () => {
+    toastStore.addToast(
+      "Duplicate scan cancelled — hashed files are kept, so resuming picks up where it stopped",
+      "info",
+    );
+  });
+
   watch(dupCompletedCount, async () => {
     const dupResult = await commands.getDuplicateGroups();
     if (dupResult.status === "ok") {
@@ -2602,6 +2632,11 @@ export const useCatalogStore = defineStore("catalog", () => {
           ? `Found ${actionable} duplicate group${actionable === 1 ? "" : "s"}${shared ? ` (${shared} already merged)` : ""}`
           : "No duplicates found",
         actionable ? "warning" : "success",
+      );
+    } else {
+      toastStore.reportError(
+        "Duplicate scan finished, but its results couldn't be read",
+        dupResult.error,
       );
     }
   });
@@ -2851,6 +2886,7 @@ export const useCatalogStore = defineStore("catalog", () => {
     sendToSlicer,
     revealFromPrintModal,
     reveal,
+    openDirectory,
     renderSelected,
     // batch selection / combine / move
     checkedGroups,

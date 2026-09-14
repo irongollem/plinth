@@ -15,6 +15,7 @@
     "dist",
     "src-tauri",
     "raw",
-    "docs"
+    "docs",
+    "graphify-out"
   ]
 }

@@ -19,6 +19,9 @@ pub fn remove_files(conn: &mut Connection, paths: &[String]) -> Result<(), AppEr
         let mut delete_stmt = tx
             .prepare("DELETE FROM files WHERE path = ?1")
             .map_err(map_err)?;
+        let mut delete_prefix_stmt = tx
+            .prepare("DELETE FROM file_prefix_hashes WHERE path = ?1")
+            .map_err(map_err)?;
         for path in paths {
             if let Ok(dir) = dir_stmt.query_row([path], |row| row.get::<_, String>(0)) {
                 if !affected_dirs.contains(&dir) {
@@ -26,9 +29,11 @@ pub fn remove_files(conn: &mut Connection, paths: &[String]) -> Result<(), AppEr
                 }
             }
             delete_stmt.execute([path]).map_err(map_err)?;
+            delete_prefix_stmt.execute([path]).map_err(map_err)?;
         }
         drop(dir_stmt);
         drop(delete_stmt);
+        drop(delete_prefix_stmt);
 
         let mut recount_stmt = tx
             .prepare(
@@ -466,6 +471,13 @@ pub fn move_file_index(conn: &mut Connection, from: &str, to: &str) -> Result<()
         )
         .map_err(map_err)?;
         tx.execute("DELETE FROM file_variants WHERE path = ?1", [from])
+            .map_err(map_err)?;
+        tx.execute(
+            "UPDATE OR IGNORE file_prefix_hashes SET path = ?2 WHERE path = ?1",
+            params![from, to],
+        )
+        .map_err(map_err)?;
+        tx.execute("DELETE FROM file_prefix_hashes WHERE path = ?1", [from])
             .map_err(map_err)?;
     }
     tx.commit().map_err(map_err)

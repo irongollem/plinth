@@ -240,8 +240,9 @@ pub struct CatalogRootSummary {
     pub primary: bool,
 }
 
-/// One designer and how many logical models (groups) carry that name —
-/// feeds the catalog's designer filter dropdown.
+/// One designer and how many logical models (groups) carry that name. An
+/// empty designer represents the first-class unidentified bucket in the
+/// catalog filter dropdown.
 #[derive(Serialize, Deserialize, Clone, Debug, Type)]
 pub struct DesignerCount {
     pub designer: String,

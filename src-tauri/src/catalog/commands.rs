@@ -432,13 +432,17 @@ pub async fn start_duplicate_scan(app_handle: AppHandle) -> Result<String, AppEr
             let mut last_emit = Instant::now();
             let progress_app = app_handle.clone();
             let progress_job = job_id_clone.clone();
-            dups::find_duplicates(&conn, &cancel, edge_cap, |processed, total| {
+            dups::find_duplicates(&conn, &cancel, edge_cap, |progress| {
                 if last_emit.elapsed() >= PROGRESS_EMIT_INTERVAL {
                     last_emit = Instant::now();
                     DuplicateStatus::Progress(DuplicateProgressStatus {
                         job_id: progress_job.clone(),
-                        processed,
-                        total,
+                        processed: progress.processed,
+                        total: progress.total,
+                        cached: progress.cached,
+                        prefix_hashed: progress.prefix_hashed,
+                        full_hashed: progress.full_hashed,
+                        phase: progress.phase,
                     })
                     .emit(&progress_app)
                     .ok();

@@ -5,6 +5,12 @@ use crate::catalog::{CatalogEntry, CatalogGroup, DesignerCount, ReleaseSummary};
 
 use super::groups::cover_preview;
 
+/// Reserved API value used by the designer facet for models whose effective
+/// designer is NULL or an empty user-override tombstone. An empty string
+/// cannot represent this choice because the command boundary already uses it
+/// for "all designers".
+pub const UNIDENTIFIED_DESIGNER_FILTER: &str = "__plinth_unidentified_designer__";
+
 /// Build a trigram FTS query: each word becomes a quoted substring match,
 /// ANDed. Punctuation is stripped to mirror the indexed normalization, and
 /// sub-trigram (<3 char) words are dropped — trigram can't match them, so
@@ -397,13 +403,20 @@ pub fn search_groups(
     // The designer facet narrows to one designer exactly (the dropdown
     // offers only names that exist), unlike the fuzzy FTS query
     if let Some(name) = designer.map(str::trim).filter(|d| !d.is_empty()) {
-        let clause = "lower(COALESCE(u.designer, m.designer)) = lower(?)";
+        let unidentified = name == UNIDENTIFIED_DESIGNER_FILTER;
+        let clause = if unidentified {
+            "NULLIF(COALESCE(u.designer, m.designer), '') IS NULL"
+        } else {
+            "lower(COALESCE(u.designer, m.designer)) = lower(?)"
+        };
         where_sql = if where_sql.is_empty() {
             format!("WHERE {}", clause)
         } else {
             format!("{} AND {}", where_sql, clause)
         };
-        bound.push(Box::new(name.to_string()));
+        if !unidentified {
+            bound.push(Box::new(name.to_string()));
+        }
     }
 
     // NULL never satisfies a comparison, so a geometry bound would silently
@@ -703,21 +716,20 @@ pub fn list_releases_for_browse(
 }
 
 /// Every designer in the catalog with their logical-model (group) count,
-/// A–Z — the option list for the catalog's designer filter. Counts groups,
-/// not folder entries, so the numbers match the cards the filter yields.
+/// preceded by an empty-name row for unidentified models when one exists.
+/// Counts groups, not folder entries, so the numbers match the cards the
+/// filter yields.
 pub fn designers(conn: &Connection) -> Result<Vec<DesignerCount>, AppError> {
     let map_err =
         |e: rusqlite::Error| AppError::ConfigError(format!("Designer listing failed: {}", e));
     let mut stmt = conn
         .prepare(
-            "SELECT COALESCE(u.designer, m.designer) AS d,
+            "SELECT COALESCE(NULLIF(COALESCE(u.designer, m.designer), ''), '') AS d,
                     COUNT(DISTINCT lower(COALESCE(r.display_name, m.group_name, m.name)))
              FROM models m
              LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
              LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)
-             WHERE COALESCE(u.designer, m.designer) IS NOT NULL
-               AND COALESCE(u.designer, m.designer) != ''
-             GROUP BY lower(d)
+             GROUP BY lower(NULLIF(COALESCE(u.designer, m.designer), ''))
              ORDER BY d COLLATE NOCASE",
         )
         .map_err(map_err)?;
@@ -741,15 +753,13 @@ pub fn designers_for_browse(
         return designers(conn);
     }
     let sql = format!(
-        "SELECT COALESCE(u.designer, m.designer) AS d,
+        "SELECT COALESCE(NULLIF(COALESCE(u.designer, m.designer), ''), '') AS d,
                 COUNT(DISTINCT lower(COALESCE(r.display_name, m.group_name, m.name)))
          FROM models m
          LEFT JOIN model_user_meta u ON u.dir_path = m.dir_path
          LEFT JOIN group_renames r ON r.source_group = COALESCE(m.group_name, m.name)
-         WHERE COALESCE(u.designer, m.designer) IS NOT NULL
-           AND COALESCE(u.designer, m.designer) != ''
-           AND {NSFW_EFFECTIVE_SQL} = 0
-         GROUP BY lower(d)
+         WHERE {NSFW_EFFECTIVE_SQL} = 0
+         GROUP BY lower(NULLIF(COALESCE(u.designer, m.designer), ''))
          ORDER BY d COLLATE NOCASE"
     );
     let mut stmt = conn
@@ -831,13 +841,150 @@ mod tests {
             .collect();
         assert_eq!(
             pairs,
-            vec![("Archvillain".to_string(), 1), ("Bestiarum".to_string(), 2)]
+            vec![
+                ("".to_string(), 1),
+                ("Archvillain".to_string(), 1),
+                ("Bestiarum".to_string(), 2),
+            ]
         );
 
         // release fields ride on the group rows for the UI's section headers
         let page = search_groups(&conn, "", &[], None, None, None, None, None, "designer", 10, 1, true, None, None).unwrap();
         assert_eq!(page.groups[0].release_name.as_deref(), Some("Dread Swamp"));
         assert_eq!(page.groups[0].release_date.as_deref(), Some("12/2025"));
+    }
+
+    #[test]
+    fn unidentified_designer_counts_and_combines_with_other_facets() {
+        let mut conn = test_conn();
+        let model = |name: &str, designer: Option<&str>, base: Option<&str>| ModelRow {
+            dir_path: format!("/lib/{name}"),
+            name: name.into(),
+            designer: designer.map(String::from),
+            source: "heuristic".into(),
+            file_count: 1,
+            total_size_bytes: 100,
+            group_name: Some(name.into()),
+            base_round_mm: base.map(String::from),
+            ..Default::default()
+        };
+        let models = vec![
+            model("missing ogre", None, Some("25")),
+            model("cleared knight", Some("Known Studio"), Some("25")),
+            model("named dragon", Some("Known Studio"), Some("25")),
+        ];
+        let files = vec![FileRow {
+            content_hash: Some("missing-hash".into()),
+            ..file_row("/lib/missing ogre/model.stl", "/lib/missing ogre", 100)
+        }];
+        let tags = vec![
+            ("/lib/missing ogre".to_string(), "curate".to_string()),
+            ("/lib/cleared knight".to_string(), "curate".to_string()),
+            ("/lib/named dragon".to_string(), "curate".to_string()),
+        ];
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+
+        // Clearing a scanner-provided designer stores the empty-string
+        // tombstone; it must land in the same bucket as a scanner NULL.
+        update_model_user_meta(
+            &conn,
+            "/lib/cleared knight",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let pairs: Vec<_> = designers(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.designer, d.model_count))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![("".to_string(), 2), ("Known Studio".to_string(), 1)]
+        );
+
+        let page = search_groups(
+            &conn,
+            "",
+            &[],
+            Some(UNIDENTIFIED_DESIGNER_FILTER),
+            None,
+            None,
+            None,
+            None,
+            "name",
+            10,
+            0,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(page.total, 2);
+        assert!(page.groups.iter().all(|group| group.designer.is_none()));
+
+        let facts = StlFacts {
+            tri_count: 12,
+            min: (0.0, 0.0, 0.0),
+            max: (10.0, 10.0, 30.0),
+            volume_mm3: 2_000.0,
+            open_edge_count: Some(0),
+            base: None,
+        };
+        store_file_geometry(&conn, "missing-hash", &facts, 1_000).unwrap();
+
+        // The reserved facet composes with FTS, tags, geometry, and base
+        // filters instead of bypassing any of their existing clauses.
+        let page = search_groups(
+            &conn,
+            "missing",
+            &["curate".to_string()],
+            Some(UNIDENTIFIED_DESIGNER_FILTER),
+            Some(20.0),
+            Some(40.0),
+            Some(1_000.0),
+            Some(3_000.0),
+            "name",
+            10,
+            0,
+            true,
+            Some("round"),
+            Some(25.0),
+        )
+        .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.groups[0].group_name, "missing ogre");
+
+        // Named selections retain their exact, case-insensitive behavior.
+        let named = search_groups(
+            &conn,
+            "",
+            &[],
+            Some("known studio"),
+            None,
+            None,
+            None,
+            None,
+            "name",
+            10,
+            0,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(named.total, 1);
+        assert_eq!(named.groups[0].group_name, "named dragon");
     }
 
     #[test]

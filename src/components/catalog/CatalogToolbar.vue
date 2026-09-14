@@ -99,8 +99,12 @@
       title="Show only this designer's models"
     >
       <option value="">All designers</option>
-      <option v-for="d in designers" :key="d.designer" :value="d.designer">
-        {{ d.designer }} ({{ d.model_count }})
+      <option
+        v-for="d in designers"
+        :key="d.designer || UNIDENTIFIED_DESIGNER_FILTER"
+        :value="d.designer || UNIDENTIFIED_DESIGNER_FILTER"
+      >
+        {{ d.designer || "⚠ Unidentified" }} ({{ d.model_count }})
       </option>
     </select>
     <div class="dropdown">
@@ -429,6 +433,8 @@ import { storeToRefs } from "pinia";
 import NumberInput from "../NumberInput.vue";
 import { useCatalogStore } from "../../stores/catalogStore";
 import { formatFileSize } from "../../utils/format";
+
+const UNIDENTIFIED_DESIGNER_FILTER = "__plinth_unidentified_designer__";
 
 const store = useCatalogStore();
 const {
