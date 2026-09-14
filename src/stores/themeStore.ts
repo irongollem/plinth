@@ -1,7 +1,11 @@
 import { defineStore } from "pinia";
 import { ref, watchEffect } from "vue";
+import {
+  syncNativeWindowTheme,
+  type ThemeName,
+} from "../utils/nativeWindowTheme";
 
-export type ThemeName = "plinth" | "plinth-light";
+export type { ThemeName } from "../utils/nativeWindowTheme";
 
 const STORAGE_KEY = "plinth-theme";
 
@@ -22,6 +26,9 @@ export const useThemeStore = defineStore("theme", () => {
   watchEffect(() => {
     document.documentElement.setAttribute("data-theme", theme.value);
     localStorage.setItem(STORAGE_KEY, theme.value);
+    void syncNativeWindowTheme(theme.value).catch((error) => {
+      console.warn("Failed to synchronize the native window theme", error);
+    });
   });
 
   const setDark = () => {

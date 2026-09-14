@@ -276,8 +276,8 @@
             <button
               type="button"
               class="min-w-0 truncate font-mono text-[10px] text-base-content/45 cursor-pointer hover:text-base-content/75 text-left"
-              :title="`${selected.dir_path} — click to reveal`"
-              @click="reveal(selected.dir_path)"
+              :title="`${selected.dir_path} — click to open`"
+              @click="openDirectory(selected.dir_path)"
             >
               {{ displayPath }}
             </button>
@@ -1036,7 +1036,7 @@ const {
   startRenameGroup,
   splitGroup,
   detachSelectedSource,
-  reveal,
+  openDirectory,
   setSupportTab,
   tabLabel,
   setVariant,
