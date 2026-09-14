@@ -141,7 +141,7 @@ export const useCatalogStore = defineStore("catalog", () => {
     geoProgress,
     geoSummary,
     geoCompletedCount,
-    startGeometryScan,
+    startGeometryScan: runGeometryScan,
     cancelGeometryScan,
   } = useCatalogJobs();
   const {
@@ -2614,6 +2614,15 @@ export const useCatalogStore = defineStore("catalog", () => {
       );
     }
   });
+
+  const startGeometryScan = async () => {
+    const result = await runGeometryScan();
+    if (result.status === "error") {
+      // the coordinator refuses by name ("A duplicate scan is running — …")
+      toastStore.reportError("Couldn't start the geometry scan", result.error);
+    }
+    return result;
+  };
 
   watch(geoCompletedCount, async () => {
     const summary = geoSummary.value;
