@@ -353,8 +353,14 @@ mod tests {
             list_tags_for_browse(&conn, true).unwrap(),
             vec![("amphibian".to_string(), 1)]
         );
-        assert!(designers_for_browse(&conn, false).unwrap().is_empty());
-        assert_eq!(designers_for_browse(&conn, true).unwrap()[0].designer, "DTL");
+        let browsable_designers = designers_for_browse(&conn, false).unwrap();
+        assert_eq!(browsable_designers.len(), 1);
+        assert_eq!(browsable_designers[0].designer, "");
+        assert_eq!(browsable_designers[0].model_count, 1);
+        let all_designers = designers_for_browse(&conn, true).unwrap();
+        assert_eq!(all_designers.len(), 2);
+        assert_eq!(all_designers[0].designer, "");
+        assert_eq!(all_designers[1].designer, "DTL");
         assert!(list_releases_for_browse(&conn, false).unwrap().is_empty());
         assert_eq!(
             list_releases_for_browse(&conn, true).unwrap()[0].release_name,
