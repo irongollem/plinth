@@ -131,8 +131,12 @@ pub fn pack_candidate_dirs(
     );
     let mut bound: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(name) = designer.map(str::trim).filter(|d| !d.is_empty()) {
-        sql.push_str(" AND lower(COALESCE(u.designer, m.designer, '')) = lower(?)");
-        bound.push(Box::new(name.to_string()));
+        let (clause, binds_name) = super::search::designer_clause(name);
+        sql.push_str(" AND ");
+        sql.push_str(clause);
+        if binds_name {
+            bound.push(Box::new(name.to_string()));
+        }
     }
     if !groups.is_empty() {
         let placeholders = vec!["lower(?)"; groups.len()].join(", ");
@@ -326,5 +330,16 @@ mod tests {
             groups[0].packed_paths,
             vec!["/lib/newt/GiantNewt_v02.stl".to_string()]
         );
+    }
+
+    #[test]
+    fn pack_candidates_resolve_the_unidentified_designer_facet() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+
+        let unidentified =
+            pack_candidate_dirs(&conn, Some(UNIDENTIFIED_DESIGNER_FILTER), &[]).unwrap();
+        assert_eq!(unidentified, vec!["/lib/bugbear".to_string()]);
     }
 }

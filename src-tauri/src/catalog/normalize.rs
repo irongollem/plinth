@@ -453,9 +453,17 @@ pub fn plan(
         }
         let designer = first_some(members, |r| r.designer.as_ref());
         if let Some(filter) = designer_filter {
-            let matches = designer
-                .as_deref()
-                .is_some_and(|d| d.eq_ignore_ascii_case(filter.trim()));
+            let filter = filter.trim();
+            // The unidentified facet selects the groups with no designer
+            // at all; they then fall into the skip below, which tells the
+            // user what to fix instead of planning nothing silently.
+            let matches = if filter == crate::catalog::db::UNIDENTIFIED_DESIGNER_FILTER {
+                designer.as_deref().is_none_or(|d| d.trim().is_empty())
+            } else {
+                designer
+                    .as_deref()
+                    .is_some_and(|d| d.eq_ignore_ascii_case(filter))
+            };
             if !matches {
                 continue;
             }
