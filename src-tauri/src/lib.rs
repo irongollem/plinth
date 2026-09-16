@@ -35,7 +35,8 @@ use catalog::commands::{
     rename_catalog_designer, rename_catalog_group, rename_catalog_release, search_catalog,
     search_catalog_groups, set_designer_nsfw,
     set_group_cover, set_group_nsfw, set_model_preview, set_model_rotation,
-    set_primary_catalog_root, start_catalog_scan, start_duplicate_scan, start_geometry_scan,
+    queue_catalog_scan, set_primary_catalog_root, start_catalog_scan, start_duplicate_scan,
+    start_geometry_scan,
     summarize_model_dirs, supports_file_links, unignore_folder, unpack_models,
     update_model_metadata,
 };
@@ -122,6 +123,7 @@ fn create_specta_builder() -> Builder {
             write_look_json,
             get_pending_3dpak,
             start_catalog_scan,
+            queue_catalog_scan,
             list_catalog_roots,
             add_catalog_root,
             remove_catalog_root,

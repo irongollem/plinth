@@ -1,12 +1,22 @@
 use crate::error::AppError;
+use once_cell::sync::Lazy;
 use rusqlite::Connection;
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use super::ingest::rebuild_fts;
 
 const SCHEMA_VERSION: i64 = 7;
 
-/// Open (and if needed initialize) the catalog database.
+/// Databases this process has already brought up to date. Schema work is
+/// DDL, which takes SQLite's write lock — running it from every open put
+/// every search and every stats refresh in line behind whatever job was
+/// writing, for a result that cannot change while the process lives.
+static INITIALIZED: Lazy<Mutex<HashSet<PathBuf>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+/// Open (and on this process's first open of it, initialize) the catalog
+/// database.
 pub fn open(db_path: &Path) -> Result<Connection, AppError> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
@@ -17,7 +27,16 @@ pub fn open(db_path: &Path) -> Result<Connection, AppError> {
     // WAL lets the scanner write while searches read
     conn.pragma_update(None, "journal_mode", "WAL").ok();
     conn.busy_timeout(std::time::Duration::from_secs(10)).ok();
-    init_schema(&conn)?;
+
+    // Held across init so a second connection opening concurrently waits
+    // for the first to finish rather than racing it through the ALTERs.
+    let mut initialized = INITIALIZED
+        .lock()
+        .map_err(|e| AppError::ConfigError(format!("Schema registry unavailable: {}", e)))?;
+    if !initialized.contains(db_path) {
+        init_schema(&conn)?;
+        initialized.insert(db_path.to_path_buf());
+    }
     Ok(conn)
 }
 
@@ -25,11 +44,12 @@ pub(super) fn init_schema(conn: &Connection) -> Result<(), AppError> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap_or(0);
-    // The base CREATEs are all IF NOT EXISTS and run on EVERY open — only
-    // the versioned migrations below are gated. Gating the base batch once
-    // burned us: a build stamped user_version before a newly-coded table
-    // existed, and the version check then guaranteed it could never appear
-    // ("no such table" with no way out short of deleting the db).
+    // The base CREATEs are all IF NOT EXISTS and run whenever this function
+    // does — only the versioned migrations below are gated. Gating the base
+    // batch once burned us: a build stamped user_version before a
+    // newly-coded table existed, and the version check then guaranteed it
+    // could never appear ("no such table" with no way out short of deleting
+    // the db).
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS files (
@@ -223,10 +243,11 @@ pub(super) fn init_schema(conn: &Connection) -> Result<(), AppError> {
     // iteration a build can stamp user_version before an ALTER exists in
     // code, and a version gate then locks that ALTER out forever ("no such
     // column" with no way back). Asking the table what it actually has
-    // makes the check idempotent and self-healing on every open.
-    // Add any missing TEXT columns to a table. Racy-safe: several
-    // connections open in parallel and can both see a column missing, so the
-    // loser's "duplicate column" is the goal state, not a failure.
+    // makes the check idempotent, so a build that adds an ALTER heals the
+    // database the next time it starts.
+    // Add any missing TEXT columns to a table. Racy-safe: two processes can
+    // both see a column missing, so the loser's "duplicate column" is the
+    // goal state, not a failure.
     let add_text_columns = |table: &str, columns: &[&str]| -> Result<(), AppError> {
         let existing: Vec<String> = conn
             .prepare(&format!("PRAGMA table_info({})", table))
@@ -422,6 +443,8 @@ pub(super) fn init_schema(conn: &Connection) -> Result<(), AppError> {
         rebuild_fts(conn)
             .map_err(|e| AppError::ConfigError(format!("Failed to rebuild FTS: {}", e)))?;
     }
+
+    super::ownership::ensure_content_hash_index(conn)?;
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(|e| AppError::ConfigError(format!("Failed to set schema version: {}", e)))?;
