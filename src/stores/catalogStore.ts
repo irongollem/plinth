@@ -135,8 +135,10 @@ export const useCatalogStore = defineStore("catalog", () => {
     cancelScan,
     isFindingDuplicates,
     dupProgress,
+    dupError,
     dupCompletedCount,
-    startDuplicateScan,
+    dupCancelledCount,
+    startDuplicateScan: runDuplicateScan,
     cancelDuplicateScan,
     isMiningGeometry,
     geoProgress,
@@ -2605,6 +2607,25 @@ export const useCatalogStore = defineStore("catalog", () => {
     }
   });
 
+  const startDuplicateScan = async () => {
+    const result = await runDuplicateScan();
+    if (result.status === "error") {
+      toastStore.reportError("Couldn't start the duplicate scan", result.error);
+    }
+    return result;
+  };
+
+  watch(dupError, (error) => {
+    if (error) toastStore.reportError("Duplicate scan failed", error);
+  });
+
+  watch(dupCancelledCount, () => {
+    toastStore.addToast(
+      "Duplicate scan cancelled — hashed files are kept, so resuming picks up where it stopped",
+      "info",
+    );
+  });
+
   watch(dupCompletedCount, async () => {
     const dupResult = await commands.getDuplicateGroups();
     if (dupResult.status === "ok") {
@@ -2620,6 +2641,11 @@ export const useCatalogStore = defineStore("catalog", () => {
           ? `Found ${actionable} duplicate group${actionable === 1 ? "" : "s"}${shared ? ` (${shared} already merged)` : ""}`
           : "No duplicates found",
         actionable ? "warning" : "success",
+      );
+    } else {
+      toastStore.reportError(
+        "Duplicate scan finished, but its results couldn't be read",
+        dupResult.error,
       );
     }
   });

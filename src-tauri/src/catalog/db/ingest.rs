@@ -290,6 +290,11 @@ pub(super) fn prune_orphans(tx: &rusqlite::Transaction) -> Result<(), rusqlite::
         [],
     )?;
     tx.execute(
+        "DELETE FROM file_prefix_hashes
+         WHERE path NOT IN (SELECT path FROM files)",
+        [],
+    )?;
+    tx.execute(
         "DELETE FROM group_renames
          WHERE lower(source_group) NOT IN
              (SELECT DISTINCT lower(COALESCE(group_name, name)) FROM models)",
@@ -846,9 +851,13 @@ mod tests {
         assert_eq!(stats.total_models, 2);
         assert_eq!(stats.total_size_bytes, 4096.0);
 
-        let candidates = duplicate_size_candidates(&conn).unwrap();
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].1.len(), 2);
+        assert_eq!(duplicate_candidate_count(&conn).unwrap(), 2);
+        let sizes = duplicate_candidate_sizes(&conn, 0, 10).unwrap();
+        assert_eq!(sizes, vec![2048]);
+        assert_eq!(
+            duplicate_candidates_for_size(&conn, 2048).unwrap().len(),
+            2
+        );
 
         store_hash(&conn, &files[0].path, "same").unwrap();
         store_hash(&conn, &files[1].path, "same").unwrap();

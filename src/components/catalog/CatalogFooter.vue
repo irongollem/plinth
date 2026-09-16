@@ -47,7 +47,11 @@
     </button>
     <span v-else class="flex items-center gap-2">
       <span class="loading loading-spinner loading-xs"></span>
-      hashing {{ dupProgress?.processed ?? 0 }}/{{ dupProgress?.total ?? "?" }}
+      <span :title="dupPhaseHint">
+        {{ dupPhaseLabel }} {{ dupProgress?.processed ?? 0 }}/{{
+          dupProgress?.total ?? "?"
+        }}
+      </span>
       <button type="button" class="link" @click="cancelDuplicateScan">
         cancel
       </button>
@@ -73,6 +77,7 @@
 
 <script setup lang="ts">
 import { storeToRefs } from "pinia";
+import { computed } from "vue";
 import { useCatalogStore } from "../../stores/catalogStore";
 import { formatFileSize } from "../../utils/format";
 
@@ -88,6 +93,27 @@ const {
   isMiningGeometry,
   geoProgress,
 } = storeToRefs(store);
+const dupPhaseLabel = computed(() => {
+  switch (dupProgress.value?.phase) {
+    case "PrefixHashing":
+      return "sampling";
+    case "FullHashing":
+      return "confirming";
+    default:
+      return "checking";
+  }
+});
+
+const dupPhaseHint = computed(() => {
+  const progress = dupProgress.value;
+  if (!progress) return "";
+  return [
+    `${progress.cached} answered from the index`,
+    `${progress.prefix_hashed} sampled (first 128 KiB)`,
+    `${progress.full_hashed} read in full`,
+  ].join(" · ");
+});
+
 const {
   toggleDups,
   startDuplicateScan,

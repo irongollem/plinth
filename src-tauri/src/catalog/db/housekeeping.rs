@@ -19,6 +19,9 @@ pub fn remove_files(conn: &mut Connection, paths: &[String]) -> Result<(), AppEr
         let mut delete_stmt = tx
             .prepare("DELETE FROM files WHERE path = ?1")
             .map_err(map_err)?;
+        let mut delete_prefix_stmt = tx
+            .prepare("DELETE FROM file_prefix_hashes WHERE path = ?1")
+            .map_err(map_err)?;
         for path in paths {
             if let Ok(dir) = dir_stmt.query_row([path], |row| row.get::<_, String>(0)) {
                 if !affected_dirs.contains(&dir) {
@@ -26,9 +29,11 @@ pub fn remove_files(conn: &mut Connection, paths: &[String]) -> Result<(), AppEr
                 }
             }
             delete_stmt.execute([path]).map_err(map_err)?;
+            delete_prefix_stmt.execute([path]).map_err(map_err)?;
         }
         drop(dir_stmt);
         drop(delete_stmt);
+        drop(delete_prefix_stmt);
 
         let mut recount_stmt = tx
             .prepare(
@@ -259,6 +264,16 @@ pub fn move_model(conn: &mut Connection, from: &str, to: &str) -> Result<(), App
             params![from, to],
         )
         .map_err(map_err)?;
+        // Before files moves, while the old paths still identify the rows:
+        // an orphaned prefix hash means the next dup scan rereads 128 KiB
+        // per moved file for bytes it has already hashed.
+        tx.execute(
+            "UPDATE OR IGNORE file_prefix_hashes
+                 SET path = ?2 || substr(path, length(?1) + 1)
+             WHERE path IN (SELECT path FROM files WHERE dir_path = ?1)",
+            params![from, to],
+        )
+        .map_err(map_err)?;
         tx.execute(
             "UPDATE files SET
                  path = ?2 || substr(path, length(?1) + 1),
@@ -370,6 +385,7 @@ pub fn move_tree_index(conn: &mut Connection, from: &str, to: &str) -> Result<()
             ("model_user_meta", "preview_path", false),
             ("file_variants", "path", true),
             ("file_variants", "dir_path", false),
+            ("file_prefix_hashes", "path", true),
             ("variant_previews", "variant_key", true),
             ("variant_previews", "dir_path", false),
             ("variant_previews", "preview_path", false),
@@ -466,6 +482,13 @@ pub fn move_file_index(conn: &mut Connection, from: &str, to: &str) -> Result<()
         )
         .map_err(map_err)?;
         tx.execute("DELETE FROM file_variants WHERE path = ?1", [from])
+            .map_err(map_err)?;
+        tx.execute(
+            "UPDATE OR IGNORE file_prefix_hashes SET path = ?2 WHERE path = ?1",
+            params![from, to],
+        )
+        .map_err(map_err)?;
+        tx.execute("DELETE FROM file_prefix_hashes WHERE path = ?1", [from])
             .map_err(map_err)?;
     }
     tx.commit().map_err(map_err)
@@ -635,6 +658,41 @@ mod tests {
             .unwrap();
         assert_eq!(count, 0);
         assert_eq!(size, 0);
+    }
+
+    #[test]
+    fn moving_a_model_carries_its_prefix_hashes_across() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+        store_dup_checkpoint(
+            &conn,
+            &[PrefixHashRow {
+                path: "/lib/newt/GiantNewt_v02.stl".into(),
+                prefix_hash: "prefix-of-newt".into(),
+                size_bytes: 2048,
+                modified_at: 100,
+            }],
+            &[],
+        )
+        .unwrap();
+
+        move_model(&mut conn, "/lib/newt", "/lib/amphibians/newt").unwrap();
+
+        // The bytes didn't change, only the name: leaving the hash behind
+        // would make the next dup scan reread the file's first 128 KiB.
+        let moved = duplicate_candidates_for_size(&conn, 2048).unwrap();
+        let newt = moved
+            .iter()
+            .find(|c| c.path == "/lib/amphibians/newt/GiantNewt_v02.stl")
+            .expect("the moved file is still a candidate");
+        assert_eq!(newt.prefix_hash.as_deref(), Some("prefix-of-newt"));
+
+        move_tree_index(&mut conn, "/lib/amphibians", "/archive/amphibians").unwrap();
+        let after_tree = duplicate_candidates_for_size(&conn, 2048).unwrap();
+        assert!(after_tree.iter().any(|c| c.path
+            == "/archive/amphibians/newt/GiantNewt_v02.stl"
+            && c.prefix_hash.as_deref() == Some("prefix-of-newt")));
     }
 
     #[test]

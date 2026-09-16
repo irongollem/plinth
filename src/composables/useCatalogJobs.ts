@@ -23,6 +23,7 @@ export function useCatalogJobs() {
   /** Bumped when a scan finishes so views can refresh their queries. */
   const scanCompletedCount = ref(0);
   const dupCompletedCount = ref(0);
+  const dupCancelledCount = ref(0);
   const geoCompletedCount = ref(0);
 
   let unlistenScan: UnlistenFn | null = null;
@@ -57,6 +58,7 @@ export function useCatalogJobs() {
       ) {
         dupJobId.value = "";
         if ("Completed" in event.payload) dupCompletedCount.value++;
+        if ("Cancelled" in event.payload) dupCancelledCount.value++;
       }
     });
     unlistenGeo = await events.geometryStatus.listen((event) => {
@@ -116,6 +118,12 @@ export function useCatalogJobs() {
   const dupProgress = computed(() =>
     dupStatus.value && "Progress" in dupStatus.value
       ? dupStatus.value.Progress
+      : null,
+  );
+
+  const dupError = computed(() =>
+    dupStatus.value && "Failed" in dupStatus.value
+      ? dupStatus.value.Failed.error
       : null,
   );
 
@@ -187,7 +195,9 @@ export function useCatalogJobs() {
     isFindingDuplicates,
     dupProgress,
     dupSummary,
+    dupError,
     dupCompletedCount,
+    dupCancelledCount,
     startDuplicateScan,
     cancelDuplicateScan,
     isMiningGeometry,

@@ -4,35 +4,96 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::catalog::stl_facts::{BaseShape, StlFacts};
 use crate::catalog::{BaseSuggestion, DuplicateGroup, ModelFileGeometry};
 
-/// Sizes that occur more than once — the free prefilter for duplicate
-/// detection.
-pub fn duplicate_size_candidates(conn: &Connection) -> Result<Vec<(i64, Vec<String>)>, AppError> {
+/// One duplicate candidate, with whatever the index already knows about
+/// its bytes: `content_hash` means stage 3 is done for it, `prefix_hash`
+/// means stage 2 is. Both NULL is a candidate nothing has read yet.
+pub struct DupCandidate {
+    pub path: String,
+    pub modified_at: i64,
+    pub content_hash: Option<String>,
+    pub prefix_hash: Option<String>,
+}
+
+/// How many files a duplicate scan will examine — the denominator for its
+/// progress, counted in SQL so no path list is held to produce it.
+pub fn duplicate_candidate_count(conn: &Connection) -> Result<u32, AppError> {
+    let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Dup query failed: {}", e));
+    let count: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(n), 0) FROM
+                 (SELECT COUNT(*) AS n FROM files WHERE size_bytes > 0
+                  GROUP BY size_bytes HAVING COUNT(*) > 1)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(map_err)?;
+    Ok(count as u32)
+}
+
+/// One page of sizes that occur more than once — the free prefilter for
+/// duplicate detection. Paged on the size itself (`after` is the last size
+/// of the previous page, 0 to start) rather than OFFSET, so the scan holds
+/// one page at a time instead of the whole catalog's path set.
+pub fn duplicate_candidate_sizes(
+    conn: &Connection,
+    after: i64,
+    limit: u32,
+) -> Result<Vec<i64>, AppError> {
     let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Dup query failed: {}", e));
     let mut stmt = conn
         .prepare(
-            "SELECT size_bytes FROM files WHERE size_bytes > 0
-             GROUP BY size_bytes HAVING COUNT(*) > 1",
+            "SELECT size_bytes FROM files WHERE size_bytes > ?1
+             GROUP BY size_bytes HAVING COUNT(*) > 1
+             ORDER BY size_bytes LIMIT ?2",
         )
         .map_err(map_err)?;
-    let sizes: Vec<i64> = stmt
-        .query_map([], |row| row.get(0))
+    let sizes = stmt
+        .query_map(params![after, limit], |row| row.get(0))
         .and_then(|rows| rows.collect())
         .map_err(map_err)?;
-
-    let mut result = Vec::with_capacity(sizes.len());
-    let mut path_stmt = conn
-        .prepare("SELECT path FROM files WHERE size_bytes = ?1 ORDER BY path")
-        .map_err(map_err)?;
-    for size in sizes {
-        let paths: Vec<String> = path_stmt
-            .query_map([size], |row| row.get(0))
-            .and_then(|rows| rows.collect())
-            .map_err(map_err)?;
-        result.push((size, paths));
-    }
-    Ok(result)
+    Ok(sizes)
 }
 
+/// The candidates of one size, each carrying the stored hashes a scan can
+/// reuse instead of reading. A cached prefix hash counts only while the
+/// file it was taken from still has the size and mtime it had then — the
+/// join conditions ARE the invalidation rule, so a changed file silently
+/// reads as "no cached prefix" rather than matching on stale bytes.
+pub fn duplicate_candidates_for_size(
+    conn: &Connection,
+    size: i64,
+) -> Result<Vec<DupCandidate>, AppError> {
+    let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Dup query failed: {}", e));
+    let mut stmt = conn
+        .prepare(
+            "SELECT f.path, f.modified_at, f.content_hash, p.prefix_hash
+             FROM files f
+             LEFT JOIN file_prefix_hashes p
+               ON p.path = f.path
+              AND p.size_bytes = f.size_bytes
+              AND p.modified_at = f.modified_at
+             WHERE f.size_bytes = ?1
+             ORDER BY f.path",
+        )
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map([size], |row| {
+            Ok(DupCandidate {
+                path: row.get(0)?,
+                modified_at: row.get(1)?,
+                content_hash: row.get(2)?,
+                prefix_hash: row.get(3)?,
+            })
+        })
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
+/// The stored full hash of one path. The duplicate scanner reads hashes
+/// through its candidate query instead, so this survives as the assertion
+/// accessor its tests reach for.
+#[cfg(test)]
 pub fn known_hash(conn: &Connection, path: &str) -> Option<String> {
     conn.query_row(
         "SELECT content_hash FROM files WHERE path = ?1",
@@ -248,23 +309,57 @@ pub fn model_geometry(conn: &Connection, dir_path: &str) -> Result<Vec<ModelFile
     Ok(rows)
 }
 
-/// Batch-write physical-file identities in one transaction — a duplicate
-/// scan refreshes every candidate, and per-row autocommits would turn
-/// thousands of cheap stats into thousands of fsyncs.
-pub fn store_identities(conn: &Connection, entries: &[(String, String)]) -> Result<(), AppError> {
+/// Commit one batch of duplicate-scan progress: the prefix hashes read
+/// since the last flush and the physical identities stat'ed alongside
+/// them, in a single transaction.
+///
+/// Both halves used to be held until the scan finished, so an interrupted
+/// run threw away everything it had learned. Flushing in bounded batches
+/// keeps that work — and one transaction per batch is also what keeps
+/// thousands of cheap stats from becoming thousands of fsyncs.
+pub fn store_dup_checkpoint(
+    conn: &Connection,
+    prefixes: &[PrefixHashRow],
+    identities: &[(String, String)],
+) -> Result<(), AppError> {
     let map_err =
-        |e: rusqlite::Error| AppError::ConfigError(format!("Failed to store identities: {}", e));
+        |e: rusqlite::Error| AppError::ConfigError(format!("Failed to store scan progress: {}", e));
     let tx = conn.unchecked_transaction().map_err(map_err)?;
     {
-        let mut stmt = tx
+        let mut identity_stmt = tx
             .prepare("UPDATE files SET file_identity = ?2 WHERE path = ?1")
             .map_err(map_err)?;
-        for (path, identity) in entries {
-            stmt.execute(params![path, identity]).map_err(map_err)?;
+        for (path, identity) in identities {
+            identity_stmt.execute(params![path, identity]).map_err(map_err)?;
+        }
+        let mut prefix_stmt = tx
+            .prepare(
+                "INSERT OR REPLACE INTO file_prefix_hashes
+                 (path, prefix_hash, size_bytes, modified_at, hashed_at)
+                 VALUES (?1, ?2, ?3, ?4, strftime('%s','now'))",
+            )
+            .map_err(map_err)?;
+        for row in prefixes {
+            prefix_stmt
+                .execute(params![
+                    row.path,
+                    row.prefix_hash,
+                    row.size_bytes,
+                    row.modified_at
+                ])
+                .map_err(map_err)?;
         }
     }
     tx.commit().map_err(map_err)?;
     Ok(())
+}
+
+/// A prefix hash and the file attributes that make it trustworthy later.
+pub struct PrefixHashRow {
+    pub path: String,
+    pub prefix_hash: String,
+    pub size_bytes: i64,
+    pub modified_at: i64,
 }
 
 /// Post-merge bookkeeping: identity AND modified_at, in one transaction.
@@ -338,6 +433,69 @@ mod tests {
     use crate::catalog::db::test_util::*;
     use crate::catalog::db::*;
     use crate::catalog::FileRow;
+
+    #[test]
+    fn candidate_sizes_page_through_every_duplicate_size() {
+        let mut conn = test_conn();
+        // three sizes that occur twice, one that occurs once
+        let files: Vec<FileRow> = [
+            ("/lib/a1.stl", 100),
+            ("/lib/a2.stl", 100),
+            ("/lib/b1.stl", 200),
+            ("/lib/b2.stl", 200),
+            ("/lib/c1.stl", 300),
+            ("/lib/c2.stl", 300),
+            ("/lib/lonely.stl", 400),
+        ]
+        .iter()
+        .map(|(path, size)| file_row(path, "/lib", *size))
+        .collect();
+        replace_catalog(&mut conn, "/lib", &files, &[], &[], &[], &[]).unwrap();
+
+        // a page at a time, the way the scanner walks them
+        let mut seen = Vec::new();
+        let mut after = 0;
+        while let Some(&last) = duplicate_candidate_sizes(&conn, after, 1)
+            .unwrap()
+            .last()
+        {
+            seen.push(last);
+            after = last;
+        }
+        assert_eq!(seen, vec![100, 200, 300]);
+        assert_eq!(duplicate_candidate_count(&conn).unwrap(), 6);
+    }
+
+    #[test]
+    fn a_cached_prefix_hash_only_counts_while_size_and_mtime_still_match() {
+        let mut conn = test_conn();
+        let files = vec![
+            file_row("/lib/a.stl", "/lib", 100),
+            file_row("/lib/b.stl", "/lib", 100),
+        ];
+        replace_catalog(&mut conn, "/lib", &files, &[], &[], &[], &[]).unwrap();
+        store_dup_checkpoint(
+            &conn,
+            &[PrefixHashRow {
+                path: "/lib/a.stl".into(),
+                prefix_hash: "prefix-of-a".into(),
+                size_bytes: 100,
+                modified_at: 100,
+            }],
+            &[("/lib/b.stl".into(), "dev:1".into())],
+        )
+        .unwrap();
+
+        let cached = duplicate_candidates_for_size(&conn, 100).unwrap();
+        assert_eq!(cached[0].prefix_hash.as_deref(), Some("prefix-of-a"));
+        assert_eq!(cached[1].prefix_hash, None);
+
+        // the file changed under us: the cached prefix stops being offered
+        conn.execute("UPDATE files SET modified_at = 101 WHERE path = '/lib/a.stl'", [])
+            .unwrap();
+        let stale = duplicate_candidates_for_size(&conn, 100).unwrap();
+        assert_eq!(stale[0].prefix_hash, None);
+    }
 
     fn stl_facts_with_base(base: Option<(BaseShape, f64)>) -> StlFacts {
         StlFacts {

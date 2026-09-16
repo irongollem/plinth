@@ -1,3 +1,4 @@
+use crate::catalog::dups::DupPhase;
 use crate::models::BlenderInfo;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -111,6 +112,11 @@ pub struct DuplicateProgressStatus {
     pub job_id: String,
     pub processed: u32,
     pub total: u32,
+    /// Candidates settled from stored hashes, without a disk read.
+    pub cached: u32,
+    pub prefix_hashed: u32,
+    pub full_hashed: u32,
+    pub phase: DupPhase,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
