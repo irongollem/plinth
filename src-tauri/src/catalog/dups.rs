@@ -66,6 +66,10 @@ pub struct DupProgress {
 
 /// A candidate in its prefix bucket. `confirmed` means the index already
 /// holds its full hash, so stage 3 has nothing left to read for it.
+fn cancelled() -> AppError {
+    AppError::UserCancelled("Duplicate scan cancelled".into())
+}
+
 struct Bucketed {
     path: String,
     confirmed: bool,
@@ -117,11 +121,25 @@ struct Scan<'a, F: FnMut(DupProgress)> {
 }
 
 impl<F: FnMut(DupProgress)> Scan<'_, F> {
+    /// Whatever ends the sweep — finished, cancelled, or a failed write —
+    /// the reads already made are worth keeping. Only cancellation used to
+    /// flush, so an error propagating out of stage 3 discarded up to a
+    /// full batch of prefix hashes and identities.
     fn run(&mut self) -> Result<(), AppError> {
+        let outcome = self.sweep();
+        if outcome.is_err() {
+            // the original failure is the one worth reporting; a flush
+            // failing on top of it says the same thing twice
+            self.flush().ok();
+        }
+        outcome
+    }
+
+    fn sweep(&mut self) -> Result<(), AppError> {
         let mut after = 0i64;
         loop {
             if self.cancelled() {
-                return Err(self.stop());
+                return Err(cancelled());
             }
             let sizes = db::duplicate_candidate_sizes(self.conn, after, SIZE_PAGE)?;
             let Some(&last) = sizes.last() else { break };
@@ -155,7 +173,7 @@ impl<F: FnMut(DupProgress)> Scan<'_, F> {
         let mut buckets: HashMap<String, Vec<Bucketed>> = HashMap::new();
         for candidate in db::duplicate_candidates_for_size(self.conn, size)? {
             if self.cancelled() {
-                return Err(self.stop());
+                return Err(cancelled());
             }
             self.progress.processed += 1;
             // merges and external swaps change a file's identity without
@@ -206,7 +224,7 @@ impl<F: FnMut(DupProgress)> Scan<'_, F> {
                 continue;
             }
             if self.cancelled() {
-                return Err(self.stop());
+                return Err(cancelled());
             }
             let path = Path::new(&candidate.path);
             let stl = is_stl(path);
@@ -226,7 +244,6 @@ impl<F: FnMut(DupProgress)> Scan<'_, F> {
                 }
             } else {
                 // the file ends inside the prefix, so that IS its full hash
-                self.progress.cached += 1;
                 prefix.to_string()
             };
             db::store_hash(self.conn, &candidate.path, &hash)?;
@@ -252,15 +269,6 @@ impl<F: FnMut(DupProgress)> Scan<'_, F> {
             self.flush()?;
         }
         Ok(())
-    }
-
-    /// A cancelled scan still owes the user the reads it already made; a
-    /// failure to persist them is what the caller hears about instead.
-    fn stop(&mut self) -> AppError {
-        match self.flush() {
-            Ok(()) => AppError::UserCancelled("Duplicate scan cancelled".into()),
-            Err(e) => e,
-        }
     }
 
     fn cancelled(&self) -> bool {
