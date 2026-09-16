@@ -68,14 +68,14 @@ pub async fn start_batch_render(
     }
     // A scan rewrites the models rows this batch updates per finished
     // model, and a pack job deletes the loose STLs Blender is about to
-    // read. The permit lives until this function returns, so every early
-    // `?` below releases the catalog on its way out.
-    let _permit = catalog::jobs::claim(catalog::jobs::JobKind::BatchRender)?;
+    // read. Every early `?` between here and the spawn below releases the
+    // catalog on its way out; past it, the permit rides with the task.
+    let permit = catalog::jobs::claim(catalog::jobs::JobKind::BatchRender)?;
 
     let blender = engine::detect_blender_cached().await?;
     let script = engine::materialize_render_script(&app_handle)?;
 
-    let job_id = _permit.id().to_string();
+    let job_id = permit.id().to_string();
     let scratch = engine::batch_scratch_dir(&app_handle, &job_id)?;
     let manifest = BatchManifest {
         entries: targets
@@ -121,6 +121,9 @@ pub async fn start_batch_render(
             quality,
         )
         .await;
+        // the batch renders in a detached task: the catalog stays claimed
+        // for its whole run, not just while it is being set up
+        drop(permit);
     });
     Ok(job_id)
 }
