@@ -141,7 +141,7 @@ export function use3DPackageHandler() {
       // scan also restores the packed curation from the model.json
       // sidecars. Only the OWNING folder rescans — not the whole catalog.
       if (pending.ownerRoot) {
-        await commands.startCatalogScan(pending.ownerRoot);
+        await commands.queueCatalogScan(pending.ownerRoot);
       }
     } catch (error) {
       toastStore.reportError("Failed to import 3D package", error);
@@ -182,7 +182,7 @@ export function use3DPackageHandler() {
       pendingImport.value = null;
 
       if (pending.ownerRoot) {
-        await commands.startCatalogScan(pending.ownerRoot);
+        await commands.queueCatalogScan(pending.ownerRoot);
       }
     } catch (error) {
       toastStore.reportError("Failed to recompile from your library", error);

@@ -37,3 +37,5 @@ raw/
 # VitePress (docs site) build output and cache
 docs/.vitepress/dist/
 docs/.vitepress/cache/
+
+graphify-out/

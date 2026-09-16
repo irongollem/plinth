@@ -7,28 +7,21 @@ use crate::models::events::{
     PackProgressStatus, PackStartedStatus, PackStatus, ScanCancelledStatus, ScanCompletedStatus,
     ScanFailedStatus, ScanProgressStatus, ScanStartedStatus, ScanStatus,
 };
-use once_cell::sync::Lazy;
 use rusqlite::Connection;
+use std::sync::atomic::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tauri_specta::Event;
-use uuid::Uuid;
 
+use super::jobs::{self, JobKind};
 use super::{
     db, dups, geometry, normalize, pack, scanner, BatchOutcome, CatalogEntry, CatalogFile,
     CatalogGroupResult, CatalogSearchResult, CatalogStats, DesignerCount, DuplicateGroup,
     EnsureOutcome, FileVariant, GeometryRange, GroupOrigin, ModelGeometryDetail, ModelMetaUpdate,
     MoveOperation, NormalizeOp, NormalizePlan, ReleaseSummary, TagCount,
 };
-
-/// Scan and duplicate jobs share one registry; both cancel through
-/// cancel_catalog_job.
-static ACTIVE_CATALOG_JOBS: Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
 
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -42,33 +35,6 @@ fn db_path(app_handle: &AppHandle) -> Result<PathBuf, AppError> {
 
 pub(crate) fn open_db(app_handle: &AppHandle) -> Result<Connection, AppError> {
     db::open(&db_path(app_handle)?)
-}
-
-fn register_job(job_id: &str) -> Result<Arc<AtomicBool>, AppError> {
-    let cancel = Arc::new(AtomicBool::new(false));
-    ACTIVE_CATALOG_JOBS
-        .lock()
-        .map_err(|e| AppError::ConfigError(format!("Job registry unavailable: {}", e)))?
-        .insert(job_id.to_string(), Arc::clone(&cancel));
-    Ok(cancel)
-}
-
-fn unregister_job(job_id: &str) {
-    if let Ok(mut jobs) = ACTIVE_CATALOG_JOBS.lock() {
-        jobs.remove(job_id);
-    }
-}
-
-/// Job ids are prefixed by kind ("scan:", "dup:", "pack:", "extract:") so
-/// mutually-unsafe kinds can exclude each other: a scan's replace_catalog
-/// wholesale-rewrites the very rows a pack job updates in place, so letting
-/// them overlap leaves the index claiming loose files that only exist inside
-/// an archive.
-pub(crate) fn job_active(prefix: &str) -> bool {
-    ACTIVE_CATALOG_JOBS
-        .lock()
-        .map(|jobs| jobs.keys().any(|id| id.starts_with(prefix)))
-        .unwrap_or(false)
 }
 
 /// Trailing-separator-insensitive form of a root path — must agree with the
@@ -154,24 +120,58 @@ fn overlap_error(roots: &[String], root: &str) -> Result<(), AppError> {
 #[tauri::command]
 #[specta::specta]
 pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<String, AppError> {
+    let permit = jobs::claim(JobKind::Scan)?;
+    scan_with_permit(app_handle, root, permit).await
+}
+
+/// The same scan, for follow-up work nobody asked for directly: an import
+/// landing in a catalog folder, a Base Cutter export. Refusing those would
+/// drop the refresh silently, so they wait out the running job instead — a
+/// several-hour dedupe must survive a routine reindex queueing behind it.
+///
+/// Returns as soon as the request is accepted, not when the scan runs: the
+/// wait can be hours, and the caller learns the scan started from the
+/// ordinary ScanStatus stream like any other.
+#[tauri::command]
+#[specta::specta]
+pub async fn queue_catalog_scan(app_handle: AppHandle, root: String) -> Result<(), AppError> {
     if !Path::new(&root).is_dir() {
         return Err(AppError::NotFoundError(format!(
             "Catalog root '{}' is not a directory",
             root
         )));
     }
+    tauri::async_runtime::spawn(async move {
+        let permit = match jobs::claim_when_free(JobKind::Scan).await {
+            Ok(permit) => permit,
+            Err(e) => {
+                eprintln!("Queued scan of {} never got the catalog: {}", root, e);
+                return;
+            }
+        };
+        let job_id = permit.id().to_string();
+        if let Err(e) = scan_with_permit(app_handle.clone(), root, permit).await {
+            ScanStatus::Failed(ScanFailedStatus {
+                job_id,
+                error: e.to_string(),
+            })
+            .emit(&app_handle)
+            .ok();
+        }
+    });
+    Ok(())
+}
 
-    if job_active("pack:") {
-        return Err(AppError::InvalidInput(
-            "A pack job is running — rescan when it finishes".to_string(),
-        ));
-    }
-    if crate::render::batch::batch_render_active() {
-        // replace_catalog would rewrite the very rows the batch updates
-        // (previews, measured geometry) per finished model
-        return Err(AppError::InvalidInput(
-            "A batch render is running — rescan when it finishes".to_string(),
-        ));
+async fn scan_with_permit(
+    app_handle: AppHandle,
+    root: String,
+    permit: jobs::JobPermit,
+) -> Result<String, AppError> {
+    if !Path::new(&root).is_dir() {
+        return Err(AppError::NotFoundError(format!(
+            "Catalog root '{}' is not a directory",
+            root
+        )));
     }
 
     // Settings are read up front (async store) so the blocking scan can
@@ -196,8 +196,8 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
         save_roots(&app_handle, settings, roots).await?;
     }
 
-    let job_id = format!("scan:{}", Uuid::new_v4());
-    let cancel = register_job(&job_id)?;
+    let job_id = permit.id().to_string();
+    let cancel = permit.cancel_flag();
     let job_id_clone = job_id.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -244,7 +244,9 @@ pub async fn start_catalog_scan(app_handle: AppHandle, root: String) -> Result<S
             Ok((outcome.files.len() as u32, outcome.models.len() as u32))
         })();
 
-        unregister_job(&job_id_clone);
+        // the permit's lifetime is the job's: this releases the catalog
+        // whichever way the work above ended
+        drop(permit);
         match result {
             Ok((total_files, total_models)) => {
                 ScanStatus::Completed(ScanCompletedStatus {
@@ -402,12 +404,7 @@ pub async fn set_primary_catalog_root(
 #[tauri::command]
 #[specta::specta]
 pub async fn start_duplicate_scan(app_handle: AppHandle) -> Result<String, AppError> {
-    if job_active("pack:") {
-        // the dup scan reads file bytes a pack job is busy deleting
-        return Err(AppError::InvalidInput(
-            "A pack job is running — scan for duplicates when it finishes".to_string(),
-        ));
-    }
+    let permit = jobs::claim(JobKind::Duplicate)?;
     // The dup scan's full .stl reads also mine geometry, so it resolves
     // the same edge cap as the dedicated mine job
     let edge_cap = crate::settings::get_settings(app_handle.clone())
@@ -416,8 +413,8 @@ pub async fn start_duplicate_scan(app_handle: AppHandle) -> Result<String, AppEr
         .and_then(|s| s.edge_stats_max_tris)
         .unwrap_or_else(geometry::recommended_edge_cap);
 
-    let job_id = format!("dup:{}", Uuid::new_v4());
-    let cancel = register_job(&job_id)?;
+    let job_id = permit.id().to_string();
+    let cancel = permit.cancel_flag();
     let job_id_clone = job_id.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -446,7 +443,7 @@ pub async fn start_duplicate_scan(app_handle: AppHandle) -> Result<String, AppEr
             })
         })();
 
-        unregister_job(&job_id_clone);
+        drop(permit);
         match result {
             Ok(groups) => {
                 let wasted: f64 = groups
@@ -487,12 +484,7 @@ pub async fn start_duplicate_scan(app_handle: AppHandle) -> Result<String, AppEr
 #[tauri::command]
 #[specta::specta]
 pub async fn start_geometry_scan(app_handle: AppHandle) -> Result<String, AppError> {
-    if job_active("pack:") {
-        // mining reads file bytes a pack job is busy deleting
-        return Err(AppError::InvalidInput(
-            "A pack job is running — mine geometry when it finishes".to_string(),
-        ));
-    }
+    let permit = jobs::claim(JobKind::Geometry)?;
     // Edge-stats cap from settings (async store read) before the blocking
     // job — mirrors the pack_level read above start_pack. Falls back to the
     // machine-derived recommendation if settings can't be read at all, same
@@ -503,8 +495,8 @@ pub async fn start_geometry_scan(app_handle: AppHandle) -> Result<String, AppErr
         .and_then(|s| s.edge_stats_max_tris)
         .unwrap_or_else(geometry::recommended_edge_cap);
 
-    let job_id = format!("geom:{}", Uuid::new_v4());
-    let cancel = register_job(&job_id)?;
+    let job_id = permit.id().to_string();
+    let cancel = permit.cancel_flag();
     let job_id_clone = job_id.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -533,7 +525,7 @@ pub async fn start_geometry_scan(app_handle: AppHandle) -> Result<String, AppErr
             })
         })();
 
-        unregister_job(&job_id_clone);
+        drop(permit);
         match result {
             Ok(outcome) => {
                 GeometryStatus::Completed(GeometryCompletedStatus {
@@ -576,19 +568,13 @@ pub async fn get_recommended_edge_cap() -> Result<u32, AppError> {
 #[tauri::command]
 #[specta::specta]
 pub async fn cancel_catalog_job(job_id: String) -> Result<(), AppError> {
-    let jobs = ACTIVE_CATALOG_JOBS
-        .lock()
-        .map_err(|e| AppError::ConfigError(format!("Job registry unavailable: {}", e)))?;
-    match jobs.get(&job_id) {
-        Some(cancel) => {
-            cancel.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-        None => Err(AppError::NotFoundError(format!(
-            "No active catalog job with ID: {}",
-            job_id
-        ))),
+    if jobs::cancel(&job_id) {
+        return Ok(());
     }
+    Err(AppError::NotFoundError(format!(
+        "No active catalog job with ID: {}",
+        job_id
+    )))
 }
 
 /// Compress each model dir into a model.plinthpack (compressed at rest),
@@ -613,22 +599,7 @@ pub async fn pack_models(
     if model_dirs.is_empty() {
         return Err(AppError::InvalidInput("No models to pack".to_string()));
     }
-    if job_active("scan:") {
-        return Err(AppError::InvalidInput(
-            "A catalog scan is running — pack when it finishes".to_string(),
-        ));
-    }
-    if job_active("pack:") {
-        return Err(AppError::InvalidInput(
-            "A pack job is already running".to_string(),
-        ));
-    }
-    if crate::render::batch::batch_render_active() {
-        // packing deletes the loose STLs Blender is reading mid-batch
-        return Err(AppError::InvalidInput(
-            "A batch render is running — pack when it finishes".to_string(),
-        ));
-    }
+    let permit = jobs::claim(JobKind::Pack)?;
     // Zstd level from settings (async store read) before the blocking job.
     // Clamped to zstd's actual range — the zip writer errors on anything
     // outside it, and a hand-edited settings.json shouldn't brick packing.
@@ -639,8 +610,8 @@ pub async fn pack_models(
         .map(|l| i64::from(l).clamp(-7, 22));
     let app_version = app_handle.package_info().version.to_string();
 
-    let job_id = format!("pack:{}", Uuid::new_v4());
-    let cancel = register_job(&job_id)?;
+    let job_id = permit.id().to_string();
+    let cancel = permit.cancel_flag();
     let total_models = model_dirs.len() as u32;
     PackStatus::Started(PackStartedStatus {
         job_id: job_id.clone(),
@@ -706,7 +677,7 @@ pub async fn pack_models(
             Ok(())
         })();
 
-        unregister_job(&job_id_clone);
+        drop(permit);
         match result {
             Ok(()) => {
                 PackStatus::Completed(PackCompletedStatus {
@@ -756,8 +727,9 @@ pub async fn ensure_model_files(
     app_handle: AppHandle,
     paths: Vec<String>,
 ) -> Result<EnsureOutcome, AppError> {
-    let job_id = format!("extract:{}", Uuid::new_v4());
-    let cancel = register_job(&job_id)?;
+    let permit = jobs::claim(JobKind::Extract)?;
+    let job_id = permit.id().to_string();
+    let cancel = permit.cancel_flag();
     let job_id_clone = job_id.clone();
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<EnsureOutcome, AppError> {
         let started = Instant::now();
@@ -856,7 +828,7 @@ pub async fn ensure_model_files(
     })
     .await
     .map_err(|e| AppError::ConfigError(format!("Extraction task failed: {}", e)))?;
-    unregister_job(&job_id);
+    drop(permit);
     result
 }
 
@@ -912,23 +884,9 @@ pub async fn unpack_models(
     if model_dirs.is_empty() {
         return Err(AppError::InvalidInput("No models to unpack".to_string()));
     }
-    if job_active("scan:") {
-        return Err(AppError::InvalidInput(
-            "A catalog scan is running — unpack when it finishes".to_string(),
-        ));
-    }
-    if job_active("pack:") {
-        return Err(AppError::InvalidInput(
-            "A pack job is already running".to_string(),
-        ));
-    }
-    if crate::render::batch::batch_render_active() {
-        return Err(AppError::InvalidInput(
-            "A batch render is running — unpack when it finishes".to_string(),
-        ));
-    }
-    let job_id = format!("pack:{}", Uuid::new_v4());
-    let cancel = register_job(&job_id)?;
+    let permit = jobs::claim(JobKind::Unpack)?;
+    let job_id = permit.id().to_string();
+    let cancel = permit.cancel_flag();
     let total_models = model_dirs.len() as u32;
     PackStatus::Started(PackStartedStatus {
         job_id: job_id.clone(),
@@ -1000,7 +958,7 @@ pub async fn unpack_models(
             Ok(())
         })();
 
-        unregister_job(&job_id_clone);
+        drop(permit);
         match result {
             Ok(()) => {
                 PackStatus::Completed(PackCompletedStatus {
