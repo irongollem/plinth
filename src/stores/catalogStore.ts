@@ -131,6 +131,7 @@ export const useCatalogStore = defineStore("catalog", () => {
     scanError,
     scanCompletedCount,
     startScan,
+    queueScan,
     cancelScan,
     isFindingDuplicates,
     dupProgress,
@@ -2574,7 +2575,15 @@ export const useCatalogStore = defineStore("catalog", () => {
     const next = scanQueue.value.shift();
     if (next) {
       await refreshRoots();
-      await startRootScan(next);
+      // The rest of a "scan all folders" batch waits its turn rather than
+      // being refused: an automatic rescan queued elsewhere is woken the
+      // instant the finished scan releases the catalog, which is before
+      // this watcher ever runs.
+      const result = await queueScan(next);
+      if (result.status === "error") {
+        scanQueue.value = [];
+        toastStore.reportError("Failed to queue the next folder", result.error);
+      }
       return;
     }
     toastStore.addToast("Catalog scan complete", "success");
