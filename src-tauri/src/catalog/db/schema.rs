@@ -44,11 +44,12 @@ pub(super) fn init_schema(conn: &Connection) -> Result<(), AppError> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap_or(0);
-    // The base CREATEs are all IF NOT EXISTS and run on EVERY open — only
-    // the versioned migrations below are gated. Gating the base batch once
-    // burned us: a build stamped user_version before a newly-coded table
-    // existed, and the version check then guaranteed it could never appear
-    // ("no such table" with no way out short of deleting the db).
+    // The base CREATEs are all IF NOT EXISTS and run whenever this function
+    // does — only the versioned migrations below are gated. Gating the base
+    // batch once burned us: a build stamped user_version before a
+    // newly-coded table existed, and the version check then guaranteed it
+    // could never appear ("no such table" with no way out short of deleting
+    // the db).
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS files (
@@ -242,10 +243,11 @@ pub(super) fn init_schema(conn: &Connection) -> Result<(), AppError> {
     // iteration a build can stamp user_version before an ALTER exists in
     // code, and a version gate then locks that ALTER out forever ("no such
     // column" with no way back). Asking the table what it actually has
-    // makes the check idempotent and self-healing on every open.
-    // Add any missing TEXT columns to a table. Racy-safe: several
-    // connections open in parallel and can both see a column missing, so the
-    // loser's "duplicate column" is the goal state, not a failure.
+    // makes the check idempotent, so a build that adds an ALTER heals the
+    // database the next time it starts.
+    // Add any missing TEXT columns to a table. Racy-safe: two processes can
+    // both see a column missing, so the loser's "duplicate column" is the
+    // goal state, not a failure.
     let add_text_columns = |table: &str, columns: &[&str]| -> Result<(), AppError> {
         let existing: Vec<String> = conn
             .prepare(&format!("PRAGMA table_info({})", table))
@@ -441,6 +443,8 @@ pub(super) fn init_schema(conn: &Connection) -> Result<(), AppError> {
         rebuild_fts(conn)
             .map_err(|e| AppError::ConfigError(format!("Failed to rebuild FTS: {}", e)))?;
     }
+
+    super::ownership::ensure_content_hash_index(conn)?;
 
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(|e| AppError::ConfigError(format!("Failed to set schema version: {}", e)))?;
