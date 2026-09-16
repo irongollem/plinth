@@ -23,11 +23,8 @@ pub fn replace_catalog(
 ) -> Result<(), AppError> {
     let map_err =
         |e: rusqlite::Error| AppError::ConfigError(format!("Catalog write failed: {}", e));
-    // A picker-supplied "D:\" or a hand-typed trailing slash must scope the
-    // same as its bare form, or the same folder scans as two disjoint roots.
-    let trimmed = root.trim_end_matches(std::path::MAIN_SEPARATOR);
-    let root = if trimmed.is_empty() { root } else { trimmed };
-    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let root = &crate::catalog::paths::normalize_root(root);
+    let scope = crate::catalog::paths::child_prefix(root);
     let tx = conn.transaction().map_err(map_err)?;
     {
         // Preserve known content hashes (hashing is the expensive part of
@@ -43,15 +40,15 @@ pub fn replace_catalog(
         tx.execute(
             "DELETE FROM files WHERE root = ?1
                OR (root IS NULL AND (dir_path = ?1
-                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2))",
-            params![root, sep],
+                   OR substr(dir_path, 1, length(?2)) = ?2))",
+            params![root, scope],
         )
         .map_err(map_err)?;
         tx.execute(
             "DELETE FROM models WHERE root = ?1
                OR (root IS NULL AND (dir_path = ?1
-                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2))",
-            params![root, sep],
+                   OR substr(dir_path, 1, length(?2)) = ?2))",
+            params![root, scope],
         )
         .map_err(map_err)?;
         // Scoped like files/models: another root's metadata tags only come
@@ -59,8 +56,8 @@ pub fn replace_catalog(
         tx.execute(
             "DELETE FROM model_tags WHERE source = 'metadata'
                AND (dir_path = ?1
-                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2)",
-            params![root, sep],
+                   OR substr(dir_path, 1, length(?2)) = ?2)",
+            params![root, scope],
         )
         .map_err(map_err)?;
 
@@ -145,8 +142,8 @@ pub fn replace_catalog(
         // every sidecar under its root, so the path prefix is exact.
         tx.execute(
             "DELETE FROM packs WHERE model_dir = ?1
-               OR substr(model_dir, 1, length(?1) + length(?2)) = ?1 || ?2",
-            params![root, sep],
+               OR substr(model_dir, 1, length(?2)) = ?2",
+            params![root, scope],
         )
         .map_err(map_err)?;
         let mut insert_pack = tx
@@ -311,29 +308,28 @@ pub(super) fn prune_orphans(tx: &rusqlite::Transaction) -> Result<(), rusqlite::
 pub fn purge_root(conn: &mut Connection, root: &str) -> Result<(), AppError> {
     let map_err =
         |e: rusqlite::Error| AppError::ConfigError(format!("Catalog root removal failed: {}", e));
-    let trimmed = root.trim_end_matches(std::path::MAIN_SEPARATOR);
-    let root = if trimmed.is_empty() { root } else { trimmed };
-    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let root = &crate::catalog::paths::normalize_root(root);
+    let scope = crate::catalog::paths::child_prefix(root);
     let tx = conn.transaction().map_err(map_err)?;
     {
         tx.execute(
             "DELETE FROM files WHERE root = ?1
                OR (root IS NULL AND (dir_path = ?1
-                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2))",
-            params![root, sep],
+                   OR substr(dir_path, 1, length(?2)) = ?2))",
+            params![root, scope],
         )
         .map_err(map_err)?;
         tx.execute(
             "DELETE FROM models WHERE root = ?1
                OR (root IS NULL AND (dir_path = ?1
-                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2))",
-            params![root, sep],
+                   OR substr(dir_path, 1, length(?2)) = ?2))",
+            params![root, scope],
         )
         .map_err(map_err)?;
         tx.execute(
             "DELETE FROM packs WHERE model_dir = ?1
-               OR substr(model_dir, 1, length(?1) + length(?2)) = ?1 || ?2",
-            params![root, sep],
+               OR substr(model_dir, 1, length(?2)) = ?2",
+            params![root, scope],
         )
         .map_err(map_err)?;
         prune_orphans(&tx).map_err(map_err)?;
@@ -347,8 +343,8 @@ pub fn purge_root(conn: &mut Connection, root: &str) -> Result<(), AppError> {
         // shape scans of the root, and the root is no longer scanned
         tx.execute(
             "DELETE FROM scan_ignores WHERE dir_path = ?1
-               OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
-            params![root, sep],
+               OR substr(dir_path, 1, length(?2)) = ?2",
+            params![root, scope],
         )
         .map_err(map_err)?;
     }
@@ -361,15 +357,14 @@ pub fn purge_root(conn: &mut Connection, root: &str) -> Result<(), AppError> {
 /// NULL-root rows under the folder are counted as its own.
 pub fn root_summary(conn: &Connection, root: &str) -> Result<(u32, u32, i64), AppError> {
     let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Catalog read failed: {}", e));
-    let trimmed = root.trim_end_matches(std::path::MAIN_SEPARATOR);
-    let root = if trimmed.is_empty() { root } else { trimmed };
-    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let root = &crate::catalog::paths::normalize_root(root);
+    let scope = crate::catalog::paths::child_prefix(root);
     let models: u32 = conn
         .query_row(
             "SELECT COUNT(*) FROM models WHERE root = ?1
                OR (root IS NULL AND (dir_path = ?1
-                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2))",
-            params![root, sep],
+                   OR substr(dir_path, 1, length(?2)) = ?2))",
+            params![root, scope],
             |r| r.get(0),
         )
         .map_err(map_err)?;
@@ -377,8 +372,8 @@ pub fn root_summary(conn: &Connection, root: &str) -> Result<(u32, u32, i64), Ap
         .query_row(
             "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM files WHERE root = ?1
                OR (root IS NULL AND (dir_path = ?1
-                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2))",
-            params![root, sep],
+                   OR substr(dir_path, 1, length(?2)) = ?2))",
+            params![root, scope],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(map_err)?;
@@ -768,6 +763,62 @@ mod tests {
         replace_catalog(&mut conn, "/lib/", &bug_files, &bug_models, &[], &[], &[]).unwrap();
         assert_eq!(search(&conn, "", &[], None, None, None, None, 10, 0, true, None, None).unwrap().total, 1);
         assert_eq!(search(&conn, "newt", &[], None, None, None, None, 10, 0, true, None, None).unwrap().total, 0);
+    }
+
+    /// Windows path shapes, checked on whatever platform CI runs: the
+    /// scoping used to build its prefix from the HOST's separator, so
+    /// these cases were unreachable from a test and the drive-root one was
+    /// broken everywhere — "Z:\\" + "\\" is "Z:\\\\", which matches no path.
+    #[test]
+    fn a_windows_drive_root_scopes_its_own_children() {
+        let mut conn = test_conn();
+        let files = vec![
+            file_row("Z:\\Designer\\newt.stl", "Z:\\Designer", 2048),
+            file_row("Z:\\Other\\bugbear.stl", "Z:\\Other", 1024),
+        ];
+        let models = vec![ModelRow {
+            dir_path: "Z:\\Designer".into(),
+            name: "Giant Newt".into(),
+            source: "heuristic".into(),
+            file_count: 1,
+            ..Default::default()
+        }];
+
+        // the picker hands over "Z:\\"; trimming it to "Z:" would make it
+        // drive-relative, naming a different folder on the next launch
+        replace_catalog(&mut conn, "Z:\\", &files, &models, &[], &[], &[]).unwrap();
+        assert_eq!(root_summary(&conn, "Z:\\").unwrap(), (1, 2, 3072));
+        // the drive-relative spelling an affected version persisted still
+        // resolves to the same root
+        assert_eq!(root_summary(&conn, "Z:").unwrap(), (1, 2, 3072));
+
+        // Pre-multi-root rows carry no root stamp, so they are claimed by
+        // prefix alone — the path that "Z:\\" + separator never matched.
+        conn.execute("UPDATE files SET root = NULL", []).unwrap();
+        conn.execute("UPDATE models SET root = NULL", []).unwrap();
+        assert_eq!(root_summary(&conn, "Z:\\").unwrap(), (1, 2, 3072));
+        // …and a rescan adopts them rather than leaving a second copy
+        replace_catalog(&mut conn, "Z:\\", &files, &models, &[], &[], &[]).unwrap();
+        assert_eq!(root_summary(&conn, "Z:\\").unwrap(), (1, 2, 3072));
+
+        purge_root(&mut conn, "Z:\\").unwrap();
+        assert_eq!(root_summary(&conn, "Z:\\").unwrap(), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_unc_share_root_scopes_its_own_children() {
+        let mut conn = test_conn();
+        let files = vec![file_row(
+            "\\\\nas\\models\\dtl\\newt.stl",
+            "\\\\nas\\models\\dtl",
+            4096,
+        )];
+        replace_catalog(&mut conn, "\\\\nas\\models", &files, &[], &[], &[], &[]).unwrap();
+
+        assert_eq!(root_summary(&conn, "\\\\nas\\models").unwrap().1, 1);
+        assert_eq!(root_summary(&conn, "\\\\nas\\models\\").unwrap().1, 1);
+        // a sibling share is not inside it
+        assert_eq!(root_summary(&conn, "\\\\nas\\modelsOld").unwrap().1, 0);
     }
 
     #[test]

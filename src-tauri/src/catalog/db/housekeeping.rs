@@ -1,3 +1,4 @@
+use crate::catalog::paths;
 use crate::error::AppError;
 use rusqlite::{params, Connection};
 
@@ -63,7 +64,6 @@ pub fn remove_files(conn: &mut Connection, paths: &[String]) -> Result<(), AppEr
 pub fn remove_models(conn: &mut Connection, dirs: &[String]) -> Result<u32, AppError> {
     let map_err =
         |e: rusqlite::Error| AppError::ConfigError(format!("Catalog model removal failed: {}", e));
-    let sep = std::path::MAIN_SEPARATOR.to_string();
     let tx = conn.transaction().map_err(map_err)?;
     let mut removed: u32 = 0;
     {
@@ -71,32 +71,32 @@ pub fn remove_models(conn: &mut Connection, dirs: &[String]) -> Result<u32, AppE
             removed += tx
                 .execute(
                     "DELETE FROM models WHERE dir_path = ?1
-                       OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
-                    params![dir, sep],
+                       OR substr(dir_path, 1, length(?2)) = ?2",
+                    params![dir, paths::child_prefix(dir)],
                 )
                 .map_err(map_err)? as u32;
             tx.execute(
                 "DELETE FROM files WHERE dir_path = ?1
-                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
-                params![dir, sep],
+                   OR substr(dir_path, 1, length(?2)) = ?2",
+                params![dir, paths::child_prefix(dir)],
             )
             .map_err(map_err)?;
             tx.execute(
                 "DELETE FROM packs WHERE model_dir = ?1
-                   OR substr(model_dir, 1, length(?1) + length(?2)) = ?1 || ?2",
-                params![dir, sep],
+                   OR substr(model_dir, 1, length(?2)) = ?2",
+                params![dir, paths::child_prefix(dir)],
             )
             .map_err(map_err)?;
             tx.execute(
                 "DELETE FROM variant_previews WHERE dir_path = ?1
-                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
-                params![dir, sep],
+                   OR substr(dir_path, 1, length(?2)) = ?2",
+                params![dir, paths::child_prefix(dir)],
             )
             .map_err(map_err)?;
             tx.execute(
                 "DELETE FROM group_covers WHERE dir_path = ?1
-                   OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
-                params![dir, sep],
+                   OR substr(dir_path, 1, length(?2)) = ?2",
+                params![dir, paths::child_prefix(dir)],
             )
             .map_err(map_err)?;
         }
@@ -112,15 +112,14 @@ pub fn remove_models(conn: &mut Connection, dirs: &[String]) -> Result<u32, AppE
 /// deleted?" before daring to trash the whole parent.
 pub fn model_dirs_under(conn: &Connection, dir: &str) -> Result<Vec<String>, AppError> {
     let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Catalog read failed: {}", e));
-    let sep = std::path::MAIN_SEPARATOR.to_string();
     let mut stmt = conn
         .prepare(
             "SELECT dir_path FROM models WHERE dir_path = ?1
-               OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
+               OR substr(dir_path, 1, length(?2)) = ?2",
         )
         .map_err(map_err)?;
     let rows = stmt
-        .query_map(params![dir, sep], |row| row.get(0))
+        .query_map(params![dir, paths::child_prefix(dir)], |row| row.get(0))
         .map_err(map_err)?
         .collect::<Result<Vec<String>, _>>()
         .map_err(map_err)?;
@@ -134,17 +133,16 @@ pub fn model_dirs_under(conn: &Connection, dir: &str) -> Result<Vec<String>, App
 /// forever — nothing else ever prunes that folder.
 pub fn preview_sweep_keys(conn: &Connection, dirs: &[String]) -> Result<Vec<String>, AppError> {
     let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Catalog read failed: {}", e));
-    let sep = std::path::MAIN_SEPARATOR.to_string();
     let mut keys: Vec<String> = dirs.to_vec();
     let mut stmt = conn
         .prepare(
             "SELECT variant_key FROM variant_previews WHERE dir_path = ?1
-               OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
+               OR substr(dir_path, 1, length(?2)) = ?2",
         )
         .map_err(map_err)?;
     for dir in dirs {
         let variant_keys = stmt
-            .query_map(params![dir, sep], |row| row.get::<_, String>(0))
+            .query_map(params![dir, paths::child_prefix(dir)], |row| row.get::<_, String>(0))
             .map_err(map_err)?
             .collect::<Result<Vec<String>, _>>()
             .map_err(map_err)?;
@@ -158,18 +156,17 @@ pub fn preview_sweep_keys(conn: &Connection, dirs: &[String]) -> Result<Vec<Stri
 /// describes exactly what remove_models will take.
 pub fn dirs_summary(conn: &Connection, dirs: &[String]) -> Result<(u32, i64), AppError> {
     let map_err = |e: rusqlite::Error| AppError::ConfigError(format!("Catalog read failed: {}", e));
-    let sep = std::path::MAIN_SEPARATOR.to_string();
     let mut files: u32 = 0;
     let mut bytes: i64 = 0;
     let mut stmt = conn
         .prepare(
             "SELECT COUNT(*), COALESCE(SUM(size_bytes), 0) FROM files WHERE dir_path = ?1
-               OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
+               OR substr(dir_path, 1, length(?2)) = ?2",
         )
         .map_err(map_err)?;
     for dir in dirs {
         let (f, b): (u32, i64) = stmt
-            .query_row(params![dir, sep], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row(params![dir, paths::child_prefix(dir)], |r| Ok((r.get(0)?, r.get(1)?)))
             .map_err(map_err)?;
         files += f;
         bytes += b;
@@ -200,15 +197,14 @@ pub fn add_scan_ignores(conn: &Connection, dirs: &[String]) -> Result<(), AppErr
 pub fn remove_scan_ignores_under(conn: &Connection, dirs: &[String]) -> Result<(), AppError> {
     let map_err =
         |e: rusqlite::Error| AppError::ConfigError(format!("Ignore-list prune failed: {}", e));
-    let sep = std::path::MAIN_SEPARATOR.to_string();
     let mut stmt = conn
         .prepare(
             "DELETE FROM scan_ignores WHERE dir_path = ?1
-               OR substr(dir_path, 1, length(?1) + length(?2)) = ?1 || ?2",
+               OR substr(dir_path, 1, length(?2)) = ?2",
         )
         .map_err(map_err)?;
     for dir in dirs {
-        stmt.execute(params![dir, sep]).map_err(map_err)?;
+        stmt.execute(params![dir, paths::child_prefix(dir)]).map_err(map_err)?;
     }
     Ok(())
 }
@@ -371,7 +367,8 @@ pub fn propagate_group_meta(
 pub fn move_tree_index(conn: &mut Connection, from: &str, to: &str) -> Result<(), AppError> {
     let map_err =
         |e: rusqlite::Error| AppError::ConfigError(format!("Catalog tree move failed: {}", e));
-    let sep = std::path::MAIN_SEPARATOR.to_string();
+    let from_scope = paths::child_prefix(from);
+    let to_scope = paths::child_prefix(to);
     let tx = conn.transaction().map_err(map_err)?;
     {
         // (table, column, part_of_primary_key)
@@ -398,7 +395,7 @@ pub fn move_tree_index(conn: &mut Connection, from: &str, to: &str) -> Result<()
             // char(31) is the variant_key separator — a dir prefix can be
             // followed by either a path separator or that marker.
             let predicate = format!(
-                "{c} = ?1 OR substr({c}, 1, length(?1) + 1) = ?1 || ?3
+                "{c} = ?1 OR substr({c}, 1, length(?3)) = ?3
                        OR substr({c}, 1, length(?1) + 1) = ?1 || char(31)",
                 c = column
             );
@@ -410,7 +407,7 @@ pub fn move_tree_index(conn: &mut Connection, from: &str, to: &str) -> Result<()
                     c = column,
                     p = predicate
                 ),
-                params![from, to, sep],
+                params![from, to, from_scope],
             )
             .map_err(map_err)?;
             if *is_pk {
@@ -418,15 +415,15 @@ pub fn move_tree_index(conn: &mut Connection, from: &str, to: &str) -> Result<()
                 // (?2 is unused by the predicate but keeps the indexes aligned)
                 tx.execute(
                     &format!("DELETE FROM {table} WHERE {p}", table = table, p = predicate),
-                    params![from, to, sep],
+                    params![from, to, from_scope],
                 )
                 .map_err(map_err)?;
             }
         }
         tx.execute(
             "DELETE FROM models_fts
-             WHERE dir_path = ?1 OR substr(dir_path, 1, length(?1) + 1) = ?1 || ?2",
-            params![from, sep],
+             WHERE dir_path = ?1 OR substr(dir_path, 1, length(?2)) = ?2",
+            params![from, from_scope],
         )
         .map_err(map_err)?;
         // A dir move can cross catalog-folder boundaries (staging mode
@@ -440,14 +437,14 @@ pub fn move_tree_index(conn: &mut Connection, from: &str, to: &str) -> Result<()
         // wherever they now live.
         tx.execute(
             "UPDATE files SET root = NULL
-             WHERE dir_path = ?1 OR substr(dir_path, 1, length(?1) + 1) = ?1 || ?2",
-            params![to, sep],
+             WHERE dir_path = ?1 OR substr(dir_path, 1, length(?2)) = ?2",
+            params![to, to_scope],
         )
         .map_err(map_err)?;
         tx.execute(
             "UPDATE models SET root = NULL
-             WHERE dir_path = ?1 OR substr(dir_path, 1, length(?1) + 1) = ?1 || ?2",
-            params![to, sep],
+             WHERE dir_path = ?1 OR substr(dir_path, 1, length(?2)) = ?2",
+            params![to, to_scope],
         )
         .map_err(map_err)?;
     }
