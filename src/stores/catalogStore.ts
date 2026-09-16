@@ -25,6 +25,7 @@ import { useCatalogJobs } from "../composables/useCatalogJobs";
 import { useFileSelect } from "../composables/useFileSelect";
 import { usePackStatus } from "../composables/usePackStatus";
 import { formatFileSize } from "../utils/format";
+import { designerFilterLabel } from "../utils/designerFilter";
 import { openDirectoryPath } from "../utils/openDirectory";
 import { useReleasesStore } from "./releasesStore";
 import { useToastStore } from "./toastStore";
@@ -1276,7 +1277,7 @@ export const useCatalogStore = defineStore("catalog", () => {
     const scope = groupNames.length
       ? `${groupNames.length} selected model${groupNames.length === 1 ? "" : "s"}`
       : designerFilter.value
-        ? `every ${designerFilter.value} model`
+        ? `every ${designerFilterLabel(designerFilter.value)} model`
         : "the whole catalog";
     const confirmed = await confirm(
       `Compress ${dirs.length} folder${dirs.length === 1 ? "" : "s"} — ${scope} — into pack archives?\n\n` +

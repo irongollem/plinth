@@ -383,7 +383,7 @@
             class="px-2 pt-1 pb-1.5 font-mono text-[10px] tracking-wide text-base-content/40 uppercase"
           >
             Library actions<span v-if="designerFilter">
-              · {{ designerFilter }}</span
+              · {{ designerFilterLabel(designerFilter) }}</span
             >
           </div>
           <button
@@ -436,8 +436,10 @@ import { storeToRefs } from "pinia";
 import NumberInput from "../NumberInput.vue";
 import { useCatalogStore } from "../../stores/catalogStore";
 import { formatFileSize } from "../../utils/format";
-
-const UNIDENTIFIED_DESIGNER_FILTER = "__plinth_unidentified_designer__";
+import {
+  designerFilterLabel,
+  UNIDENTIFIED_DESIGNER_FILTER,
+} from "../../utils/designerFilter";
 
 const store = useCatalogStore();
 const {

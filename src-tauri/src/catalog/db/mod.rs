@@ -61,6 +61,7 @@ pub(crate) use geometry::known_hash;
 pub(crate) use schema::test_init;
 pub use search::{
     designers_for_browse, list_releases_for_browse, list_tags_for_browse, search, search_groups,
+    UNIDENTIFIED_DESIGNER_FILTER,
 };
 // designers/list_releases/list_tags are reached externally only through their
 // _for_browse wrappers; GroupPage/SearchPage are returned but never named by

@@ -18,7 +18,8 @@
             >.</template
           >
           <template v-else-if="designerFilter">
-            Planning only for <b>{{ designerFilter }}</b> (the toolbar
+            Planning only for
+            <b>{{ designerFilterLabel(designerFilter) }}</b> (the toolbar
             filter).</template
           >
         </p>
@@ -210,6 +211,7 @@
 import { storeToRefs } from "pinia";
 import ModalView from "../ModalView.vue";
 import { useCatalogStore } from "../../stores/catalogStore";
+import { designerFilterLabel } from "../../utils/designerFilter";
 
 const store = useCatalogStore();
 const {

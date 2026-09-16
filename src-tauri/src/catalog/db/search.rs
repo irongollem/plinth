@@ -11,6 +11,22 @@ use super::groups::cover_preview;
 /// for "all designers".
 pub const UNIDENTIFIED_DESIGNER_FILTER: &str = "__plinth_unidentified_designer__";
 
+/// The designer facet as a SQL predicate over `m`/`u`, plus whether it
+/// still needs the name bound to its `?`.
+///
+/// The unidentified bucket arrives as a filter VALUE rather than a name,
+/// so any caller comparing designers literally matches zero rows for it —
+/// which is how the pack, render and cleanup scopes came to resolve to
+/// nothing while the grid showed models. Everything that filters by
+/// designer goes through here.
+pub(super) fn designer_clause(name: &str) -> (&'static str, bool) {
+    if name == UNIDENTIFIED_DESIGNER_FILTER {
+        ("NULLIF(COALESCE(u.designer, m.designer), '') IS NULL", false)
+    } else {
+        ("lower(COALESCE(u.designer, m.designer, '')) = lower(?)", true)
+    }
+}
+
 /// Build a trigram FTS query: each word becomes a quoted substring match,
 /// ANDed. Punctuation is stripped to mirror the indexed normalization, and
 /// sub-trigram (<3 char) words are dropped — trigram can't match them, so
@@ -403,12 +419,8 @@ pub fn search_groups(
     // The designer facet narrows to one designer exactly (the dropdown
     // offers only names that exist), unlike the fuzzy FTS query
     if let Some(name) = designer.map(str::trim).filter(|d| !d.is_empty()) {
-        let unidentified = name == UNIDENTIFIED_DESIGNER_FILTER;
-        let clause = if unidentified {
-            "NULLIF(COALESCE(u.designer, m.designer), '') IS NULL"
-        } else {
-            "lower(COALESCE(u.designer, m.designer)) = lower(?)"
-        };
+        let (clause, binds_name) = designer_clause(name);
+        let unidentified = !binds_name;
         where_sql = if where_sql.is_empty() {
             format!("WHERE {}", clause)
         } else {

@@ -642,8 +642,12 @@ pub fn render_scope_groups(
     );
     let mut bound: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
     if let Some(name) = designer.map(str::trim).filter(|d| !d.is_empty()) {
-        sql.push_str(" AND lower(COALESCE(u.designer, m.designer, '')) = lower(?)");
-        bound.push(Box::new(name.to_string()));
+        let (clause, binds_name) = super::search::designer_clause(name);
+        sql.push_str(" AND ");
+        sql.push_str(clause);
+        if binds_name {
+            bound.push(Box::new(name.to_string()));
+        }
     }
     if !groups.is_empty() {
         let placeholders = vec!["lower(?)"; groups.len()].join(", ");
@@ -1577,6 +1581,20 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM model_tags", [], |row| row.get(0))
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    /// The toolbar's "⚠ Unidentified" facet is a filter value, not a
+    /// designer name — a literal match finds nothing, which left the
+    /// render, pack and cleanup scopes empty while the grid showed models.
+    #[test]
+    fn render_scope_resolves_the_unidentified_designer_facet() {
+        let mut conn = test_conn();
+        let (files, models, tags) = sample_rows();
+        replace_catalog(&mut conn, "/lib", &files, &models, &tags, &[], &[]).unwrap();
+
+        let unidentified =
+            render_scope_groups(&conn, Some(UNIDENTIFIED_DESIGNER_FILTER), &[]).unwrap();
+        assert_eq!(unidentified, vec!["Bugbear".to_string()]);
     }
 
     #[test]
