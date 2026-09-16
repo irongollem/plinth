@@ -1669,8 +1669,9 @@ export type DeleteOutcome = { succeeded: number; hard_deleted: number; errors: s
  */
 export type DeleteSummary = { dir_count: number; file_count: number; total_bytes: number }
 /**
- * One designer and how many logical models (groups) carry that name —
- * feeds the catalog's designer filter dropdown.
+ * One designer and how many logical models (groups) carry that name. An
+ * empty designer represents the first-class unidentified bucket in the
+ * catalog filter dropdown.
  */
 export type DesignerCount = { designer: string; model_count: number }
 export type DuplicateCancelledStatus = { job_id: string }
