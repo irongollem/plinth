@@ -33,6 +33,11 @@ export function useCatalogJobs() {
   onMounted(async () => {
     unlistenScan = await events.scanStatus.listen((event) => {
       scanStatus.value = event.payload;
+      // A queued scan has no start-command return to carry its id, so the
+      // id comes off the event that says it actually began — otherwise
+      // isScanning shows a Cancel button that cancels nothing.
+      if ("Started" in event.payload)
+        scanJobId.value = event.payload.Started.job_id;
       if (
         "Completed" in event.payload ||
         "Failed" in event.payload ||
@@ -44,6 +49,8 @@ export function useCatalogJobs() {
     });
     unlistenDup = await events.duplicateStatus.listen((event) => {
       dupStatus.value = event.payload;
+      if ("Started" in event.payload)
+        dupJobId.value = event.payload.Started.job_id;
       if (
         "Completed" in event.payload ||
         "Failed" in event.payload ||
@@ -56,6 +63,8 @@ export function useCatalogJobs() {
     });
     unlistenGeo = await events.geometryStatus.listen((event) => {
       geoStatus.value = event.payload;
+      if ("Started" in event.payload)
+        geoJobId.value = event.payload.Started.job_id;
       if (
         "Completed" in event.payload ||
         "Failed" in event.payload ||
@@ -143,6 +152,12 @@ export function useCatalogJobs() {
     return result;
   };
 
+  /** Scan that waits its turn rather than being refused. */
+  const queueScan = async (root: string) => {
+    scanStatus.value = null;
+    return await commands.queueCatalogScan(root);
+  };
+
   const startDuplicateScan = async () => {
     dupStatus.value = null;
     const result = await commands.startDuplicateScan();
@@ -175,6 +190,7 @@ export function useCatalogJobs() {
     scanError,
     scanCompletedCount,
     startScan,
+    queueScan,
     cancelScan,
     isFindingDuplicates,
     dupProgress,

@@ -2,6 +2,7 @@ pub mod commands;
 pub mod db;
 pub mod dups;
 pub mod geometry;
+pub mod jobs;
 pub mod layout;
 pub mod normalize;
 pub mod pack;

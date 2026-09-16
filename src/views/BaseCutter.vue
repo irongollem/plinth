@@ -2032,13 +2032,15 @@ const exportToCatalog = async () => {
       return;
     }
     const summary = result.data;
-    // Kick a rescan of the destination root so the new bases show up
-    // without a manual rescan — a failure here doesn't undo the copy, it
-    // just means the catalog view is stale until the next scan.
-    const scanResult = await commands.startCatalogScan(exportRoot.value);
+    // Queue a rescan of the destination root so the new bases show up
+    // without a manual rescan — it waits out any catalog job already
+    // running rather than being turned away. A failure here doesn't undo
+    // the copy, it just means the catalog view is stale until the next
+    // scan.
+    const scanResult = await commands.queueCatalogScan(exportRoot.value);
     if (scanResult.status === "error") {
       toastStore.reportError(
-        `Added to catalog at ${summary.release_dir}, but the rescan didn't start`,
+        `Added to catalog at ${summary.release_dir}, but the rescan wasn't queued`,
         scanResult.error,
       );
       return;

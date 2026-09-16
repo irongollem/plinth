@@ -53,13 +53,7 @@ pub use packing::{
     pack_candidate_dirs, packed_model_dirs,
 };
 
-/// Open the catalog and install feature-local indexes that are independent
-/// of the versioned schema migrations.
-pub fn open(db_path: &std::path::Path) -> Result<rusqlite::Connection, crate::error::AppError> {
-    let conn = schema::open(db_path)?;
-    ownership::ensure_content_hash_index(&conn)?;
-    Ok(conn)
-}
+pub use schema::open;
 
 #[cfg(test)]
 pub(crate) use geometry::known_hash;
