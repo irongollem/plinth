@@ -16,6 +16,7 @@ use tauri::{AppHandle, Manager};
 use tauri_specta::Event;
 
 use super::jobs::{self, JobKind};
+use super::paths;
 use super::{
     db, dups, geometry, normalize, pack, scanner, BatchOutcome, CatalogEntry, CatalogFile,
     CatalogGroupResult, CatalogSearchResult, CatalogStats, DesignerCount, DuplicateGroup,
@@ -37,18 +38,13 @@ pub(crate) fn open_db(app_handle: &AppHandle) -> Result<Connection, AppError> {
     db::open(&db_path(app_handle)?)
 }
 
-/// Trailing-separator-insensitive form of a root path — must agree with the
-/// scoping in db::replace_catalog or the same folder scans as two roots.
+/// Canonical form of a root path — must agree with the scoping in
+/// db::replace_catalog or the same folder scans as two roots.
 /// pub(crate): basecutter::commands::export_cuts_to_catalog reuses this to
-/// check its `root` argument against the same normalized catalog_roots list,
-/// rather than growing a second trimming convention.
+/// check its `root` argument against the same normalized catalog_roots
+/// list, rather than growing a second trimming convention.
 pub(crate) fn normalized_root(path: &str) -> String {
-    let trimmed = path.trim_end_matches(std::path::MAIN_SEPARATOR);
-    if trimmed.is_empty() {
-        path.to_string()
-    } else {
-        trimmed.to_string()
-    }
+    paths::normalize_root(path)
 }
 
 /// The configured roots list, normalized. Settings migration (single
@@ -1810,10 +1806,7 @@ pub async fn delete_duplicate_files(
 /// (case folding never, but verbatim prefixes and trailing separators yes)
 /// would disagree with SQL at the edges.
 fn path_within(child: &str, parent: &str) -> bool {
-    child == parent
-        || child
-            .strip_prefix(parent)
-            .is_some_and(|rest| rest.starts_with(std::path::MAIN_SEPARATOR))
+    paths::is_under(child, parent)
 }
 
 /// Dedupe a dir list and drop entries nested under another entry — every

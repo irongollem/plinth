@@ -6,6 +6,7 @@ pub mod jobs;
 pub mod layout;
 pub mod normalize;
 pub mod pack;
+pub mod paths;
 pub mod scanner;
 pub mod sidecar;
 pub mod stl_facts;

@@ -7,7 +7,7 @@ use std::sync::Mutex;
 
 use super::ingest::rebuild_fts;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// Databases this process has already brought up to date. Schema work is
 /// DDL, which takes SQLite's write lock — running it from every open put
@@ -457,6 +457,26 @@ pub(super) fn init_schema(conn: &Connection) -> Result<(), AppError> {
         .map_err(|e| AppError::ConfigError(format!("Failed to create trigram FTS: {}", e)))?;
         rebuild_fts(conn)
             .map_err(|e| AppError::ConfigError(format!("Failed to rebuild FTS: {}", e)))?;
+    }
+
+    // v8: root stamps written as a bare drive ("Z:") by versions that
+    // trimmed the trailing separator. That spelling is drive-RELATIVE, so
+    // those rows no longer answer to the absolute root they belong to and
+    // a rescan would leave them stranded instead of replacing them.
+    if version < 8 {
+        for table in ["files", "models"] {
+            conn.execute(
+                &format!(
+                    "UPDATE {} SET root = root || '\' WHERE length(root) = 2
+                     AND substr(root, 2, 1) = ':'",
+                    table
+                ),
+                [],
+            )
+            .map_err(|e| {
+                AppError::ConfigError(format!("Failed to repair {} root stamps: {}", table, e))
+            })?;
+        }
     }
 
     super::ownership::ensure_content_hash_index(conn)?;

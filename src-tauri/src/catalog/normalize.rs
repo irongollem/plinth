@@ -103,14 +103,7 @@ fn member_rows(conn: &Connection, group: Option<&str>) -> Result<Vec<MemberRow>,
     Ok(rows)
 }
 
-/// `child` is `base` itself or lies beneath it (path-segment aware —
-/// "/lib/ab" is NOT under "/lib/a").
-pub(crate) fn is_under(child: &str, base: &str) -> bool {
-    child == base
-        || (child.len() > base.len()
-            && child.starts_with(base)
-            && child[base.len()..].starts_with(MAIN_SEPARATOR))
-}
+pub(crate) use super::paths::is_under;
 
 fn common_ancestor(dirs: &[&str]) -> Option<PathBuf> {
     let mut iter = dirs.iter();
