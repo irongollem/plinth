@@ -39,9 +39,9 @@ pub use ingest::{
     purge_root, rebuild_search_index, replace_catalog, root_scan_times, root_summary, stats,
 };
 pub use meta::{
-    dismiss_base_suggestion, list_nsfw_designers, rename_designer, rename_release,
-    set_designer_nsfw, set_measured, set_models_nsfw, set_rotation, update_model_facets,
-    update_model_user_meta,
+    apply_inferred_designers, dismiss_base_suggestion, list_nsfw_designers, rename_designer, rename_release,
+    set_designer_nsfw, set_measured, set_models_nsfw, set_rotation, unidentified_models,
+    update_model_facets, update_model_user_meta,
 };
 // set_model_preview is reached externally only through set_preview's dispatch,
 // not called by its own name — kept public for API parity with pre-split db.rs.

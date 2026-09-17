@@ -711,7 +711,17 @@ pub(crate) fn alnum_key(text: &str) -> String {
 /// The first `designers`-listed studio named by any ancestor segment of
 /// `dir_path` — a fallback designer for trees with no release.json to state
 /// it outright. The list comes from settings (seeded with DEFAULT_DESIGNERS).
-fn infer_designer(root: &Path, dir_path: &str, designers: &[String]) -> Option<String> {
+///
+/// `root` stops the walk, so a studio name sitting above the catalog
+/// folder (a home directory, a mount point) never claims everything under
+/// it. A row whose root is unknown — pre-multi-root, or moved between
+/// folders — walks to the top instead, which is the same answer the
+/// scanner gave when that row was indexed.
+pub(crate) fn designer_from_path(
+    root: Option<&Path>,
+    dir_path: &str,
+    designers: &[String],
+) -> Option<String> {
     let mut current = Some(Path::new(dir_path));
     while let Some(dir) = current {
         if let Some(segment) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) {
@@ -720,12 +730,16 @@ fn infer_designer(root: &Path, dir_path: &str, designers: &[String]) -> Option<S
                 return Some(hit.clone());
             }
         }
-        if dir == root {
+        if Some(dir) == root {
             break;
         }
         current = dir.parent();
     }
     None
+}
+
+fn infer_designer(root: &Path, dir_path: &str, designers: &[String]) -> Option<String> {
+    designer_from_path(Some(root), dir_path, designers)
 }
 
 /// "galeb_duhr" reads like a filename; "galeb duhr" reads like a name.

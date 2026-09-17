@@ -65,6 +65,69 @@ pub fn rename_designer(
     Ok(changed as u32)
 }
 
+/// Models the scanner could not name a designer for: no model.json, no
+/// release.json, and no lexicon hit when they were indexed.
+///
+/// `models.designer` holds the RESOLVED value with no record of where it
+/// came from, so a row that already has one cannot be told apart from a
+/// metadata-stated one and is left alone. Reclassification is therefore
+/// additive: it fills blanks, and never revisits a call an earlier scan
+/// made. Each row's root rides along because it bounds the ancestor walk.
+pub fn unidentified_models(conn: &Connection) -> Result<Vec<(String, Option<String>)>, AppError> {
+    let map_err =
+        |e: rusqlite::Error| AppError::ConfigError(format!("Unidentified lookup failed: {e}"));
+    let mut stmt = conn
+        .prepare(
+            "SELECT dir_path, root FROM models
+             WHERE NULLIF(TRIM(COALESCE(designer, '')), '') IS NULL",
+        )
+        .map_err(map_err)?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(map_err)?;
+    Ok(rows)
+}
+
+/// Write designers inferred from already-indexed paths.
+///
+/// Writes `models.designer` — the scanner's slot — not `model_user_meta`,
+/// so a user override still wins at read time and this cannot overwrite
+/// one. The WHERE clause repeats the "still blank" condition: the rows
+/// were selected before the lexicon ran, and a scan finishing in between
+/// may have named some of them properly.
+///
+/// Designer is part of the FTS tags column, so each changed row's search
+/// entry is refreshed — one row at a time rather than rebuilding an index
+/// the other models' entries are still correct in.
+pub fn apply_inferred_designers(
+    conn: &mut Connection,
+    assignments: &[(String, String)],
+) -> Result<u32, AppError> {
+    let map_err = |e: rusqlite::Error| {
+        AppError::ConfigError(format!("Designer reclassification failed: {e}"))
+    };
+    let tx = conn.transaction().map_err(map_err)?;
+    let mut changed = 0u32;
+    {
+        let mut stmt = tx
+            .prepare(
+                "UPDATE models SET designer = ?2
+                 WHERE dir_path = ?1
+                   AND NULLIF(TRIM(COALESCE(designer, '')), '') IS NULL",
+            )
+            .map_err(map_err)?;
+        for (dir_path, designer) in assignments {
+            if stmt.execute(params![dir_path, designer]).map_err(map_err)? > 0 {
+                changed += 1;
+                refresh_fts_row(&tx, dir_path).map_err(map_err)?;
+            }
+        }
+    }
+    tx.commit().map_err(map_err)?;
+    Ok(changed)
+}
+
 /// Rename one release/collection within a designer. Release labels are not
 /// globally unique, so the designer scope prevents an identically named
 /// collection from another studio being changed with it.
@@ -303,6 +366,121 @@ mod tests {
     use crate::catalog::db::*;
     use crate::catalog::db::test_util::*;
     use crate::catalog::ModelRow;
+
+    /// The cleanup loop #39 describes: a studio's folders were indexed
+    /// before anyone told Plinth the studio existed.
+    #[test]
+    fn reclassification_fills_blanks_and_leaves_everything_else_alone() {
+        let mut conn = test_conn();
+        let models = vec![
+            // unidentified: the scanner had no lexicon entry for Dungeon Masters Stash
+            model_row("/lib/dungeon_masters_stash/newt", "Giant Newt"),
+            // already named by a release.json — not ours to revisit
+            ModelRow {
+                designer: Some("DTL".into()),
+                ..model_row("/lib/dungeon_masters_stash/bugbear", "Bugbear")
+            },
+            // no studio anywhere in its path
+            model_row("/lib/loose/ghoul", "Ghoul"),
+        ];
+        replace_catalog(&mut conn, "/lib", &[], &models, &[], &[], &[]).unwrap();
+
+        let pending = unidentified_models(&conn).unwrap();
+        assert_eq!(pending.len(), 2, "the DTL row is not a candidate");
+
+        // Punctuation and underscores must not block the match: the folder
+        // is dungeon_masters_stash, the lexicon entry has spaces.
+        let assignments: Vec<(String, String)> = pending
+            .into_iter()
+            .filter_map(|(dir, root)| {
+                crate::catalog::scanner::designer_from_path(
+                    root.as_deref().map(std::path::Path::new),
+                    &dir,
+                    &["Dungeon Masters Stash".to_string()],
+                )
+                .map(|d| (dir, d))
+            })
+            .collect();
+        assert_eq!(apply_inferred_designers(&mut conn, &assignments).unwrap(), 1);
+
+        let designer_of = |dir: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT designer FROM models WHERE dir_path = ?1",
+                [dir],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            designer_of("/lib/dungeon_masters_stash/newt").as_deref(),
+            Some("Dungeon Masters Stash")
+        );
+        assert_eq!(designer_of("/lib/dungeon_masters_stash/bugbear").as_deref(), Some("DTL"));
+        assert_eq!(designer_of("/lib/loose/ghoul"), None);
+
+        // the facet the toolbar reads reflects it without a rescan: one
+        // model moved out of the unidentified bucket and into the studio
+        let facets = designers(&conn).unwrap();
+        let count_for = |name: &str| {
+            facets
+                .iter()
+                .find(|d| d.designer == name)
+                .map(|d| d.model_count)
+                .unwrap_or(0)
+        };
+        assert_eq!(count_for("Dungeon Masters Stash"), 1);
+        assert_eq!(count_for("DTL"), 1);
+        assert_eq!(count_for(""), 1, "only the genuinely unnamed model is left");
+
+        // and the search index carries the new designer, which lives in
+        // the FTS tags column rather than a column of its own
+        let page = search(
+            &conn, "Dungeon Masters Stash", &[], None, None, None, None, 10, 0, true, None, None,
+        )
+        .unwrap();
+        assert!(page
+            .entries
+            .iter()
+            .any(|e| e.dir_path == "/lib/dungeon_masters_stash/newt"));
+    }
+
+    /// A user who typed a designer onto an unidentified model has said
+    /// something the lexicon has no business contradicting.
+    #[test]
+    fn reclassification_never_outranks_a_user_override() {
+        let mut conn = test_conn();
+        let models = vec![model_row("/lib/dtl/newt", "Giant Newt")];
+        replace_catalog(&mut conn, "/lib", &[], &models, &[], &[], &[]).unwrap();
+        // positional: designer is the 6th facet (see the signature)
+        update_model_user_meta(
+            &conn,
+            "/lib/dtl/newt",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("Hand Typed".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let changed = apply_inferred_designers(
+            &mut conn,
+            &[("/lib/dtl/newt".to_string(), "DTL".to_string())],
+        )
+        .unwrap();
+        assert_eq!(changed, 1, "the scanner's own slot was blank and is filled");
+
+        // …but what the catalog SHOWS is still the user's word
+        let page = search(&conn, "newt", &[], None, None, None, None, 10, 0, true, None, None)
+            .unwrap();
+        assert_eq!(page.entries[0].designer.as_deref(), Some("Hand Typed"));
+    }
 
     #[test]
     fn nsfw_flag_and_designer_rule_hide_from_browse_but_not_data_ops() {
