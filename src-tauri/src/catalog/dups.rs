@@ -346,9 +346,11 @@ pub fn merge_duplicates(
     Ok((merged, errors))
 }
 
-/// Whether the volume holding `path` lets us create hardlinks — answered by
-/// making one, not by guessing from filesystem names: NAS mounts route the
-/// operation through a network protocol whose support is config-dependent.
+/// Whether the volume holding `path` lets us create hardlinks — answered
+/// by making one, not by guessing from filesystem names: NAS mounts route
+/// the operation through a network protocol whose support is
+/// config-dependent. The storage probe reports the same answer with the
+/// volume's reason attached.
 pub fn supports_links(path: &Path) -> bool {
     let dir = if path.is_dir() {
         path
@@ -358,13 +360,7 @@ pub fn supports_links(path: &Path) -> bool {
             None => return false,
         }
     };
-    let base = dir.join(format!(".plinth-probe-{}", std::process::id()));
-    let link = dir.join(format!(".plinth-probe-{}.link", std::process::id()));
-    let supported =
-        std::fs::write(&base, b"probe").is_ok() && std::fs::hard_link(&base, &link).is_ok();
-    std::fs::remove_file(&link).ok();
-    std::fs::remove_file(&base).ok();
-    supported
+    super::storage_probe::hardlink_support(dir).is_ok()
 }
 
 fn is_stl(path: &Path) -> bool {

@@ -37,6 +37,77 @@
         >
       </div>
 
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          >STORAGE CHECK — WHAT A FOLDER'S DRIVE ACTUALLY SUPPORTS</span
+        >
+        <div
+          class="flex flex-col gap-2 bg-base-200 border border-base-content/10 rounded-lg p-2.5"
+        >
+          <div class="flex flex-wrap items-center gap-1.5">
+            <button
+              v-for="root in catalogRoots"
+              :key="root"
+              type="button"
+              class="btn btn-xs font-mono text-[11px]"
+              :disabled="probing"
+              @click="runStorageProbe(root)"
+            >
+              {{ root }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-xs btn-ghost font-mono text-[11px]"
+              :disabled="probing"
+              @click="pickAndProbe"
+            >
+              + other folder…
+            </button>
+          </div>
+          <div
+            v-if="probing"
+            class="flex items-center gap-2 font-mono text-[11px] text-base-content/50"
+          >
+            <span class="loading loading-spinner loading-xs"></span>
+            checking {{ probingPath }}…
+          </div>
+          <template v-if="probeReport">
+            <div class="font-mono text-[10.5px] text-base-content/50 break-all">
+              {{ probeReport.path }}
+            </div>
+            <div
+              v-for="check in probeReport.checks"
+              :key="check.id"
+              class="flex gap-2 text-[11px] items-baseline"
+            >
+              <span
+                class="font-mono shrink-0 w-[4.5rem]"
+                :class="probeStatusClass(check.status)"
+                >{{ probeStatusLabel(check.status) }}</span
+              >
+              <span class="font-medium shrink-0 w-[8.5rem]">{{
+                check.label
+              }}</span>
+              <span class="text-base-content/60">{{ check.detail }}</span>
+            </div>
+            <button
+              type="button"
+              class="btn btn-xs self-start"
+              @click="copyProbeReport"
+            >
+              Copy report
+            </button>
+          </template>
+        </div>
+        <p class="text-[10.5px] text-base-content/40">
+          Runs the real operations in a temporary folder and removes them again.
+          A network share can refuse things a local disk allows — and the same
+          share can answer differently from Windows — so this asks the drive
+          rather than guessing from the path.
+        </p>
+      </div>
+
       <div v-if="ignoredFolders.length" class="flex flex-col gap-1.5">
         <span
           class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
@@ -475,10 +546,25 @@
             />
           </form>
         </div>
+        <button
+          type="button"
+          class="btn btn-xs self-start"
+          :disabled="reclassifying"
+          @click="
+            applyDesignersToExisting('No unidentified models match this list')
+          "
+        >
+          <span
+            v-if="reclassifying"
+            class="loading loading-spinner loading-xs"
+          ></span>
+          Apply to existing models
+        </button>
         <p class="text-[10.5px] text-base-content/40">
           Infers a model's designer from its folder path when there's no release
-          metadata. Matching ignores case, spaces and punctuation. Applies on
-          the next scan.
+          metadata. Matching ignores case, spaces and punctuation. Adding one
+          names matching models that have no designer yet — models an earlier
+          scan already named are left alone.
         </p>
       </div>
 
@@ -854,8 +940,10 @@ import { computed, onActivated, onMounted, ref, watch } from "vue";
 import {
   type IgnoredFolder,
   type NsfwAccessState,
+  type ProbeStatus,
   type Settings,
   type SigningKeyInfo,
+  type StorageReport,
   commands,
 } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
@@ -915,17 +1003,101 @@ const addUnique = <T>(
   isDuplicate: (existing: T) => boolean,
 ): T[] => (list.some(isDuplicate) ? list : [...list, item]);
 
+/* Storage check (#41): what a folder's drive supports, answered by doing
+   it. The same NAS share can refuse hardlinks from one client and allow
+   them from another, so the report names the volume it came from and is
+   copyable — a Windows run and a macOS run of the same share are the
+   comparison worth having. */
+const probeReport = ref<StorageReport | null>(null);
+const probing = ref(false);
+const probingPath = ref("");
+
+const runStorageProbe = async (path: string) => {
+  probing.value = true;
+  probingPath.value = path;
+  const result = await commands.probeStorage(path);
+  probing.value = false;
+  if (result.status === "error") {
+    probeReport.value = null;
+    toastStore.reportError("Storage check failed", result.error);
+    return;
+  }
+  probeReport.value = result.data;
+};
+
+const pickAndProbe = async () => {
+  const dir = await selectDirectory({ title: "Check a folder's storage" });
+  if (dir) await runStorageProbe(dir);
+};
+
+const probeStatusLabel = (status: ProbeStatus) =>
+  ({ Ok: "ok", Warn: "note", Unsupported: "no", Failed: "fail" })[status];
+
+const probeStatusClass = (status: ProbeStatus) =>
+  ({
+    Ok: "text-success",
+    Warn: "text-warning",
+    Unsupported: "text-warning",
+    Failed: "text-error",
+  })[status];
+
+const copyProbeReport = async () => {
+  const report = probeReport.value;
+  if (!report) return;
+  const lines = [
+    `Plinth storage check — ${report.path}`,
+    ...report.checks.map(
+      (c) => `${probeStatusLabel(c.status)}\t${c.label}\t${c.detail}`,
+    ),
+  ].join("\n");
+  await navigator.clipboard.writeText(lines);
+  toastStore.addToast("Storage report copied", "success", 3000);
+};
+
 /* The scanner's designer lexicon, editable here; seeded server-side with
    sensible defaults. Mutating the array triggers the deep-watch auto-save. */
 const newDesigner = ref("");
-const addDesigner = () => {
+const addDesigner = async () => {
   const name = newDesigner.value.trim();
   newDesigner.value = "";
   if (!name) return;
-  settings.value.known_designers = addUnique(
-    settings.value.known_designers ?? [],
+  const before = settings.value.known_designers ?? [];
+  const after = addUnique(
+    before,
     name,
     (d) => d.toLowerCase() === name.toLowerCase(),
+  );
+  if (after === before) return;
+  settings.value.known_designers = after;
+
+  // Save before reclassifying: the backend reads the lexicon from
+  // settings, so the debounced auto-save would otherwise race it and the
+  // new studio would be missing from the list it matches against. A save
+  // that failed means the studio isn't persisted yet, and reclassifying
+  // against the old list would report "no matches" — which reads as an
+  // answer rather than as the failure it is.
+  if (!(await saveSettings())) return;
+  await applyDesignersToExisting(`No unidentified models match "${name}" yet`);
+};
+
+/* Adding a studio is the usual trigger, but the catalog can be busy — a
+   scan holds the write permit, and the refusal would otherwise strand the
+   new studio until someone thought to rescan. This is also the button for
+   running it again afterwards. */
+const reclassifying = ref(false);
+const applyDesignersToExisting = async (emptyMessage: string) => {
+  reclassifying.value = true;
+  const result = await commands.reclassifyDesigners();
+  reclassifying.value = false;
+  if (result.status === "error") {
+    toastStore.reportError("Couldn't name existing models", result.error);
+    return;
+  }
+  toastStore.addToast(
+    result.data
+      ? `Named ${result.data} previously unidentified model${result.data === 1 ? "" : "s"} — no rescan needed`
+      : emptyMessage,
+    result.data ? "success" : "info",
   );
 };
 const removeDesigner = (name: string) => {
@@ -1399,12 +1571,13 @@ const saveSettings = async () => {
     const result = await commands.setSettings(payload);
     if (result.status === "ok") {
       toastStore.addToast("Settings saved successfully", "success", 3000);
+      return true;
     }
-    if (result.status === "error") {
-      toastStore.reportError("Failed to save settings", result.error);
-    }
+    toastStore.reportError("Failed to save settings", result.error);
+    return false;
   } catch (error) {
     toastStore.reportError("Error saving settings", error);
+    return false;
   }
 };
 </script>

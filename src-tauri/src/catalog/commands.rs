@@ -17,6 +17,7 @@ use tauri_specta::Event;
 
 use super::jobs::{self, JobKind};
 use super::paths;
+use super::storage_probe;
 use super::{
     db, dups, geometry, normalize, pack, scanner, BatchOutcome, CatalogEntry, CatalogFile,
     CatalogGroupResult, CatalogSearchResult, CatalogStats, DesignerCount, DuplicateGroup,
@@ -1350,6 +1351,58 @@ pub async fn get_catalog_designers(
     .map_err(|e| AppError::ConfigError(format!("Designer listing task failed: {}", e)))?
 }
 
+/// Apply the current designer lexicon to models the scanner left
+/// unidentified, from the indexed paths alone.
+///
+/// Adding a studio to `known_designers` used to reach existing rows only
+/// through a full rescan: a filesystem walk, a stat per file, a catalog
+/// replacement and an FTS rebuild, to answer a question the index already
+/// held the input for. On a 500k-file library that is the difference
+/// between a folder-naming fix costing seconds and costing an afternoon.
+///
+/// Additive by design — see db::unidentified_models for why a designer an
+/// earlier scan resolved is never revisited.
+#[tauri::command]
+#[specta::specta]
+pub async fn reclassify_designers(app_handle: AppHandle) -> Result<u32, AppError> {
+    let settings = crate::settings::get_settings(app_handle.clone())
+        .await
+        .map_err(AppError::ConfigError)?;
+    let designers = settings
+        .known_designers
+        .clone()
+        .filter(|list| !list.is_empty())
+        .unwrap_or_else(crate::settings::default_designers);
+
+    // Rows indexed before multi-root carry no root of their own. Falling
+    // back to "no bound" would let a studio named somewhere above the
+    // catalog folder — a home directory, a mount point — claim every model
+    // under it, which is not what the scanner would have done: it always
+    // had a root. The configured roots supply the missing bound.
+    let roots = normalized_roots(&settings);
+
+    // Claimed like any other catalog writer: a scan running with the OLD
+    // lexicon would otherwise commit its own answers on top of these.
+    let permit = jobs::claim(JobKind::Reclassify)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        let mut conn = open_db(&app_handle)?;
+        let assignments: Vec<(String, String)> = db::unidentified_models(&conn)?
+            .into_iter()
+            .filter_map(|(dir_path, root)| {
+                let bound = root
+                    .clone()
+                    .or_else(|| roots.iter().find(|r| paths::is_under(&dir_path, r)).cloned())?;
+                scanner::designer_from_path(Some(Path::new(&bound)), &dir_path, &designers)
+                    .map(|designer| (dir_path, designer))
+            })
+            .collect();
+        db::apply_inferred_designers(&mut conn, &assignments)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Reclassification task failed: {e}")))?
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn rename_catalog_designer(
@@ -2240,6 +2293,19 @@ pub async fn merge_duplicate_files(
 }
 
 /// Probe whether the volume holding `path` supports hardlink merging.
+/// What a folder's storage actually supports, by doing it rather than
+/// guessing from the path. Written for #41: a network share's behaviour
+/// depends on the server's configuration, the client, and the mount, so
+/// the only honest answer comes from the volume itself — and it differs
+/// between a share reached from macOS and the same share from Windows.
+#[tauri::command]
+#[specta::specta]
+pub async fn probe_storage(path: String) -> Result<storage_probe::StorageReport, AppError> {
+    tauri::async_runtime::spawn_blocking(move || storage_probe::probe(Path::new(&path)))
+        .await
+        .map_err(|e| AppError::ConfigError(format!("Storage probe task failed: {e}")))?
+}
+
 /// Consulted by the duplicates panel so link-less filesystems (exFAT, some
 /// NAS mounts) get delete-only instead of a button that can't work.
 #[tauri::command]

@@ -18,6 +18,7 @@ use crate::error::AppError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
     Scan,
+    Reclassify,
     Duplicate,
     Geometry,
     Pack,
@@ -44,9 +45,11 @@ enum Access {
 impl JobKind {
     fn access(self) -> Access {
         match self {
-            JobKind::Scan | JobKind::Duplicate | JobKind::Geometry | JobKind::BatchRender => {
-                Access::WritesCatalog
-            }
+            JobKind::Scan
+            | JobKind::Reclassify
+            | JobKind::Duplicate
+            | JobKind::Geometry
+            | JobKind::BatchRender => Access::WritesCatalog,
             JobKind::Pack | JobKind::Unpack => Access::MovesBytes,
             JobKind::Extract => Access::ReadsFiles,
         }
@@ -56,6 +59,7 @@ impl JobKind {
     pub fn label(self) -> &'static str {
         match self {
             JobKind::Scan => "A catalog scan",
+            JobKind::Reclassify => "A designer reclassification",
             JobKind::Duplicate => "A duplicate scan",
             JobKind::Geometry => "A geometry scan",
             JobKind::Pack => "A pack job",
@@ -69,6 +73,7 @@ impl JobKind {
     fn retry_hint(self) -> &'static str {
         match self {
             JobKind::Scan => "rescan",
+            JobKind::Reclassify => "reclassify designers",
             JobKind::Duplicate => "scan for duplicates",
             JobKind::Geometry => "mine geometry",
             JobKind::Pack => "pack",
@@ -83,6 +88,7 @@ impl JobKind {
     fn prefix(self) -> &'static str {
         match self {
             JobKind::Scan => "scan:",
+            JobKind::Reclassify => "reclassify:",
             JobKind::Duplicate => "dup:",
             JobKind::Geometry => "geom:",
             // one prefix for both directions: they are the same exclusion
