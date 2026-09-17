@@ -10,6 +10,7 @@ pub mod paths;
 pub mod scanner;
 pub mod sidecar;
 pub mod stl_facts;
+pub mod storage_probe;
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
