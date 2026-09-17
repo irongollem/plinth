@@ -1350,6 +1350,48 @@ pub async fn get_catalog_designers(
     .map_err(|e| AppError::ConfigError(format!("Designer listing task failed: {}", e)))?
 }
 
+/// Apply the current designer lexicon to models the scanner left
+/// unidentified, from the indexed paths alone.
+///
+/// Adding a studio to `known_designers` used to reach existing rows only
+/// through a full rescan: a filesystem walk, a stat per file, a catalog
+/// replacement and an FTS rebuild, to answer a question the index already
+/// held the input for. On a 500k-file library that is the difference
+/// between a folder-naming fix costing seconds and costing an afternoon.
+///
+/// Additive by design — see db::unidentified_models for why a designer an
+/// earlier scan resolved is never revisited.
+#[tauri::command]
+#[specta::specta]
+pub async fn reclassify_designers(app_handle: AppHandle) -> Result<u32, AppError> {
+    let settings = crate::settings::get_settings(app_handle.clone())
+        .await
+        .map_err(AppError::ConfigError)?;
+    let designers = settings
+        .known_designers
+        .clone()
+        .filter(|list| !list.is_empty())
+        .unwrap_or_else(crate::settings::default_designers);
+
+    // Claimed like any other catalog writer: a scan running with the OLD
+    // lexicon would otherwise commit its own answers on top of these.
+    let permit = jobs::claim(JobKind::Reclassify)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        let mut conn = open_db(&app_handle)?;
+        let assignments: Vec<(String, String)> = db::unidentified_models(&conn)?
+            .into_iter()
+            .filter_map(|(dir_path, root)| {
+                scanner::designer_from_path(root.as_deref().map(Path::new), &dir_path, &designers)
+                    .map(|designer| (dir_path, designer))
+            })
+            .collect();
+        db::apply_inferred_designers(&mut conn, &assignments)
+    })
+    .await
+    .map_err(|e| AppError::ConfigError(format!("Reclassification task failed: {e}")))?
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn rename_catalog_designer(

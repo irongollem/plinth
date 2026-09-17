@@ -365,6 +365,27 @@ async queueCatalogScan(root: string) : Promise<Result<null, AppError>> {
 }
 },
 /**
+ * Apply the current designer lexicon to models the scanner left
+ * unidentified, from the indexed paths alone.
+ * 
+ * Adding a studio to `known_designers` used to reach existing rows only
+ * through a full rescan: a filesystem walk, a stat per file, a catalog
+ * replacement and an FTS rebuild, to answer a question the index already
+ * held the input for. On a 500k-file library that is the difference
+ * between a folder-naming fix costing seconds and costing an afternoon.
+ * 
+ * Additive by design — see db::unidentified_models for why a designer an
+ * earlier scan resolved is never revisited.
+ */
+async reclassifyDesigners() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reclassify_designers") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * The configured catalog folders with their indexed footprint. Folders the
  * user added but never scanned report zero counts and no last_scan.
  */
