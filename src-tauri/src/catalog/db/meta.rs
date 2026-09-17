@@ -97,9 +97,11 @@ pub fn unidentified_models(conn: &Connection) -> Result<Vec<(String, Option<Stri
 /// were selected before the lexicon ran, and a scan finishing in between
 /// may have named some of them properly.
 ///
-/// Designer is part of the FTS tags column, so each changed row's search
-/// entry is refreshed — one row at a time rather than rebuilding an index
-/// the other models' entries are still correct in.
+/// Designer is part of the FTS tags column, so the search index has to
+/// follow. It is rebuilt once rather than row by row: `models_fts` is an
+/// fts5 table with no index on `dir_path`, so a per-row delete scans the
+/// whole thing, and a bulk reclassification would pay that per changed
+/// model. `rename_designer` rebuilds once for the same reason.
 pub fn apply_inferred_designers(
     conn: &mut Connection,
     assignments: &[(String, String)],
@@ -120,9 +122,11 @@ pub fn apply_inferred_designers(
         for (dir_path, designer) in assignments {
             if stmt.execute(params![dir_path, designer]).map_err(map_err)? > 0 {
                 changed += 1;
-                refresh_fts_row(&tx, dir_path).map_err(map_err)?;
             }
         }
+    }
+    if changed > 0 {
+        rebuild_fts(&tx).map_err(map_err)?;
     }
     tx.commit().map_err(map_err)?;
     Ok(changed)
