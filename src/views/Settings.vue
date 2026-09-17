@@ -546,10 +546,25 @@
             />
           </form>
         </div>
+        <button
+          type="button"
+          class="btn btn-xs self-start"
+          :disabled="reclassifying"
+          @click="
+            applyDesignersToExisting('No unidentified models match this list')
+          "
+        >
+          <span
+            v-if="reclassifying"
+            class="loading loading-spinner loading-xs"
+          ></span>
+          Apply to existing models
+        </button>
         <p class="text-[10.5px] text-base-content/40">
           Infers a model's designer from its folder path when there's no release
-          metadata. Matching ignores case, spaces and punctuation. Applies on
-          the next scan.
+          metadata. Matching ignores case, spaces and punctuation. Adding one
+          names matching models that have no designer yet — models an earlier
+          scan already named are left alone.
         </p>
       </div>
 
@@ -1057,17 +1072,31 @@ const addDesigner = async () => {
 
   // Save before reclassifying: the backend reads the lexicon from
   // settings, so the debounced auto-save would otherwise race it and the
-  // new studio would be missing from the list it matches against.
-  await saveSettings();
+  // new studio would be missing from the list it matches against. A save
+  // that failed means the studio isn't persisted yet, and reclassifying
+  // against the old list would report "no matches" — which reads as an
+  // answer rather than as the failure it is.
+  if (!(await saveSettings())) return;
+  await applyDesignersToExisting(`No unidentified models match "${name}" yet`);
+};
+
+/* Adding a studio is the usual trigger, but the catalog can be busy — a
+   scan holds the write permit, and the refusal would otherwise strand the
+   new studio until someone thought to rescan. This is also the button for
+   running it again afterwards. */
+const reclassifying = ref(false);
+const applyDesignersToExisting = async (emptyMessage: string) => {
+  reclassifying.value = true;
   const result = await commands.reclassifyDesigners();
+  reclassifying.value = false;
   if (result.status === "error") {
-    toastStore.reportError("Couldn't reclassify existing models", result.error);
+    toastStore.reportError("Couldn't name existing models", result.error);
     return;
   }
   toastStore.addToast(
     result.data
       ? `Named ${result.data} previously unidentified model${result.data === 1 ? "" : "s"} — no rescan needed`
-      : `No unidentified models match "${name}" yet`,
+      : emptyMessage,
     result.data ? "success" : "info",
   );
 };
@@ -1542,12 +1571,13 @@ const saveSettings = async () => {
     const result = await commands.setSettings(payload);
     if (result.status === "ok") {
       toastStore.addToast("Settings saved successfully", "success", 3000);
+      return true;
     }
-    if (result.status === "error") {
-      toastStore.reportError("Failed to save settings", result.error);
-    }
+    toastStore.reportError("Failed to save settings", result.error);
+    return false;
   } catch (error) {
     toastStore.reportError("Error saving settings", error);
+    return false;
   }
 };
 </script>
