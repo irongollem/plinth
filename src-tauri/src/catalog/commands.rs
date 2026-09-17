@@ -101,11 +101,46 @@ async fn save_roots(
 /// Reject a root that nests inside (or swallows) a configured one — two
 /// overlapping roots would index the same dirs twice and their scoped
 /// scans would fight over the shared rows.
+/// Two paths naming one directory on disk, however they are spelled.
+///
+/// String comparison is not enough and neither is canonicalizing: on a
+/// case-folding volume — most SMB shares, and macOS by default — `Library`
+/// and `library` open the same directory, and `canonicalize` hands back
+/// whichever spelling it was given rather than correcting the case. The
+/// physical identity is the same for both, so that is what gets compared.
+fn same_folder(a: &Path, b: &Path) -> bool {
+    match (dups::file_identity(a), dups::file_identity(b)) {
+        (Some(x), Some(y)) => x == y,
+        // a volume with no identity to report, or a path that no longer
+        // exists: the string checks are all that is left
+        _ => false,
+    }
+}
+
+/// The configured root that `root` would collide with: the same folder
+/// under another spelling, one containing the other, or one contained by
+/// it. Checked by identity as well as by string, because a user adding
+/// their library a second time is far more likely to spell it differently
+/// than to spell it identically.
+fn overlapping_root(roots: &[String], root: &str) -> Option<String> {
+    let candidate = Path::new(root);
+    for configured in roots {
+        let existing = Path::new(configured);
+        if normalize::is_under(root, configured)
+            || normalize::is_under(configured, root)
+            || same_folder(candidate, existing)
+            // one inside the other, with the shared part spelled differently
+            || candidate.ancestors().any(|a| same_folder(a, existing))
+            || existing.ancestors().any(|a| same_folder(a, candidate))
+        {
+            return Some(configured.clone());
+        }
+    }
+    None
+}
+
 fn overlap_error(roots: &[String], root: &str) -> Result<(), AppError> {
-    if let Some(overlap) = roots
-        .iter()
-        .find(|r| normalize::is_under(root, r) || normalize::is_under(r, root))
-    {
+    if let Some(overlap) = overlapping_root(roots, root) {
         return Err(AppError::ConfigError(format!(
             "'{}' overlaps the configured catalog folder '{}' — the same models would be indexed twice",
             root, overlap
@@ -2310,8 +2345,8 @@ pub async fn probe_storage(path: String) -> Result<storage_probe::StorageReport,
 /// NAS mounts) get delete-only instead of a button that can't work.
 #[tauri::command]
 #[specta::specta]
-pub async fn supports_file_links(path: String) -> Result<bool, AppError> {
-    tauri::async_runtime::spawn_blocking(move || Ok(dups::supports_links(Path::new(&path))))
+pub async fn supports_file_links(path: String) -> Result<storage_probe::LinkSupport, AppError> {
+    tauri::async_runtime::spawn_blocking(move || Ok(dups::link_support(Path::new(&path))))
         .await
         .map_err(|e| AppError::ConfigError(format!("Probe task failed: {}", e)))?
 }
@@ -2446,7 +2481,10 @@ pub async fn batch_move_models(
 
 #[cfg(test)]
 mod tests {
-    use super::{consolidate_trash_units, db, path_within, top_level_dirs, Connection, HashSet};
+    use super::{
+        consolidate_trash_units, db, overlapping_root, path_within, top_level_dirs, Connection,
+        HashSet,
+    };
 
     #[test]
     fn path_within_respects_component_boundaries() {
@@ -2456,6 +2494,42 @@ mod tests {
         // deleting "newt" from also forgetting "newton"
         assert!(!path_within("/lib/newton", "/lib/newt"));
         assert!(!path_within("/lib", "/lib/newt"));
+    }
+
+    /// The same folder added twice under different spellings. On a
+    /// case-folding volume — most SMB shares, and macOS by default — the
+    /// strings differ while the directory does not, and the catalog would
+    /// index every model under it a second time.
+    #[test]
+    fn a_case_folding_volume_cannot_add_one_folder_twice() {
+        let base = std::env::temp_dir().join(format!("plinth_roots_{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::create_dir_all(base.join("Library/DTL")).unwrap();
+
+        let configured = vec![base.join("Library").to_string_lossy().into_owned()];
+        let lowercased = base.join("library").to_string_lossy().into_owned();
+
+        // Only meaningful where the volume actually folds case; a
+        // case-sensitive filesystem makes these two different folders, and
+        // then adding both is legitimate.
+        let folds_case = std::path::Path::new(&lowercased).is_dir();
+        if folds_case {
+            assert_eq!(
+                overlapping_root(&configured, &lowercased).as_deref(),
+                Some(configured[0].as_str()),
+                "the same folder, spelled differently, is not a second folder"
+            );
+            // and a child of it, reached through the other spelling
+            let nested = base.join("library/DTL").to_string_lossy().into_owned();
+            assert!(overlapping_root(&configured, &nested).is_some());
+        }
+
+        // A genuine sibling is still addable, whatever the volume does
+        std::fs::create_dir_all(base.join("Other")).unwrap();
+        let sibling = base.join("Other").to_string_lossy().into_owned();
+        assert_eq!(overlapping_root(&configured, &sibling), None);
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

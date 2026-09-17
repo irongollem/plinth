@@ -346,21 +346,34 @@ pub fn merge_duplicates(
     Ok((merged, errors))
 }
 
-/// Whether the volume holding `path` lets us create hardlinks — answered
-/// by making one, not by guessing from filesystem names: NAS mounts route
-/// the operation through a network protocol whose support is
-/// config-dependent. The storage probe reports the same answer with the
-/// volume's reason attached.
-pub fn supports_links(path: &Path) -> bool {
+/// Whether the volume holding `path` lets us create hardlinks, and what
+/// it said when it won't — answered by making one, not by guessing from
+/// filesystem names: NAS mounts route the operation through a network
+/// protocol whose support is config-dependent.
+pub fn link_support(path: &Path) -> super::storage_probe::LinkSupport {
     let dir = if path.is_dir() {
         path
     } else {
         match path.parent() {
             Some(parent) => parent,
-            None => return false,
+            None => {
+                return super::storage_probe::LinkSupport {
+                    supported: false,
+                    reason: Some("this file has no parent folder to test".into()),
+                }
+            }
         }
     };
-    super::storage_probe::hardlink_support(dir).is_ok()
+    match super::storage_probe::hardlink_support(dir) {
+        Ok(()) => super::storage_probe::LinkSupport {
+            supported: true,
+            reason: None,
+        },
+        Err(reason) => super::storage_probe::LinkSupport {
+            supported: false,
+            reason: Some(reason),
+        },
+    }
 }
 
 fn is_stl(path: &Path) -> bool {
@@ -559,7 +572,7 @@ mod tests {
         assert_eq!(again.len(), 1);
         assert!(again_errors.is_empty());
 
-        assert!(supports_links(&keep));
+        assert!(link_support(&keep).supported);
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -67,6 +67,20 @@ fn check(id: &str, label: &str, status: ProbeStatus, detail: impl Into<String>) 
     }
 }
 
+/// Whether merging is available on a volume, and what the volume said
+/// when it is not.
+///
+/// The reason is the point. "This drive can't merge files" leaves a user
+/// with nowhere to go; the same message carrying `Operation not supported
+/// (os error 45)` is something they can search, report, or compare
+/// against the same share seen from another machine — which is exactly
+/// the comparison #41 turns on.
+#[derive(Serialize, Deserialize, Debug, Clone, Type)]
+pub struct LinkSupport {
+    pub supported: bool,
+    pub reason: Option<String>,
+}
+
 /// Whether this volume can hardlink, and the reason when it cannot.
 ///
 /// The bool form is what the duplicates panel asks for; the error is what
