@@ -37,6 +37,77 @@
         >
       </div>
 
+      <div class="flex flex-col gap-1.5">
+        <span
+          class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
+          >STORAGE CHECK — WHAT A FOLDER'S DRIVE ACTUALLY SUPPORTS</span
+        >
+        <div
+          class="flex flex-col gap-2 bg-base-200 border border-base-content/10 rounded-lg p-2.5"
+        >
+          <div class="flex flex-wrap items-center gap-1.5">
+            <button
+              v-for="root in catalogRoots"
+              :key="root"
+              type="button"
+              class="btn btn-xs font-mono text-[11px]"
+              :disabled="probing"
+              @click="runStorageProbe(root)"
+            >
+              {{ root }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-xs btn-ghost font-mono text-[11px]"
+              :disabled="probing"
+              @click="pickAndProbe"
+            >
+              + other folder…
+            </button>
+          </div>
+          <div
+            v-if="probing"
+            class="flex items-center gap-2 font-mono text-[11px] text-base-content/50"
+          >
+            <span class="loading loading-spinner loading-xs"></span>
+            checking {{ probingPath }}…
+          </div>
+          <template v-if="probeReport">
+            <div class="font-mono text-[10.5px] text-base-content/50 break-all">
+              {{ probeReport.path }}
+            </div>
+            <div
+              v-for="check in probeReport.checks"
+              :key="check.id"
+              class="flex gap-2 text-[11px] items-baseline"
+            >
+              <span
+                class="font-mono shrink-0 w-[4.5rem]"
+                :class="probeStatusClass(check.status)"
+                >{{ probeStatusLabel(check.status) }}</span
+              >
+              <span class="font-medium shrink-0 w-[8.5rem]">{{
+                check.label
+              }}</span>
+              <span class="text-base-content/60">{{ check.detail }}</span>
+            </div>
+            <button
+              type="button"
+              class="btn btn-xs self-start"
+              @click="copyProbeReport"
+            >
+              Copy report
+            </button>
+          </template>
+        </div>
+        <p class="text-[10.5px] text-base-content/40">
+          Runs the real operations in a temporary folder and removes them again.
+          A network share can refuse things a local disk allows — and the same
+          share can answer differently from Windows — so this asks the drive
+          rather than guessing from the path.
+        </p>
+      </div>
+
       <div v-if="ignoredFolders.length" class="flex flex-col gap-1.5">
         <span
           class="font-mono font-semibold text-[10px] tracking-widest text-base-content/40"
@@ -854,8 +925,10 @@ import { computed, onActivated, onMounted, ref, watch } from "vue";
 import {
   type IgnoredFolder,
   type NsfwAccessState,
+  type ProbeStatus,
   type Settings,
   type SigningKeyInfo,
+  type StorageReport,
   commands,
 } from "../bindings.ts";
 import FileSelect from "../components/FileSelect.vue";
@@ -914,6 +987,57 @@ const addUnique = <T>(
   item: T,
   isDuplicate: (existing: T) => boolean,
 ): T[] => (list.some(isDuplicate) ? list : [...list, item]);
+
+/* Storage check (#41): what a folder's drive supports, answered by doing
+   it. The same NAS share can refuse hardlinks from one client and allow
+   them from another, so the report names the volume it came from and is
+   copyable — a Windows run and a macOS run of the same share are the
+   comparison worth having. */
+const probeReport = ref<StorageReport | null>(null);
+const probing = ref(false);
+const probingPath = ref("");
+
+const runStorageProbe = async (path: string) => {
+  probing.value = true;
+  probingPath.value = path;
+  const result = await commands.probeStorage(path);
+  probing.value = false;
+  if (result.status === "error") {
+    probeReport.value = null;
+    toastStore.reportError("Storage check failed", result.error);
+    return;
+  }
+  probeReport.value = result.data;
+};
+
+const pickAndProbe = async () => {
+  const dir = await selectDirectory({ title: "Check a folder's storage" });
+  if (dir) await runStorageProbe(dir);
+};
+
+const probeStatusLabel = (status: ProbeStatus) =>
+  ({ Ok: "ok", Warn: "note", Unsupported: "no", Failed: "fail" })[status];
+
+const probeStatusClass = (status: ProbeStatus) =>
+  ({
+    Ok: "text-success",
+    Warn: "text-warning",
+    Unsupported: "text-warning",
+    Failed: "text-error",
+  })[status];
+
+const copyProbeReport = async () => {
+  const report = probeReport.value;
+  if (!report) return;
+  const lines = [
+    `Plinth storage check — ${report.path}`,
+    ...report.checks.map(
+      (c) => `${probeStatusLabel(c.status)}\t${c.label}\t${c.detail}`,
+    ),
+  ].join("\n");
+  await navigator.clipboard.writeText(lines);
+  toastStore.addToast("Storage report copied", "success", 3000);
+};
 
 /* The scanner's designer lexicon, editable here; seeded server-side with
    sensible defaults. Mutating the array triggers the deep-watch auto-save. */

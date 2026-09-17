@@ -17,6 +17,7 @@ use tauri_specta::Event;
 
 use super::jobs::{self, JobKind};
 use super::paths;
+use super::storage_probe;
 use super::{
     db, dups, geometry, normalize, pack, scanner, BatchOutcome, CatalogEntry, CatalogFile,
     CatalogGroupResult, CatalogSearchResult, CatalogStats, DesignerCount, DuplicateGroup,
@@ -2282,6 +2283,19 @@ pub async fn merge_duplicate_files(
 }
 
 /// Probe whether the volume holding `path` supports hardlink merging.
+/// What a folder's storage actually supports, by doing it rather than
+/// guessing from the path. Written for #41: a network share's behaviour
+/// depends on the server's configuration, the client, and the mount, so
+/// the only honest answer comes from the volume itself — and it differs
+/// between a share reached from macOS and the same share from Windows.
+#[tauri::command]
+#[specta::specta]
+pub async fn probe_storage(path: String) -> Result<storage_probe::StorageReport, AppError> {
+    tauri::async_runtime::spawn_blocking(move || storage_probe::probe(Path::new(&path)))
+        .await
+        .map_err(|e| AppError::ConfigError(format!("Storage probe task failed: {e}")))?
+}
+
 /// Consulted by the duplicates panel so link-less filesystems (exFAT, some
 /// NAS mounts) get delete-only instead of a button that can't work.
 #[tauri::command]

@@ -386,6 +386,22 @@ async reclassifyDesigners() : Promise<Result<number, AppError>> {
 }
 },
 /**
+ * Probe whether the volume holding `path` supports hardlink merging.
+ * What a folder's storage actually supports, by doing it rather than
+ * guessing from the path. Written for #41: a network share's behaviour
+ * depends on the server's configuration, the client, and the mount, so
+ * the only honest answer comes from the volume itself — and it differs
+ * between a share reached from macOS and the same share from Windows.
+ */
+async probeStorage(path: string) : Promise<Result<StorageReport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("probe_storage", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * The configured catalog folders with their indexed footprint. Folders the
  * user added but never scanned report zero counts and no last_scan.
  */
@@ -737,7 +753,6 @@ async mergeDuplicateFiles(keepPath: string, duplicatePaths: string[]) : Promise<
 }
 },
 /**
- * Probe whether the volume holding `path` supports hardlink merging.
  * Consulted by the duplicates panel so link-less filesystems (exFAT, some
  * NAS mounts) get delete-only instead of a button that can't work.
  */
@@ -2218,6 +2233,28 @@ export type PreviewQuality =
  * The locked look at full settings.
  */
 "Studio"
+export type ProbeCheck = { id: string; label: string; status: ProbeStatus; detail: string; 
+/**
+ * Wall-clock cost, where the number means something.
+ */
+millis: number | null }
+export type ProbeStatus = 
+/**
+ * The operation worked.
+ */
+"Ok" | 
+/**
+ * The volume refused it, and Plinth has to work without it.
+ */
+"Unsupported" | 
+/**
+ * It worked, but in a way worth knowing about.
+ */
+"Warn" | 
+/**
+ * It should have worked and didn't.
+ */
+"Failed"
 export type ProgressStatus = { job_id: string; processed_files: number; total_files: number; processed_size_kb: number; total_size_kb: number; percent_size: number; percent_files: number; current_file: string }
 export type ProvisionCancelledStatus = { job_id: string }
 export type ProvisionCompletedStatus = { job_id: string; info: BlenderInfo }
@@ -2646,6 +2683,7 @@ cluster?: number;
  * outlines ragged/broken (needs a fine enough grid to resolve).
  */
 rough?: number; amount?: number }
+export type StorageReport = { path: string; checks: ProbeCheck[] }
 export type TagCount = { tag: string; count: number }
 
 /** tauri-specta globals **/
