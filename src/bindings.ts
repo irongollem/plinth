@@ -756,7 +756,7 @@ async mergeDuplicateFiles(keepPath: string, duplicatePaths: string[]) : Promise<
  * Consulted by the duplicates panel so link-less filesystems (exFAT, some
  * NAS mounts) get delete-only instead of a button that can't work.
  */
-async supportsFileLinks(path: string) : Promise<Result<boolean, AppError>> {
+async supportsFileLinks(path: string) : Promise<Result<LinkSupport, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("supports_file_links", { path }) };
 } catch (e) {
@@ -1920,6 +1920,17 @@ feature_scale?: number; carrier_mm?: number; relief_mm: number; layers?: Landsca
  * still deserialize (neutral grey — see `MaterialPalette::default`).
  */
 palette?: MaterialPalette }
+/**
+ * Whether merging is available on a volume, and what the volume said
+ * when it is not.
+ * 
+ * The reason is the point. "This drive can't merge files" leaves a user
+ * with nowhere to go; the same message carrying `Operation not supported
+ * (os error 45)` is something they can search, report, or compare
+ * against the same share seen from another machine — which is exactly
+ * the comparison #41 turns on.
+ */
+export type LinkSupport = { supported: boolean; reason: string | null }
 /**
  * A magnet as it will be pocketed into a plinth's boss. Drawn from the
  * user's magnet inventory (app settings), never from a hardcoded

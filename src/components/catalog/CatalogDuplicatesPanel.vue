@@ -12,8 +12,16 @@
         DUPLICATE GROUPS — MERGE TO SHARE ONE COPY, OR DELETE THE EXTRAS
       </span>
       <span class="flex-1"></span>
-      <span v-if="linkSupport === false" class="text-base-content/50">
-        this drive can't merge files — you can still delete copies
+      <span
+        v-if="linkSupport === false"
+        class="text-base-content/50"
+        :title="linkRefusal ?? undefined"
+      >
+        this drive can't merge files — you can still delete copies<template
+          v-if="linkRefusal"
+        >
+          ({{ linkRefusal }})</template
+        >
       </span>
       <button
         v-else-if="reclaimableGroups.length > 1"
@@ -112,6 +120,7 @@ const {
   showDups,
   reclaimableGroups,
   linkSupport,
+  linkRefusal,
   reclaimBusy,
   wastedBytes,
   keepChoice,

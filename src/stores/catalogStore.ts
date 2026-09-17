@@ -24,7 +24,7 @@ import { useBatchRender } from "../composables/useBatchRender";
 import { useCatalogJobs } from "../composables/useCatalogJobs";
 import { useFileSelect } from "../composables/useFileSelect";
 import { usePackStatus } from "../composables/usePackStatus";
-import { formatFileSize } from "../utils/format";
+import { describeError, formatFileSize } from "../utils/format";
 import { designerFilterLabel } from "../utils/designerFilter";
 import { openDirectoryPath } from "../utils/openDirectory";
 import { useReleasesStore } from "./releasesStore";
@@ -1823,11 +1823,21 @@ export const useCatalogStore = defineStore("catalog", () => {
   // exFAT support can't be guessed from names) — gates the merge buttons so
   // link-less volumes get delete-only instead of a button that can't work.
   const linkSupport = ref<boolean | null>(null);
+  /** What the volume said when it refused — worth showing, since "this
+      drive can't merge files" leaves nowhere to go and the same message
+      with the volume's own error can be searched or reported. */
+  const linkRefusal = ref<string | null>(null);
   watch(showDups, async (open) => {
     const probePath = dupGroups.value[0]?.paths[0];
     if (!open || linkSupport.value !== null || !probePath) return;
     const result = await commands.supportsFileLinks(probePath);
-    linkSupport.value = result.status === "ok" ? result.data : false;
+    if (result.status === "ok") {
+      linkSupport.value = result.data.supported;
+      linkRefusal.value = result.data.reason;
+    } else {
+      linkSupport.value = false;
+      linkRefusal.value = describeError(result.error);
+    }
   });
 
   const runMerge = async (group: DuplicateGroup) => {
@@ -2935,6 +2945,7 @@ export const useCatalogStore = defineStore("catalog", () => {
     keepChoice,
     reclaimBusy,
     linkSupport,
+    linkRefusal,
     wastedBytes,
     reclaimableGroups,
     reclaimableBytes,
