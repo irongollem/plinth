@@ -1015,14 +1015,22 @@ const probingPath = ref("");
 const runStorageProbe = async (path: string) => {
   probing.value = true;
   probingPath.value = path;
-  const result = await commands.probeStorage(path);
-  probing.value = false;
-  if (result.status === "error") {
+  try {
+    const result = await commands.probeStorage(path);
+    if (result.status === "error") {
+      probeReport.value = null;
+      toastStore.reportError("Storage check failed", result.error);
+      return;
+    }
+    probeReport.value = result.data;
+  } catch (error) {
+    // a thrown invoke would otherwise leave every button disabled behind
+    // a spinner that never stops
     probeReport.value = null;
-    toastStore.reportError("Storage check failed", result.error);
-    return;
+    toastStore.reportError("Storage check failed", error);
+  } finally {
+    probing.value = false;
   }
-  probeReport.value = result.data;
 };
 
 const pickAndProbe = async () => {
@@ -1050,8 +1058,12 @@ const copyProbeReport = async () => {
       (c) => `${probeStatusLabel(c.status)}\t${c.label}\t${c.detail}`,
     ),
   ].join("\n");
-  await navigator.clipboard.writeText(lines);
-  toastStore.addToast("Storage report copied", "success", 3000);
+  try {
+    await navigator.clipboard.writeText(lines);
+    toastStore.addToast("Storage report copied", "success", 3000);
+  } catch (error) {
+    toastStore.reportError("Failed to copy the report", error);
+  }
 };
 
 /* The scanner's designer lexicon, editable here; seeded server-side with

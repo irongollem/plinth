@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::error::AppError;
@@ -24,6 +24,10 @@ use crate::error::AppError;
 /// Bytes the duplicate scanner reads before deciding two files might
 /// match — the unit of work worth timing on a slow share.
 const PREFIX_BYTES: usize = 128 * 1024;
+/// How far the prefix-read sample will look for a real file before
+/// falling back to one of its own.
+const SAMPLE_DIR_BUDGET: usize = 24;
+const SAMPLE_ENTRY_BUDGET: usize = 256;
 /// Writes sampled for the read-after-write check.
 const VISIBILITY_SAMPLES: usize = 20;
 const VISIBILITY_TIMEOUT_MS: u128 = 5_000;
@@ -46,8 +50,6 @@ pub struct ProbeCheck {
     pub label: String,
     pub status: ProbeStatus,
     pub detail: String,
-    /// Wall-clock cost, where the number means something.
-    pub millis: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Type)]
@@ -62,7 +64,6 @@ fn check(id: &str, label: &str, status: ProbeStatus, detail: impl Into<String>) 
         label: label.into(),
         status,
         detail: detail.into(),
-        millis: None,
     }
 }
 
@@ -91,8 +92,16 @@ pub fn probe(dir: &Path) -> Result<StorageReport, AppError> {
             dir.display()
         )));
     }
-    let scratch = dir.join(format!(".plinth-probe-{}", std::process::id()));
-    std::fs::create_dir_all(&scratch).map_err(|e| {
+    // create_dir, not create_dir_all: the latter succeeds on a directory
+    // that already exists, which would pass the writability check without
+    // writing anything. The name carries a timestamp so a leftover folder
+    // from a crashed run cannot make this a false pass either.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let scratch = dir.join(format!(".plinth-probe-{}-{}", std::process::id(), stamp));
+    std::fs::create_dir(&scratch).map_err(|e| {
         AppError::IoError(format!(
             "Cannot write to '{}': {} — a read-only mount can be scanned, but not packed, \
              merged or rendered into",
@@ -105,16 +114,25 @@ pub fn probe(dir: &Path) -> Result<StorageReport, AppError> {
         "writable",
         "Writable",
         ProbeStatus::Ok,
-        "created and removed a folder here",
+        "created a folder here",
     )];
     checks.push(hardlinks(&scratch));
     checks.push(identity(&scratch));
     checks.push(case_sensitivity(&scratch));
     checks.push(read_after_write(&scratch));
     checks.push(atomic_replace(&scratch));
-    checks.push(prefix_read(&scratch));
+    checks.push(prefix_read(dir, &scratch));
 
-    std::fs::remove_dir_all(&scratch).ok();
+    // Reported, not discarded: this runs inside someone's library, and a
+    // probe folder left behind is litter they would have to find.
+    if let Err(e) = std::fs::remove_dir_all(&scratch) {
+        checks.push(check(
+            "cleanup",
+            "Cleanup",
+            ProbeStatus::Failed,
+            format!("could not remove {}: {}", scratch.display(), e),
+        ));
+    }
     Ok(StorageReport {
         path: dir.to_string_lossy().into_owned(),
         checks,
@@ -224,9 +242,17 @@ fn case_sensitivity(scratch: &Path) -> ProbeCheck {
     }
 }
 
-/// Rendering and preview promotion stat a file straight after writing it.
-/// A share that reports it missing for a moment turns that into a spurious
-/// failure.
+/// Rendering and preview promotion stat a file straight after it is
+/// written.
+///
+/// What this measures is narrower than it looks, and the difference
+/// matters: the write and the stat happen in ONE process, so a client
+/// that caches its own metadata answers from that cache and the share is
+/// never asked. A clean result here therefore rules out nothing about the
+/// case #41 actually describes — Blender writing a PNG that Plinth then
+/// stats, which crosses a process boundary and can miss the cache
+/// entirely. Only a delay visible even to the writing process shows up
+/// here, and that is the loudest possible version of the problem.
 fn read_after_write(scratch: &Path) -> ProbeCheck {
     let mut immediate = 0usize;
     let mut worst_ms = 0u128;
@@ -253,10 +279,22 @@ fn read_after_write(scratch: &Path) -> ProbeCheck {
         if attempts == 1 {
             immediate += 1;
         }
+        if !std::fs::metadata(&path).is_ok_and(|m| m.len() == 4096) {
+            return check(
+                "read_after_write",
+                "Read-after-write",
+                ProbeStatus::Failed,
+                format!(
+                    "a file was still not readable back {} ms after being written —                      renders and previews will fail here",
+                    VISIBILITY_TIMEOUT_MS
+                ),
+            );
+        }
         worst_ms = worst_ms.max(started.elapsed().as_millis());
     }
     let detail = format!(
-        "{}/{} writes were visible on the first check (worst wait {} ms)",
+        "{}/{} visible to the writing process on the first check (worst wait \
+         {} ms) — says nothing about another process reading them",
         immediate, VISIBILITY_SAMPLES, worst_ms
     );
     let status = if immediate == VISIBILITY_SAMPLES {
@@ -304,7 +342,32 @@ fn atomic_replace(scratch: &Path) -> ProbeCheck {
 
 /// The duplicate scanner's unit of work. On a library of any size this
 /// number, not the catalog, is what a scan's runtime is made of.
-fn prefix_read(scratch: &Path) -> ProbeCheck {
+///
+/// Timed against a file that was already on the volume rather than one
+/// just written: reading back your own fresh write measures the page
+/// cache and the `open()` round trip, not what a scan pays per candidate.
+/// The scratch file is the fallback when the folder holds nothing big
+/// enough, and the detail says which was used, because the two numbers
+/// mean different things.
+fn prefix_read(dir: &Path, scratch: &Path) -> ProbeCheck {
+    // A file the volume already held, if one can be read: its prefix has
+    // not just passed through this machine's cache on the way in.
+    if let Some(elapsed) = existing_sample(dir).as_deref().and_then(time_prefix) {
+        return check(
+            "prefix_read",
+            "Prefix read",
+            ProbeStatus::Ok,
+            format!(
+                "read {} KiB from a file already on this volume in {} ms — a duplicate \
+                 scan pays this per candidate",
+                PREFIX_BYTES / 1024,
+                elapsed.as_millis()
+            ),
+        );
+    }
+
+    // Nothing here to sample, or the sample would not open — neither says
+    // anything about the volume's speed, so time one of our own and say so.
     let path = scratch.join("prefix.bin");
     let payload = vec![b'p'; PREFIX_BYTES * 2];
     let written = std::fs::File::create(&path).and_then(|mut f| {
@@ -319,31 +382,67 @@ fn prefix_read(scratch: &Path) -> ProbeCheck {
             "could not write the probe file",
         );
     }
-    let started = Instant::now();
-    let mut buffer = vec![0u8; PREFIX_BYTES];
-    let read = std::fs::File::open(&path).and_then(|mut f| f.read_exact(&mut buffer));
-    let elapsed = started.elapsed();
-    match read {
-        Ok(()) => ProbeCheck {
-            millis: Some(elapsed.as_millis() as u32),
-            ..check(
-                "prefix_read",
-                "Prefix read",
-                ProbeStatus::Ok,
-                format!(
-                    "read {} KiB in {} ms — a duplicate scan pays this per candidate",
-                    PREFIX_BYTES / 1024,
-                    elapsed.as_millis()
-                ),
-            )
-        },
-        Err(e) => check(
+    match time_prefix(&path) {
+        Some(elapsed) => check(
+            "prefix_read",
+            "Prefix read",
+            ProbeStatus::Warn,
+            format!(
+                "read {} KiB in {} ms, but from a file written moments ago — a real \
+                 scan reads colder data than this",
+                PREFIX_BYTES / 1024,
+                elapsed.as_millis()
+            ),
+        ),
+        None => check(
             "prefix_read",
             "Prefix read",
             ProbeStatus::Failed,
-            format!("{}", e),
+            "could not read back a file this probe had just written",
         ),
     }
+}
+
+fn time_prefix(path: &Path) -> Option<std::time::Duration> {
+    let started = Instant::now();
+    let mut buffer = vec![0u8; PREFIX_BYTES];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut buffer))
+        .ok()
+        .map(|()| started.elapsed())
+}
+
+/// A file already sitting on the volume, big enough to read a full prefix
+/// from. Shallow and bounded: this is a timing sample, not a search, and
+/// it runs against libraries with hundreds of thousands of files.
+fn existing_sample(dir: &Path) -> Option<PathBuf> {
+    let mut queue = std::collections::VecDeque::from([dir.to_path_buf()]);
+    let mut seen_dirs = 0usize;
+    while let Some(next) = queue.pop_front() {
+        seen_dirs += 1;
+        if seen_dirs > SAMPLE_DIR_BUDGET {
+            return None;
+        }
+        let entries = std::fs::read_dir(&next).ok()?;
+        for entry in entries.flatten().take(SAMPLE_ENTRY_BUDGET) {
+            // Hidden entries are skipped on both sides. A macOS-touched
+            // share carries a .DS_Store big enough to qualify as a sample
+            // and unreadable when you try — a property of that file, not
+            // of the volume, so timing it would report a false failure.
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_file() && meta.len() >= PREFIX_BYTES as u64 {
+                return Some(path);
+            }
+            if meta.is_dir() {
+                queue.push_back(path);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -370,7 +469,9 @@ mod tests {
         assert_eq!(status("identity"), ProbeStatus::Ok);
         assert_eq!(status("read_after_write"), ProbeStatus::Ok);
         assert_eq!(status("atomic_replace"), ProbeStatus::Ok);
-        assert_eq!(status("prefix_read"), ProbeStatus::Ok);
+        // nothing on this volume to sample, so the timing is flagged as
+        // measured against the probe's own fresh write
+        assert_eq!(status("prefix_read"), ProbeStatus::Warn);
         // case sensitivity is a property of the volume, not a pass/fail —
         // macOS ships case-insensitive by default, Linux does not
         assert!(matches!(
@@ -385,6 +486,34 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert!(leftovers.is_empty(), "left behind: {:?}", leftovers);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A real file on the volume is the sample worth timing — reading back
+    /// a write from moments ago measures this machine's cache.
+    #[test]
+    fn a_file_already_present_is_preferred_over_a_fresh_write() {
+        let dir = std::env::temp_dir().join(format!("plinth_probe_sample_{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("model.stl"), vec![b's'; PREFIX_BYTES + 1]).unwrap();
+        // a macOS-touched share carries one of these, big enough to qualify
+        // and unreadable when you try
+        std::fs::write(dir.join(".DS_Store"), vec![b'd'; PREFIX_BYTES + 1]).unwrap();
+
+        let report = probe(&dir).unwrap();
+        let prefix = report
+            .checks
+            .iter()
+            .find(|c| c.id == "prefix_read")
+            .unwrap();
+        assert_eq!(prefix.status, ProbeStatus::Ok);
+        assert!(
+            prefix.detail.contains("already on this volume"),
+            "{}",
+            prefix.detail
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
