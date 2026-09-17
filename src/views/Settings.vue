@@ -918,14 +918,33 @@ const addUnique = <T>(
 /* The scanner's designer lexicon, editable here; seeded server-side with
    sensible defaults. Mutating the array triggers the deep-watch auto-save. */
 const newDesigner = ref("");
-const addDesigner = () => {
+const addDesigner = async () => {
   const name = newDesigner.value.trim();
   newDesigner.value = "";
   if (!name) return;
-  settings.value.known_designers = addUnique(
-    settings.value.known_designers ?? [],
+  const before = settings.value.known_designers ?? [];
+  const after = addUnique(
+    before,
     name,
     (d) => d.toLowerCase() === name.toLowerCase(),
+  );
+  if (after === before) return;
+  settings.value.known_designers = after;
+
+  // Save before reclassifying: the backend reads the lexicon from
+  // settings, so the debounced auto-save would otherwise race it and the
+  // new studio would be missing from the list it matches against.
+  await saveSettings();
+  const result = await commands.reclassifyDesigners();
+  if (result.status === "error") {
+    toastStore.reportError("Couldn't reclassify existing models", result.error);
+    return;
+  }
+  toastStore.addToast(
+    result.data
+      ? `Named ${result.data} previously unidentified model${result.data === 1 ? "" : "s"} — no rescan needed`
+      : `No unidentified models match "${name}" yet`,
+    result.data ? "success" : "info",
   );
 };
 const removeDesigner = (name: string) => {
