@@ -714,9 +714,9 @@ pub(crate) fn alnum_key(text: &str) -> String {
 ///
 /// `root` stops the walk, so a studio name sitting above the catalog
 /// folder (a home directory, a mount point) never claims everything under
-/// it. A row whose root is unknown — pre-multi-root, or moved between
-/// folders — walks to the top instead, which is the same answer the
-/// scanner gave when that row was indexed.
+/// it. Passing `None` removes that bound, which is only ever right for a
+/// path with no catalog folder to bound it — callers that have one, or can
+/// find one, are expected to pass it.
 pub(crate) fn designer_from_path(
     root: Option<&Path>,
     dir_path: &str,
@@ -922,6 +922,58 @@ fn nearest_release<'a>(
 mod tests {
     use super::*;
     use std::fs;
+
+    /// The bound is the point of the `root` argument: a studio named
+    /// somewhere ABOVE the catalog folder must not claim every model
+    /// inside it. Reclassification reaches this with rows whose own root
+    /// is unknown, which is where getting it wrong would be silent and
+    /// library-wide.
+    #[test]
+    fn the_ancestor_walk_stops_at_the_catalog_root() {
+        let designers = vec!["DTL".to_string()];
+        // the studio names a folder ABOVE the catalog root
+        assert_eq!(
+            designer_from_path(
+                Some(Path::new("/Users/jeffrey/DTL/library")),
+                "/Users/jeffrey/DTL/library/newt",
+                &designers
+            ),
+            None
+        );
+        // unbounded, the same path matches — which is why callers pass one
+        assert_eq!(
+            designer_from_path(None, "/Users/jeffrey/DTL/library/newt", &designers),
+            Some("DTL".to_string())
+        );
+        // and inside the root it matches either way
+        assert_eq!(
+            designer_from_path(
+                Some(Path::new("/library")),
+                "/library/DTL/newt",
+                &designers
+            ),
+            Some("DTL".to_string())
+        );
+    }
+
+    /// Punctuation and spacing are folded out on both sides, so a folder
+    /// named for a studio matches the studio however either is written.
+    #[test]
+    fn matching_ignores_punctuation_and_spacing() {
+        let designers = vec!["Dungeon Masters Stash".to_string()];
+        for folder in [
+            "/lib/dungeon_masters_stash/newt",
+            "/lib/Dungeon-Masters-Stash/newt",
+            "/lib/DungeonMastersStash/newt",
+        ] {
+            assert_eq!(
+                designer_from_path(Some(Path::new("/lib")), folder, &designers),
+                Some("Dungeon Masters Stash".to_string()),
+                "{}",
+                folder
+            );
+        }
+    }
 
     #[test]
     fn scans_metadata_and_heuristic_models() {

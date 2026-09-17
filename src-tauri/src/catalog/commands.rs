@@ -1374,6 +1374,13 @@ pub async fn reclassify_designers(app_handle: AppHandle) -> Result<u32, AppError
         .filter(|list| !list.is_empty())
         .unwrap_or_else(crate::settings::default_designers);
 
+    // Rows indexed before multi-root carry no root of their own. Falling
+    // back to "no bound" would let a studio named somewhere above the
+    // catalog folder — a home directory, a mount point — claim every model
+    // under it, which is not what the scanner would have done: it always
+    // had a root. The configured roots supply the missing bound.
+    let roots = normalized_roots(&settings);
+
     // Claimed like any other catalog writer: a scan running with the OLD
     // lexicon would otherwise commit its own answers on top of these.
     let permit = jobs::claim(JobKind::Reclassify)?;
@@ -1383,7 +1390,10 @@ pub async fn reclassify_designers(app_handle: AppHandle) -> Result<u32, AppError
         let assignments: Vec<(String, String)> = db::unidentified_models(&conn)?
             .into_iter()
             .filter_map(|(dir_path, root)| {
-                scanner::designer_from_path(root.as_deref().map(Path::new), &dir_path, &designers)
+                let bound = root
+                    .clone()
+                    .or_else(|| roots.iter().find(|r| paths::is_under(&dir_path, r)).cloned())?;
+                scanner::designer_from_path(Some(Path::new(&bound)), &dir_path, &designers)
                     .map(|designer| (dir_path, designer))
             })
             .collect();
