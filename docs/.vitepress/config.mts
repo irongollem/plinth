@@ -6,7 +6,10 @@ export default defineConfig({
   title: "Plinth",
   description:
     "An opinionated desktop tool for cataloging, rendering, and distributing 3D-printable model libraries",
-  base: "/plinth/",
+  // Served from plinth.crocode.nl, so assets live at the root. On the
+  // old irongollem.github.io/plinth/ path this had to be "/plinth/";
+  // leaving it there would 404 every asset at the custom domain.
+  base: "/",
   cleanUrls: true,
   lastUpdated: true,
   themeConfig: {
