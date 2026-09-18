@@ -139,6 +139,28 @@ file names, poses/variants from folder structure, and the designer is
 matched against the user-editable lexicon in settings
 (`known_designers`).
 
+Changing that lexicon does not require another walk. `reclassify_designers`
+replays the same ancestor-segment matcher over indexed `dir_path` values
+for models the scanner left without a designer, bounded by each row's
+catalog root. It is additive by construction: `models.designer` stores the
+resolved value with no record of where it came from, so a row an earlier
+scan attributed cannot be told apart from a metadata-stated one and is
+never revisited.
+
+## Job coordination: one writer at a time
+
+Every background job that mutates the catalog — scan, duplicate, geometry,
+pack/unpack, batch render — claims a permit before it starts. A job
+declares what it does (writes catalog rows, moves the bytes another job is
+reading, or only reads rows) and the coordinator derives the rest, so two
+row-writers never overlap while opening a packed model still works during
+a long dedupe. The claim and the registration happen under one lock, and
+the permit is RAII: an early `?`, a cancellation or a panic all release it.
+
+User-initiated work is refused by name ("A catalog scan is running — …").
+Work Plinth starts for itself, like the reindex after an import, waits for
+the permit instead.
+
 ## Search: FTS5 + facets, grouped
 
 Query tokens are quoted with a trailing `*` for prefix match. Tag
